@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.log
+*.bak
+*.tmp
+config/user_data.json
+config/user_data.json.bak
+/marks.json
+/marks.json.bak
+构建/
+发布包/
+pyinstaller-work/
+pyinstaller-dist/
+*.spec
+.venv/
+venv/

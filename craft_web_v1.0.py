@@ -1,0 +1,19117 @@
+### 1. 导入与常量
+import webview, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys
+import urllib.parse, urllib.request, urllib.error, zipfile, tempfile, subprocess, io
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from datetime import datetime, timezone
+from functools import wraps
+
+
+def _install_webview_disposal_guard():
+    """Suppress only the known Edge/WebView2 close-race callback.
+
+    PyWebView's EdgeChromium bridge logs an exception when an API call finishes
+    after WinForms has disposed WebView2.  The browser is already gone, so a
+    JavaScript response is meaningless; logging it as a script failure is both
+    noisy and misleading.  Other JavaScript/bridge failures keep their normal
+    logging path.
+    """
+    try:
+        import webview.platforms.edgechromium as edgechromium
+        edge_class = edgechromium.EdgeChrome
+        original = edge_class.evaluate_js
+        if getattr(original, "_ctw_disposal_guard", False):
+            return
+
+        @wraps(original)
+        def guarded_evaluate_js(self, script, parse_json):
+            result = None
+            done = edgechromium.Semaphore(0)
+
+            def callback(raw):
+                nonlocal result
+                if parse_json and raw is not None:
+                    try:
+                        result = edgechromium.json.loads(raw)
+                    except Exception:
+                        result = raw
+                else:
+                    result = raw
+                done.release()
+
+            bridge = getattr(self, "webview", None)
+            try:
+                if bridge is None or bool(getattr(bridge, "IsDisposed", False)) or bool(getattr(bridge, "Disposing", False)):
+                    return None
+                bridge.Invoke(
+                    edgechromium.Func[edgechromium.Object](
+                        lambda: bridge.ExecuteScriptAsync(script).ContinueWith(
+                            edgechromium.Action[edgechromium.Task[edgechromium.String]](
+                                lambda task: callback(edgechromium.json.loads(task.Result))
+                            ),
+                            self.syncContextTaskScheduler,
+                        )
+                    )
+                )
+                done.acquire()
+            except Exception as exc:
+                detail = (type(exc).__name__ + " " + str(exc)).lower()
+                if "objectdisposed" in detail or "已释放的对象" in detail:
+                    return None
+                edgechromium.logger.exception("Error occurred in script")
+                done.release()
+            return result
+
+        guarded_evaluate_js._ctw_disposal_guard = True
+        edge_class.evaluate_js = guarded_evaluate_js
+    except Exception:
+        # A different PyWebView renderer may not expose EdgeChrome.  The app
+        # still runs normally; its own lifecycle guards remain active.
+        pass
+
+
+_install_webview_disposal_guard()
+
+
+DEFAULT_GAME_ROOT = r"D:\Steam\steamapps\common\CraftTheWorld"
+APP_VERSION = "1.0.0"
+APP_ID = "crafttheworld-modifier"
+UPDATE_FEED_ENV = "CTW_UPDATE_FEED_URL"
+UPDATE_RELEASE_API_URL = ""
+UPDATE_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+UPDATE_MAX_PACKAGE_BYTES = 300 * 1024 * 1024
+UPDATE_ALLOWED_SOURCE_NAMES = frozenset({
+    "block_data.py", "item_translations.txt", "config/marks.json",
+})
+UPDATE_ALLOWED_SOURCE_PREFIXES = ("craft_web_", "ui_v")
+UPDATE_ALLOWED_EXE_NAMES = frozenset({"CraftWorldModifier.exe"})
+
+
+def _application_dir():
+    """Return the directory beside the source script or packaged EXE."""
+    try:
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(os.path.abspath(sys.executable))
+    except Exception:
+        pass
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _resource_path(name):
+    """Resolve release resources, with a root-level development fallback."""
+    filename = str(name or "").strip()
+    if not filename:
+        return os.path.join(_application_dir(), "")
+    if getattr(sys, "frozen", False):
+        candidates = [
+            os.path.join(_application_dir(), "resources", filename),
+            os.path.join(_application_dir(), filename),
+        ]
+    else:
+        # In a source checkout the root files remain the edit/test targets;
+        # the mirrored resources directory is used by the packaged EXE.
+        candidates = [
+            os.path.join(_application_dir(), filename),
+            os.path.join(_application_dir(), "resources", filename),
+        ]
+    try:
+        bundle_dir = getattr(sys, "_MEIPASS", "")
+        if bundle_dir:
+            candidates.insert(0, os.path.join(bundle_dir, "resources", filename))
+            candidates.insert(1, os.path.join(bundle_dir, filename))
+    except Exception:
+        pass
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+def _ensure_resource_import_path():
+    """Make resources/block_data.py importable in an onedir package."""
+    resource_file = _resource_path("block_data.py")
+    resource_dir = os.path.dirname(resource_file)
+    if resource_dir and resource_dir not in sys.path:
+        sys.path.insert(0, resource_dir)
+
+
+def _user_data_root():
+    """Return the per-user data directory outside the portable EXE folder."""
+    local_app_data = str(os.environ.get("LOCALAPPDATA") or "").strip()
+    if not local_app_data:
+        local_app_data = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(os.path.abspath(local_app_data), "CraftWorldModifier")
+
+
+def _config_dir():
+    """Return the hidden/system per-user configuration directory."""
+    return os.path.join(_user_data_root(), "config")
+
+
+def _package_config_dir():
+    """Return the read-only package config directory beside the source/EXE."""
+    return os.path.join(_application_dir(), "config")
+
+
+def _hide_user_data_root(path):
+    """Mark the per-user data directory hidden on Windows when possible."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x2)
+    except Exception:
+        pass
+
+
+def _read_json_object(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+# Only stable, necessary defaults belong in the package. Per-user values are
+# written to %LOCALAPPDATA%\CraftWorldModifier\config\user_data.json and are
+# intentionally not copied into an EXE release directory.
+DEFAULT_CONFIG = {
+    "local_game_root": DEFAULT_GAME_ROOT,
+    "categories": [],
+    "category_overrides": {},
+    "custom_translations": {},
+    "dwarf_names": {},
+    "fav_items": [],
+    "favorite_items": [],
+    "feature_presets": [],
+    "item_quick_settings": {},
+    "mana_max_lock": {"enabled": False, "target": None},
+    "map_pins": {},
+    "proof_text": {},
+    "scrapped_items": [],
+    "verified_items": [],
+    "verified_notes": {},
+    "world_specific": [],
+    "portal_director_presets": {},
+    "gold_economy_presets": {},
+    "pandora_override": {},
+    "recipe_edit_log": [],
+    "default_feature_preset": "",
+}
+
+
+def _merge_config(defaults, user):
+    """Merge user-owned values over stable defaults."""
+    result = dict(defaults or {})
+    if not isinstance(user, dict):
+        return result
+    for key, value in user.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            merged = dict(result[key])
+            merged.update(value)
+            result[key] = merged
+        else:
+            result[key] = value
+    return result
+
+
+def _initial_user_config():
+    """Read user config early enough to select the game root at import time."""
+    candidates = [
+        os.path.join(_config_dir(), "user_data.json"),
+        os.path.join(_config_dir(), "user_data.json.bak"),
+        os.path.join(_application_dir(), "config", "user_data.json"),
+        os.path.join(_application_dir(), "config", "user_data.json.bak"),
+        os.path.join(_application_dir(), "marks.json"),
+        os.path.join(_application_dir(), "marks.json.bak"),
+    ]
+    for path in candidates:
+        value = _read_json_object(path)
+        if value is not None:
+            return value
+    return {}
+
+
+def _saved_game_root():
+    """Use a manually selected game directory on the next trainer start."""
+    try:
+        configured = str((_initial_user_config() or {}).get("local_game_root") or "").strip()
+        if configured and os.path.isdir(os.path.join(configured, "data")):
+            return os.path.abspath(configured)
+    except Exception:
+        pass
+    return DEFAULT_GAME_ROOT
+
+
+GAME_ROOT = _saved_game_root()
+GAME_DATA_DIR = os.path.join(GAME_ROOT, "data")
+
+# Built-in Chinese name translation table.  Steam V1 Workers store only an
+# index, so the trainer must translate it locally; this deliberately avoids a
+# runtime dependency on lang/Chinese/data/names*.txt.
+V1_MALE_DWARF_NAMES = (
+    "雅各布", "托雷克", "雷内", "凡尼", "克莱姆", "内森", "卡尔", "马尔", "洛根", "佛瑞林", "卡尔", "塔尔查", "伦恩", "林瑞", "黑根", "哈恩", "洛尔卡", "米什", "布雷尼", "贝文", "洛恩", "佩顿", "达韦尔", "杰洛特", "戈丹", "马尔", "德龙", "洛恩", "德龙", "卡洛", "吕林", "迪根", "戈耳迪", "利奥", "达韦尔", "佛罗兰", "波林", "马尔", "卡尔森", "塔尔查", "福里", "海伊", "迪根", "佛瑞林", "诺里", "卡德里", "日拉克", "欧文", "黑根", "伯莱尼", "德朗", "莫卡", "德尔汉", "瑟罗尔", "迪根", "伦恩", "米什", "麦克斯", "塔尔查", "卡尔", "格鲁", "马内", "瑞恩", "戴恩", "波林", "卡尔", "波林", "弗洛伊", "查斯", "莱利", "德夫尔", "托兰", "鲁利", "杰洛特", "该隐", "布雷尼", "雷利", "查斯", "波林", "托里", "杜林", "格洛因", "诺里", "波利", "诺里", "罗因", "乌特尔", "杜林", "佩顿", "德韦恩", "布雷恩", "波隆", "哈恩", "阿尔汉", "戴恩", "哈恩", "菲利", "佛瑞林", "佩顿", "西拉克", "博林", "福里", "阿尔汉", "尼恩", "鲁利", "凯恩", "纳安",
+)
+V1_FEMALE_DWARF_NAMES = (
+    "艾达迈", "阿德莲娜", "阿戴恩", "艾格妮莎", "阿莉娜", "安妮塔", "安妮丽丝", "安妮", "阿莎", "艾斯塔", "阿斯特丽德", "奥登", "芭布萝", "比吉特", "贝吉塔", "博茜", "波迪尔", "博格希尔德", "波瑞塔", "布伦希尔特", "卡崔娜", "达格内", "达格妮", "多罗蒂", "多尔特", "多尔莎", "多尔塞", "艾琳", "伊丽莎贝", "艾瑞卡", "艾斯特", "伊芙琳娜", "伊芙琳", "弗瑞达", "格德", "格尔达", "古德沦", "古希尔德", "古希尔达", "古娜尔", "古沃尔", "海德薇", "海伦妮", "享瑞克", "希尔达", "希尔德", "胡尔达", "艾达", "英加", "英格伯", "英格戈德", "英格丽德", "乔瑞", "乔瑞恩", "卡佳", "卡洛丽娜", "卡莎琳娜", "卡特琳", "克拉拉", "克里斯汀", "克里斯蒂娜", "莱蒂西亚", "丽丝贝特", "丽芙", "丽娃", "玛格达蕾娜", "玛亚", "玛格丽特", "玛吉特", "玛特", "玛茜尔达", "玛蒂尔达", "迈克蒂尔达", "拉格娜", "朗西尔德", "拉克尔", "露娜", "珊娜", "露娜", "西格丽德", "西格丽恩", "西蒙妮", "西瑞", "索尼娅", "斯蒂娜", "苏珊娜", "斯万希尔德", "缇克拉", "索拉", "赛拉", "托拉", "托博伊", "托德", "托迪丝", "托希尔德", "托芙", "崔恩", "图丽德", "泰雅", "乌拉", "乌尔里卡", "瓦尔博格", "温德拉", "维格蒂丝", "维多利亚", "维尔海玛", "薇尔玛", "维维", "维维安妮",
+)
+
+
+def _clean_display_label(value):
+    """Return a safe UI label, rejecting broken UTF-8 replacement text."""
+    label = " ".join(str(value or "").strip().split())
+    if not label or "\ufffd" in label or label.startswith("%"):
+        return ""
+    return label
+
+
+def _load_mod_resource_translations():
+    """Load Chinese resource titles supplied by installed mods.
+
+    Base-game item_translations.txt remains the primary source.  This fills
+    otherwise untranslated resource IDs such as mod equipment without trusting
+    the game's often-garbled in-memory display strings.
+    """
+    result = {}
+    mods_dir = os.path.join(GAME_ROOT, "mods")
+    if not os.path.isdir(mods_dir):
+        return result
+    try:
+        for root, _dirs, files in os.walk(mods_dir):
+            if "craft_resources.csv" not in files:
+                continue
+            path = os.path.join(root, "craft_resources.csv")
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                rows = csv.reader(handle, delimiter=";")
+                header = next(rows, [])
+                try:
+                    chinese_column = [str(cell).strip().lower() for cell in header].index("chinese")
+                except ValueError:
+                    chinese_column = 10
+                for row in rows:
+                    if not row:
+                        continue
+                    key = str(row[0] or "").strip()
+                    if not key.lower().endswith("t"):
+                        continue
+                    label = _clean_display_label(row[chinese_column] if chinese_column < len(row) else "")
+                    if label:
+                        result.setdefault(key[:-1].lower(), label)
+    except Exception:
+        # Translation support must never make the trainer fail to start.
+        pass
+    return result
+
+
+GAME_RESOURCE_TRANSLATIONS = _load_mod_resource_translations()
+
+
+def _load_resource_id_whitelist():
+    """Read legitimate resource IDs from the installed base game and mods.
+
+    The live ResourceSlot vector contains a few adjacent implementation slots.
+    They can occasionally contain an ASCII-looking residue, so the scanner
+    must not accept a string merely because it matches an identifier regex.
+    """
+    ids = set()
+    roots = [GAME_DATA_DIR]
+    mods_dir = os.path.join(GAME_ROOT, "mods")
+    if os.path.isdir(mods_dir):
+        for current, _dirs, _files in os.walk(mods_dir):
+            if os.path.basename(current).lower() == "data":
+                roots.append(current)
+    for root in roots:
+        try:
+            names = [name for name in os.listdir(root)
+                     if re.fullmatch(r"craft_resources(?:_(\d+))?\.xml", name, re.I)]
+        except OSError:
+            continue
+        for name in names:
+            try:
+                tree = ET.parse(os.path.join(root, name))
+                for resource in tree.getroot().iter("resource"):
+                    item_id = str(resource.get("name") or "").strip().lower()
+                    if item_id:
+                        ids.add(item_id)
+            except (OSError, ET.ParseError, UnicodeError):
+                continue
+    # Translation tables are a fallback for legacy/mod resource definitions
+    # that may have malformed XML but are still known to the installed game.
+    ids.update(str(key).strip().lower() for key in GAME_RESOURCE_TRANSLATIONS if str(key).strip())
+    return ids
+
+
+GAME_RESOURCE_IDS = _load_resource_id_whitelist()
+
+
+def _is_known_runtime_item_id(name_en):
+    name = str(name_en or "").strip().lower()
+    if not name or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        return False
+    # If local definitions could not be read, retain the strict lexical check
+    # rather than presenting an empty inventory. In the normal installed-game
+    # case this blocks stale/adjacent strings such as e582e662e98PTXKernel.
+    return not GAME_RESOURCE_IDS or name in GAME_RESOURCE_IDS
+
+
+def _load_creature_definition_health():
+    """Read creature IDs and their configured base HP from local data files.
+
+    Creature names are not present in the Chinese language pack as editable
+    text, but ``data/creatures*.xml`` is the authoritative source for the
+    raw IDs and base parameters used by this installed game/mod set.  This is
+    read-only metadata; runtime values continue to come from live objects.
+    """
+    result = {}
+    roots = [GAME_DATA_DIR]
+    mods_dir = os.path.join(GAME_ROOT, "mods")
+    if os.path.isdir(mods_dir):
+        for current, _dirs, _files in os.walk(mods_dir):
+            if os.path.basename(current).lower() == "data":
+                roots.append(current)
+    for root in roots:
+        try:
+            files = [name for name in os.listdir(root)
+                     if re.fullmatch(r"creatures(?:_\d+)?\.xml", name, re.I)]
+        except OSError:
+            continue
+        for name in files:
+            try:
+                tree = ET.parse(os.path.join(root, name))
+                for creature in tree.getroot().iter("creature"):
+                    creature_id = str(creature.get("name") or "").strip().lower()
+                    if not creature_id:
+                        continue
+                    health = None
+                    params = creature.find("params")
+                    if params is not None:
+                        for item in params:
+                            if str(item.get("name") or "").lower() == "healt":
+                                try:
+                                    health = float(item.get("value"))
+                                except (TypeError, ValueError):
+                                    pass
+                                break
+                    if health is not None:
+                        result[creature_id] = health
+            except (OSError, ET.ParseError):
+                continue
+    return result
+
+
+CREATURE_DEFINITION_HEALTH = _load_creature_definition_health()
+
+
+### 2. 游戏内存偏移常量
+
+
+# 通用常量
+MODULE_NAME = "CraftWorld.exe"
+
+# V2 资源/物品偏移
+V2_RESOURCE_MGR = 0xCA065C
+V2_RES_ARR_BASE = 0x1C
+V2_RES_ARR_END = 0x20
+V2_RES_ELEM_SIZE = 0x2D0
+V2_ELEM_NAME    = 0x64
+V2_ELEM_IDX     = 0x58
+V2_ELEM_KEY1 = 0x94
+V2_ELEM_ENC1 = 0x204
+V2_ELEM_KEY2 = 0x208
+V2_ELEM_ENC2 = 0x20C
+V2_SHOP_PRICE   = 0x1A0
+V2_SHOP_QTY     = 0x19C
+V2_GOLD_INDEX = 188
+V2_GOLD_VAL_OFF = 0x158
+V2_GOLD_ENC = 0x204
+V2_GOLD_KEY = 0x94
+
+# V1 物品偏移
+ITEM_BASE_OFFSET = 0xDE3BB0
+ITEM_ARR_PTR     = 0x1C
+ITEM_ARR_END     = 0x20
+SLOT_SIZE        = 0x290
+OFF_NAME_EN   = 0x5C
+OFF_SLOT_IDX  = 0x06C
+OFF_DEC1      = 0x08C
+OFF_NAME_CN   = 0x134
+OFF_ENC1      = 0x1E4
+OFF_DEC2      = 0x1E8
+OFF_ENC2      = 0x1EC
+OFF_SHOP_PRICE  = 0x198
+OFF_SHOP_QTY    = 0x194
+
+# Steam V1 Worker: zero-based index into names.txt / names_female.txt.
+V1_DWARF_NAME_INDEX = 0x18C
+
+# Steam V1 Worker personal-skill layout.  ``+0x888`` is a
+# std::vector<PersonalSkillRecord>; each record is 0x2C bytes:
+#   +0x00 -> skill-definition node -> definition object
+#   +0x04 -> duplicated SecureFloat (cipher1, cipher2, key1, key2)
+# The definition keeps its short ASCII skill id at +0x58.  These offsets were
+# validated against the native book upgrade path (Mishi: miller 10 -> 19).
+V1_DWARF_SKILL_VECTOR_OFF = 0x888
+V1_DWARF_SKILL_RECORD_SIZE = 0x2C
+V1_DWARF_SKILL_VALUE_OFF = 0x04
+V1_DWARF_SKILL_DEF_ID_OFF = 0x58
+V1_PERSONAL_SKILL_TITLES = {
+    "logger": "伐木", "miner": "采矿", "fisher": "钓鱼",
+    "swordsman": "战斗", "archer": "射击", "cook": "烹饪",
+    "smith": "锻造", "carpenter": "木工", "mage": "法师",
+    "miller": "碾磨", "hunter": "狩猎", "climber": "攀爬",
+    "swimmer": "游泳", "stonecutter": "石匠",
+}
+# The game keeps the definition nodes in this exact compact table.  It is
+# discovered from an existing live personal-skill record and then checked
+# against every ASCII id before it is ever used for an insertion.
+V1_PERSONAL_SKILL_ORDER = (
+    "logger", "miner", "fisher", "swordsman", "archer", "cook", "smith",
+    "carpenter", "mage", "miller", "hunter", "climber", "swimmer",
+    "stonecutter",
+)
+V1_DWARF_SKILL_NODE_STRIDE = 0x88
+
+# Steam V1 Worker equipment.  These are resource-table indexes, not object
+# pointers: -1 means an empty slot.  The game renders the same eight fields in
+# its character equipment panel.  Keeping the class beside each offset lets
+# the trainer offer only resources that the native panel can accept.
+V1_DWARF_EQUIPMENT_SLOTS = (
+    {"key": "item_1", "title": "饰品 1", "class": "item", "offset": 0x7BC, "icon": "🎒"},
+    {"key": "helmet", "title": "头盔", "class": "helmet", "offset": 0x7A4, "icon": "⛑️"},
+    {"key": "pick", "title": "镐", "class": "pick", "offset": 0x7B0, "icon": "⛏️"},
+    {"key": "armor", "title": "盔甲", "class": "armor", "offset": 0x7AC, "icon": "🛡️"},
+    {"key": "weapon", "title": "武器", "class": "weapon", "offset": 0x7B8, "icon": "⚔️"},
+    {"key": "boots", "title": "鞋子", "class": "boots", "offset": 0x7A8, "icon": "🥾"},
+    {"key": "item_2", "title": "饰品 2", "class": "item", "offset": 0x7C0, "icon": "✨"},
+    {"key": "axe", "title": "斧", "class": "axe", "offset": 0x7B4, "icon": "🪓"},
+)
+V1_DWARF_EQUIPMENT_BY_KEY = {slot["key"]: slot for slot in V1_DWARF_EQUIPMENT_SLOTS}
+V1_DWARF_EQUIPMENT_CLASSES = {slot["class"] for slot in V1_DWARF_EQUIPMENT_SLOTS}
+
+# 配方常量（Steam V1 / 32 位）
+# World+0x2C..+0x30 是 std::vector<Recipe>，每条 Recipe 为 0xD8 字节。
+# 旧版曾把 World 的 ResourceSlot 物品表误判成配方表；下面全部是由
+# World::FindRecipeById / Recipe::CheckIngridientsAvail 反汇编核对过的真实布局。
+RECIPE_SLOT_SIZE = 0xD8
+RECIPE_WORLD_BEGIN_OFF = 0x2C
+RECIPE_WORLD_END_OFF = 0x30
+RECIPE_OFF_ID = 0x00
+RECIPE_OFF_NAME = 0x08          # std::string（短名称内联，长名称为堆指针）
+RECIPE_OFF_MATERIAL_PTR = 0x4C  # std::vector<Recipe::Ingredient>::begin
+RECIPE_OFF_MATERIAL_END = 0x50
+RECIPE_OFF_MATERIAL_CAP = 0x54
+RECIPE_OFF_PRODUCE_RES_ID = 0x64
+RECIPE_ENABLED_OFF = 0x20
+MATERIAL_ENTRY_SIZE = 0x08
+MATERIAL_OFF_TYPE = 0x00        # World 资源表索引
+MATERIAL_OFF_POS = 0x04         # 1..9，九宫格从左至右、从上至下
+
+# 科技树（当前 Steam 版 / 32 位）
+# Reciper 全局指针 -> 4 组连续的 0x8C 字节科技节点。
+TECH_RECIPER_PTR_OFFSET = 0xDC2428
+TECH_GROUPS_OFFSET = 0x48
+TECH_GROUP_COUNT = 4
+TECH_GROUP_STRIDE = 0x0C
+# V2（巨龙版）实测：Reciper 静态指针与组向量偏移不同，节点布局一致。
+V2_TECH_RECIPER_PTR_OFFSET = 0xC90848
+V2_TECH_GROUPS_OFFSET = 0x84
+V2_TECH_GROUP_STRIDE = 0x18
+V2_TECH_NODE_SIZE = 0x90
+TECH_NODE_SIZE = 0x8C
+TECH_NODE_NAME_OFF = 0x04
+TECH_NODE_PROGRESS_OFF = 0x64
+TECH_NODE_STATE_OFF = 0x68
+TECH_NODE_PREVIOUS_STATE_OFF = 0x6C
+TECH_STATE_LABELS = {0: "锁定", 1: "可研究", 2: "已完成"}
+
+# 魔法道具运行时属性表。每条属性记录固定 0x70 字节；一个数值属性的值
+# 存在其前一条记录 +0x30 处。配置对象会在每次启动时重建，因此连接时
+# 通过完整字段序列定位并缓存，而不依赖容易误命中的静态指针链。
+MAGIC_PROP_STRIDE = 0x70
+MAGIC_VALUE_OFF = 0x30
+MAGIC_DEFS = [
+    {"id": "magic_portal", "title": "魔法传送门", "keys": ["magic_portal", "time", "use_mana", "radius", "stayin"], "fields": [("time", "持续时间", "int", 240), ("use_mana", "法力消耗", "int", 2), ("radius", "放置范围", "int", 1)]},
+    {"id": "magic_light", "title": "魔法之光", "keys": ["magic_light", "time", "radius", "use_mana"], "fields": [("time", "持续时间", "int", 180), ("radius", "放置范围", "int", 1), ("use_mana", "法力消耗", "int", 1)]},
+    {"id": "magic_forest", "title": "魔法森林", "keys": ["magic_forest", "count", "range", "use_mana"], "fields": [("count", "生成数量", "int", 5), ("use_mana", "法力消耗", "int", 4)]},
+    {"id": "magic_compas", "title": "魔法罗盘", "keys": ["magic_compas", "time", "use_mana"], "fields": [("time", "持续时间", "int", 180), ("use_mana", "法力消耗", "int", 10)]},
+    {"id": "magic_horn", "title": "魔法号角", "keys": ["magic_horn", "time", "use_mana", "create_sound"], "fields": [("time", "持续时间", "int", 180), ("use_mana", "法力消耗", "int", 0)]},
+    {"id": "magic_imp", "title": "召唤小鬼", "keys": ["magic_imp", "use_mana", "count", "max_count"], "fields": [("use_mana", "法力消耗", "int", 3), ("count", "召唤数量", "int", 10), ("max_count", "最大数量", "int", 20)]},
+    {"id": "magic_fireball", "title": "火球术", "keys": ["magic_fireball", "healt", "radius", "count", "creature", "use_mana", "exclude_by_name"], "fields": [("healt", "伤害", "float", -1.8), ("radius", "爆炸半径", "int", 2), ("count", "火球数量", "int", 5), ("use_mana", "法力消耗", "int", 5)]},
+    {"id": "magic_icearrow", "title": "冰箭术", "keys": ["magic_icearrow", "radius", "count", "creature", "healt", "use_mana", "speed", "time"], "fields": [("radius", "作用半径", "int", 2), ("count", "箭矢数量", "int", 5), ("healt", "伤害", "int", 15), ("use_mana", "法力消耗", "int", 5), ("time", "持续时间", "int", 5)]},
+    {"id": "magic_transform", "title": "变形魔法", "keys": ["magic_transform", "healt", "creature", "radius"], "fields": [("healt", "效果强度", "int", 6), ("radius", "作用半径", "int", 2)]},
+    {"id": "magic_rain", "title": "降雨魔法", "keys": ["magic_rain", "use_mana"], "fields": [("use_mana", "法力消耗", "int", 3)]},
+    {"id": "magic_collect", "title": "收集魔法", "keys": ["magic_collect", "use_mana", "time", "radius"], "fields": [("use_mana", "法力消耗", "int", 3), ("time", "持续时间", "int", 6), ("radius", "收集半径", "int", 5)]},
+    {"id": "magic_explosion", "title": "爆炸魔法", "keys": ["magic_explosion", "use_mana", "radius", "attack"], "fields": [("use_mana", "法力消耗", "int", 20), ("radius", "爆炸半径", "int", 2), ("attack", "攻击力", "int", 10)]},
+]
+
+# 魔法页只暴露已完成定位的字段。快捷档位和方案使用这张白名单，外部
+# 调用不能构造任意地址或未知字段；所有批量应用会暂停、快照、读回并回滚。
+MAGIC_CATEGORIES = {
+    "utility": {"title": "🧩 实用", "note": "收集、照明与探索辅助", "ids": ("magic_collect", "magic_light", "magic_compas")},
+    "environment": {"title": "🌿 建造 / 环境", "note": "传送、森林、降雨与号角", "ids": ("magic_portal", "magic_forest", "magic_rain", "magic_horn")},
+    "summon": {"title": "🧿 召唤 / 移动", "note": "小鬼与传送支援", "ids": ("magic_imp",)},
+    "combat": {"title": "⚔️ 战斗", "note": "仅调整已定位的伤害、范围、数量与耗蓝", "ids": ("magic_fireball", "magic_icearrow", "magic_transform", "magic_explosion")},
+}
+
+# PandoraChestBehaviour loads this table from data/pandora_events.xml.  The
+# labels are kept in the modifier because the source file contains Russian
+# comments only; the actual IDs and original weights are read from that file
+# for the currently running game.
+PANDORA_EVENT_TITLES = {
+    "treasure_found": "发现财宝", "evil_nest": "邪恶巢穴", "heavenly_abyss": "天降深渊",
+    "prodigal_son": "浪子归来", "reinforcement": "援军", "map_deposits": "矿藏地图",
+    "insight": "灵感", "sclerosis": "健忘", "miner_luck": "矿工幸运",
+    "general_health": "全体治疗", "fire_event": "火灾", "abnormal_warming": "异常升温",
+    "nothing_event": "意外收获", "neighbors_party": "邻居派对", "dragon_event": "小龙来袭",
+    "seism_event": "地震", "grocery_stock": "食物储备", "mana_event_empty": "法力枯竭",
+    "mana_event_full": "法力充盈", "global_warming": "全球变暖", "glacial_period": "冰河时期",
+    "sudden_thaw": "突然回暖", "sudden_frost": "突然霜冻", "child_of_nature": "自然之子",
+    "airborne_assault": "空袭", "pack_of_imps": "小鬼群", "remains_of_the_library": "图书馆遗迹",
+    "scroll_ancient_knowledge": "古老知识卷轴", "deposits_found": "发现矿脉", "its_trap": "这是陷阱",
+    "midas_touch": "点金术", "walking_dead": "亡者复苏", "good_season": "丰收季",
+    "powerful_explosion": "强力爆炸", "they_are_close": "敌人提前到来", "they_late": "敌人延迟到来",
+    "its_water_trap": "灌水陷阱", "dwarf_shield": "矮人护盾", "metropolis_help": "都市援助",
+    "mole_hole": "虫洞", "collector": "资源收集", "rat_infestation": "鼠患",
+    "pandora_sale": "潘多拉特卖",
+}
+
+# V2 矮人偏移
+V2_DWARF_X = 0x484
+V2_DWARF_Y = 0x488
+V2_DWARF_HP_DISP = 0xD20
+V2_DWARF_SAT_DISP = 0xD1C
+V2_DWARF_HP_ENC = 0x1D8
+V2_DWARF_SAT_ENC = 0x1EC
+V2_DWARF_MAXHP_ENC = 0x208
+V2_DWARF_GENDER = 0x68
+V2_DWARF_HP_CACHE = 0x168
+V2_DWARF_VTABLE_OFF = 0xAD2B5C
+
+# V1/V2 技能偏移
+V1_SKILL_VTABLE_OFF = 0xBB87A8
+V2_SKILL_VTABLE_OFF = 0xAB42EC
+V1_SKILL_OFFSETS = (0x10C, 0x110, 0x114, 0x118)  # 生产率/硬化/法力/可教育性
+V2_SKILL_OFFSETS = (0x22C, 0x230, 0x234, 0x238)
+# LibraryBehaviour 的真正升级处理器。技能对象扫描到的是其 +0x118
+# 子对象；处理器所需的 this 是前面的主对象。两处均按模块基址计算，
+# 不能把调试时得到的绝对地址写死。
+V1_LIBRARY_BEHAVIOUR_VTABLE_OFF = 0xBB8768
+V1_LIBRARY_UPGRADE_RVA = 0x5034E0
+
+# V2 宠物偏移
+V2_PET_LIMIT1_OFFSET = 0x5718D4
+V2_PET_LIMIT2_ADDR1  = 0x5718D9
+V2_PET_LIMIT2_ADDR2  = 0x5716DF
+V2_PET_LIMIT2_ADDR3  = 0x57169D
+V2_PET_TIMER_OFFSET  = 0xD5A1FC
+V2_PET_FORCE_SPAWN_OFFSET = 0xC34590
+
+# V1 宠物偏移
+V1_PET_LIMIT1_OFFSET = 0x602C8A
+V1_PET_LIMIT2_ADDR1  = 0x602C8F
+V1_PET_LIMIT2_ADDR2  = 0x602E07
+V1_PET_LIMIT2_ADDR3  = 0x602FEC
+V1_PET_LIMIT2_ADDR4  = 0x602FF4
+V1_PET_LIMIT2_ADDR5  = 0x602630
+V1_PET_LIMIT2_ADDR6  = 0x602640
+V1_PET_TIMER_OFFSET  = 0xD5A1FC
+
+# V2 法力/金币/经验/倒计时偏移
+V2_MANAGER_ARRAY = 0xC919A0
+V2_MANA_OBJ_INDEX = 0x20
+V2_MANA_CUR_OFF = 0x7C
+V2_MANA_MAX_OFF = 0x68
+V2_MANA_DISPLAY = 0xC96560
+V2_XP_OFFSET = 0xC919B0
+V2_TIMER_OFFSET = 0xC950B8
+V2_TIMER_PTR = 0x24
+
+# V1 法力偏移
+V1_MANA_BASE = 0xDC3628
+V1_MANA_CUR_OFF = 0x64
+V1_MANA_MAX_OFF = 0x50
+V1_MANA_ENC1 = 0x00
+V1_MANA_ENC2 = 0x04
+V1_MANA_KEY1 = 0x08
+V1_MANA_KEY2 = 0x0C
+
+# 当前 Steam 原版的全局模拟与昼夜对象。对象本身位于动态堆内存，不能把
+# 运行时绝对地址写死；连接后用模块相对 vtable 定位并验证，再按 PID 缓存。
+V1_GAME_VTABLE_RVA = 0xBAF12C
+V1_DAYTIME_VTABLE_RVA = 0xB9B828
+GAME_SPEED_ACTIVE_OFF = 0x148
+GAME_SPEED_SOURCE_OFF = 0x158
+GAME_SPEED_MIN = 0.25
+GAME_SPEED_MAX = 20.0
+# V2（巨龙版）实测：vtable 经 RTTI 反查确认，速度字段与 V1 布局一致但偏移不同。
+V2_GAME_VTABLE_RVA = 0xAAB6A4
+V2_DAYTIME_VTABLE_RVA = 0xA99834
+V2_GAME_SPEED_ACTIVE_OFF = 0x178
+V2_GAME_SPEED_SOURCE_OFF = 0x188
+DAYTIME_CURRENT_OFF = 0xC0
+DAYTIME_DAY_END_OFF = 0xC4
+DAYTIME_SUNSET_MID_OFF = 0xC8
+DAYTIME_NIGHT_BEGIN_OFF = 0xCC
+DAYTIME_NIGHT_END_OFF = 0xD0
+DAYTIME_SUNRISE_MID_OFF = 0xD4
+DAYTIME_CYCLE_END_OFF = 0xD8
+
+# 已在当前 Steam 版实测的代码功能。地址一律保存为相对 CraftWorld.exe
+# 模块基址的偏移，避免每次启动时 ASLR 改变模块基址后失效。
+OTHER_FEATURE_PATCHES = {
+    "infinite_items": {
+        "name": "无限物品",
+        "patches": ((0x829CE7, b"\x4F", b"\x4E"),),
+    },
+    "mega_xp": {
+        "name": "超级经验",
+        "patches": ((0x31CFFB, b"\x8C", b"\x8D"),),
+    },
+    "portal_mana": {
+        "name": "传送门法力不减",
+        "patches": ((0x5C3CC7, b"\x76", b"\x77"),),
+    },
+    "infinite_health": {
+        "name": "矮人无敌",
+        "patches": ((0x8134F6, b"\x0F\x86\xC8\x00\x00\x00", b"\x90\x90\x90\x90\x90\x90"),),
+    },
+    "reveal_map": {
+        "name": "全图可见",
+        "patches": ((0x827831, b"\x74", b"\x75"),),
+    },
+    "instant_tech": {
+        "name": "科技瞬间完成",
+        "patches": ((0x65110E, b"\x72\x0E", b"\x90\x90"),),
+    },
+    "no_hunger": {
+        "name": "不会饥饿",
+        "patches": ((0x8133FC, b"\x5E", b"\x5C"),),
+    },
+    "infinite_mana": {
+        "name": "法力不减",
+        "patches": ((0x43E5ED, b"\x82", b"\x83"),),
+    },
+    "fast_climb": {
+        "name": "快速攀爬",
+        "patches": (
+            (0x804B7E, b"\x87", b"\x8F"),
+            (0x804B90, b"\x87", b"\x8F"),
+        ),
+    },
+}
+
+# V2（巨龙版）实测补丁点。地址均为相对 CraftWorld.exe 的 RVA。
+V2_OTHER_FEATURE_PATCHES = {
+    "infinite_items": {
+        "name": "无限物品",
+        "patches": ((0x764560, b"\x4F", b"\x4E"),),
+    },
+    "mega_xp": {
+        "name": "超级经验",
+        "patches": ((0x2D98FB, b"\x8C", b"\x8D"),),
+    },
+    "portal_mana": {
+        "name": "传送门法力不减",
+        "patches": ((0x537CE7, b"\x76", b"\x77"),),
+    },
+    "infinite_health": {
+        "name": "矮人无敌",
+        "patches": ((0x74FA01, b"\x0F\x86\xC8\x00\x00\x00", b"\x90\x90\x90\x90\x90\x90"),),
+    },
+    "no_hunger": {
+        "name": "不会饥饿",
+        "patches": ((0x74F905, b"\x5E", b"\x5C"),),
+    },
+    "infinite_mana": {
+        "name": "法力不减",
+        "patches": (
+            (0x3E6BD0, b"\x82", b"\x83"),
+            (0x6DAA7B, b"\x82", b"\x83"),
+        ),
+    },
+    "fast_climb": {
+        "name": "快速攀爬",
+        "patches": (
+            (0x741848, b"\x86", b"\x8E"),
+            (0x74185A, b"\x86", b"\x8E"),
+        ),
+    },
+    "instant_tech": {
+        "name": "科技瞬间完成",
+        "patches": ((0x61A876, b"\x72\x1E", b"\x90\x90"),),
+    },
+    "reveal_map": {
+        "name": "全图可见",
+        "patches": (
+            (0x762391, b"\x74", b"\x75"),
+            (0x762591, b"\x74", b"\x75"),
+        ),
+    },
+}
+
+
+### 3. 工具函数
+
+
+def get_base(pm_obj=None):
+    """获取游戏模块基地址"""
+    global base_addr
+    if pm_obj is not None:
+        try:
+            return pm_obj.process_base.lpBaseOfDll
+        except AttributeError:
+            return int(pm_obj.process_base)
+    try:
+        base_addr = pm.process_base.lpBaseOfDll
+    except:
+        base_addr = int(pm.process_base)
+    return base_addr
+
+
+_recipe_array_cache_base = None
+
+_recipe_array_ttl = 300
+
+_recipe_array_last_scan = 0
+
+_recipe_array_cache_count = 0
+
+def find_recipe_array_by_string_search(pm):
+    """Fast recipe array search using combined regex pattern."""
+    try:
+        import re
+        # Known recipe names for pattern matching
+        known_names = ["table_wooden", "stone_sword", "wooden_sword", "iron_sword", "workbench",
+                       "ladder", "Log Bridge", "Wooden Hatch", "pot", "lock", "nails",
+                       "stone_axe", "furnace", "chest", "door_wooden"]
+        # Build combined regex pattern (escape each name for safety)
+        escaped = [re.escape(n) for n in known_names]
+        pattern = b"(" + b"|".join(n.encode("ascii") for n in escaped) + b")"
+        # Single scan for all names
+        results = pm.pattern_scan_all(pattern, return_multiple=True)
+        if not results:
+            return None, 0
+        candidates = set()
+        for addr in results:
+            if not addr or addr < 0x10000:
+                continue
+            # addr points to the start of the name string (at +0x18 in the slot)
+            base_slot = addr - 0x18  # name is at +0x18
+            base_slot = base_slot - (base_slot % 0xD8)
+            # Check if this is a valid recipe slot
+            for delta in range(-5, 6):
+                ta = base_slot + delta * 0xD8
+                if ta < 0x10000: continue
+                try:
+                    rid = pm.read_int(ta + 0x10)
+                    if 0 <= rid <= 2000:
+                        raw = pm.read_bytes(ta + RECIPE_OFF_NAME, 16)
+                        if raw:
+                            ni = raw.find(b"\x00")
+                            if ni >= 0: raw = raw[:ni]
+                            if raw and len(raw) >= 2:
+                                candidates.add(ta)
+                                break
+                except:
+                    pass
+        if len(candidates) >= 2:
+            ba = min(candidates)
+            for bk in range(0, 0x20000, 0xD8):
+                ta = ba - bk
+                if ta < 0x10000: break
+                try:
+                    tn = pm.read_bytes(ta + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b"\x00")
+                        if ni >= 0: tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            ba = ta
+                        else: break
+                except: break
+            cnt = 0
+            for fw in range(0, 2000):
+                ta = ba + fw * 0xD8
+                try:
+                    tn = pm.read_bytes(ta + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b"\x00")
+                        if ni >= 0: tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            cnt += 1
+                        else:
+                            if cnt > 10: break
+                    else: break
+                except: break
+            if cnt >= 2:
+                return ba, cnt
+        return None, 0
+    except:
+        return None, 0
+
+def find_recipe_array_robust(pm):
+    """Robustly scan ALL process memory regions for recipe array using VirtualQueryEx"""
+    try:
+        import pymem
+        handle = pm.process_handle
+        if not handle:
+            return None, 0
+        candidates = set()
+        addr = 0
+        max_addr = 0x7FFFFFFF
+        try:
+            if hasattr(pm, "is_64_bit") and pm.is_64_bit():
+                max_addr = 0x7FFFFFFF0000
+        except:
+            pass
+        checked_regions = 0
+        while addr < max_addr and checked_regions < 10000:
+            try:
+                mbi = pymem.memory.virtual_query(handle, addr)
+                if not mbi:
+                    break
+                region_size = mbi.RegionSize
+                if region_size <= 0:
+                    addr += 0x10000
+                    continue
+                if mbi.State == 0x1000 and mbi.Protect not in (0x00, 0x01):
+                    checked_regions += 1
+                    if checked_regions > 5000:
+                        break
+                    start = mbi.BaseAddress
+                    end = start + region_size
+                    aligned = start
+                    if aligned % RECIPE_SLOT_SIZE != 0:
+                        aligned += RECIPE_SLOT_SIZE - (aligned % RECIPE_SLOT_SIZE)
+                    scan_addr = aligned
+                    scans_in_region = 0
+                    while scan_addr < end - 0xD8 and scans_in_region < 50000:
+                        try:
+                            rid = pm.read_int(scan_addr + RECIPE_OFF_ID)
+                            if 0 <= rid <= 2000:
+                                raw = pm.read_bytes(scan_addr + RECIPE_OFF_NAME, 16)
+                                if raw:
+                                    null_idx = raw.find(b"\x00")
+                                    if null_idx >= 0:
+                                        raw = raw[:null_idx]
+                                    if raw and len(raw) >= 3:
+                                        try:
+                                            raw.decode("ascii")
+                                            mat_ptr = pm.read_int(scan_addr + RECIPE_OFF_MATERIAL_PTR)
+                                            if mat_ptr and mat_ptr > 0x100000:
+                                                candidates.add(scan_addr)
+                                                if len(candidates) >= 20:
+                                                    break
+                                        except:
+                                            pass
+                        except:
+                            pass
+                        scan_addr += RECIPE_SLOT_SIZE
+                        scans_in_region += 1
+                    if len(candidates) >= 20:
+                        break
+                addr += region_size
+                if addr <= mbi.BaseAddress:
+                    addr = mbi.BaseAddress + region_size
+            except Exception:
+                addr += 0x10000
+                continue
+        if candidates and len(candidates) >= 3:
+            base_addr = min(candidates)
+            for back in range(0, 0x20000, RECIPE_SLOT_SIZE):
+                test_addr = base_addr - back
+                if test_addr < 0x10000:
+                    break
+                try:
+                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b"\x00")
+                        if ni >= 0:
+                            tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            base_addr = test_addr
+                        else:
+                            break
+                except:
+                    break
+            count = 0
+            for fwd in range(0, 2000):
+                test_addr = base_addr + fwd * RECIPE_SLOT_SIZE
+                try:
+                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b"\x00")
+                        if ni >= 0:
+                            tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            count += 1
+                        else:
+                            if count > 10:
+                                break
+                    else:
+                        break
+                except:
+                    break
+            if count >= 3:
+                return base_addr, count
+        return None, 0
+    except Exception:
+        return None, 0
+
+def find_recipe_array_by_simple_scan(pm):
+    """Find recipe array: search known names, calculate base, verify slot0=ladder."""
+    try:
+        import struct as _struct
+        import time as _time
+        known_names = [b"table_wooden", b"axe_stone", b"workbench", b"furnace", b"door_wooden", b"chest", b"ladder"]
+        bases = {}
+        for name in known_names:
+            try:
+                results = pm.pattern_scan_all(name, return_multiple=True)
+            except:
+                continue
+            if not results:
+                continue
+            for r in results[:30]:
+                if r < 0x10000: continue
+                slot_addr = r - 0x18
+                if slot_addr < 0x10000: continue
+                try:
+                    raw = pm.read_bytes(slot_addr + 0x18, 16)
+                    if not raw: continue
+                    null = raw.find(b"\x00")
+                    if null >= 0: raw = raw[:null]
+                    if raw != name: continue
+                    rid = _struct.unpack("<I", pm.read_bytes(slot_addr + 0x10, 4))[0]
+                    if rid < 0 or rid > 2000: continue
+                    array_base = slot_addr - rid * 0xD8
+                    if array_base < 0x10000: continue
+                    slot0_raw = pm.read_bytes(array_base + 0x18, 16)
+                    if not slot0_raw: continue
+                    null2 = slot0_raw.find(b"\x00")
+                    if null2 >= 0: slot0_raw = slot0_raw[:null2]
+                    slot0_name = slot0_raw.decode("ascii", errors="replace")
+                    if slot0_name == "ladder":
+                        bases[array_base] = bases.get(array_base, 0) + 1
+                except:
+                    continue
+        if bases:
+            best = max(bases, key=bases.get)
+            return best, bases[best] * 100
+        return None, 0
+    except Exception:
+        return None, 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _read_ascii_string(pm, addr, max_len=16):
+    """读取ASCII字符串"""
+
+    raw = pm.read_bytes(addr, max_len)
+
+    null_idx = raw.find(b'\x00')
+
+    if null_idx >= 0:
+
+        raw = raw[:null_idx]
+
+    try:
+
+        return raw.decode('ascii')
+
+    except UnicodeDecodeError:
+
+        return ""
+
+def _read_item_name(pm, slot_addr, offset, max_direct=16, max_ptr=32):
+    """读取物品名称，自动识别偏移处是指针还是直接字符串（V1/V2通用）
+    优先尝试作为指针解引用，失败则直接读取ASCII字符串。
+    """
+    import re as _re
+    try:
+        ptr = pm.read_int(slot_addr + offset)
+        if ptr and 0x10000 <= ptr <= 0x7FFFFFFF:
+            name = _read_ascii_string(pm, ptr, max_ptr)
+            if name and len(name) >= 2 and _re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
+                return name
+    except Exception:
+        pass
+    try:
+        name = _read_ascii_string(pm, slot_addr + offset, max_direct)
+        if name and len(name) >= 2 and _re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
+            return name
+    except Exception:
+        pass
+    return ""
+
+def _read_utf8_string(pm, addr, max_len=32):
+    """Read string with auto-encoding detection (UTF-8 -> UTF-16LE -> GBK -> fallback)"""
+
+    raw = pm.read_bytes(addr, max_len)
+
+    null_idx = raw.find(b'\x00')
+
+    if null_idx >= 0:
+
+        raw = raw[:null_idx]
+
+    if not raw:
+
+        return ""
+
+    # Try UTF-8 first
+
+    try:
+
+        result = raw.decode('utf-8')
+
+        # Check for replacement char (0xEFBFBD in UTF-8)
+
+        if b'\xef\xbf\xbd' not in raw:
+
+            return result
+
+    except UnicodeDecodeError:
+
+        pass
+
+    # Try UTF-16LE
+
+    if len(raw) >= 2:
+
+        try:
+
+            result = raw.decode('utf-16-le')
+
+            if all(ord(c) > 0x1F for c in result):
+
+                return result
+
+        except (UnicodeDecodeError, UnicodeError):
+
+            pass
+
+    # Try GBK (Chinese game)
+
+    try:
+
+        result = raw.decode('gbk')
+
+        if all(ord(c) > 0x1F for c in result):
+
+            return result
+
+    except (UnicodeDecodeError, UnicodeError):
+
+        pass
+
+    # Final fallback
+
+    return raw.decode('utf-8', errors='replace')
+
+def load_item_name_map(filepath=None):
+    """加载物品名称映射文件，返回{slot_key: (en_display, cn_name)} 字典
+
+    映射文件格式:
+
+        [KeyT]
+
+        英文: English Name
+
+        中文: 中文名称
+
+        --------------------------------------------------
+
+    slot_key = key[:-1].lower()  (去掉末尾T并转小写)
+
+    """
+
+    name_map = {}
+
+    if filepath is None:
+
+        # 默认路径: 脚本同目录下的item_names.txt
+
+        import os
+
+        filepath = _resource_path('item_translations.txt')
+
+    try:
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+
+            data = f.read()
+
+    except (FileNotFoundError, IOError):
+        return name_map
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    entries = re.findall(r"\[(\w+)]\n.*?英文: (.+?)\n.*?中文: (.+?)\n", data)
+
+    for key, en_name, cn_name in entries:
+
+        slot_key = key[:-1].lower()  # 去掉末尾的T
+
+        name_map[slot_key] = (en_name.strip(), cn_name.strip())
+
+    # also parse simple Key=Value format
+    for simp_line in data.split(chr(10)):
+        simp_line = simp_line.strip()
+        if '=' in simp_line and not simp_line.startswith('#'):
+            parts = simp_line.split('=', 1)
+            k = parts[0].strip()
+            v = parts[1].strip()
+            if k and v:
+                slot_key = k.lower()
+                if slot_key.endswith("t"):
+                    slot_key = slot_key[:-1]
+                if slot_key not in name_map:
+                    name_map[slot_key] = (v, v)
+    # Installed mods use craft_resources.csv rather than item_translations.
+    # Keep an explicit user/base translation in preference to a mod fallback.
+    for slot_key, cn_name in GAME_RESOURCE_TRANSLATIONS.items():
+        name_map.setdefault(slot_key, (cn_name, cn_name))
+    return name_map
+
+ITEM_NAME_MAP = load_item_name_map()
+
+def get_item_names(name_en, name_cn_from_memory=''):
+    """根据英文名获取中英文显示名称，优先使用映射文件"""
+
+    key = name_en.lower().strip()
+
+    if key in ITEM_NAME_MAP:
+
+        en_display, cn_display = ITEM_NAME_MAP[key]
+
+        return en_display, cn_display
+
+    # 没找到映射，返回原始值
+
+    display_cn = _clean_display_label(name_cn_from_memory) or name_en
+
+    return name_en, display_cn
+
+def _categorize_item(name_en):
+    """根据英文名对物品分类"""
+
+    n = name_en.lower()
+
+    # 技能书
+
+    if n.endswith('_skill') or n.endswith('_skill'):
+
+        return "技能书"
+
+    # 种子
+
+    if n.startswith('seed') or n == 'seed':
+
+        return "种子/农业"
+
+    # 食物/饮品
+
+    food_keywords = ['apple', 'berry', 'berries', 'tomato', 'potato', 'carrot',
+
+                     'beer', 'wine', 'tea', 'coffee', 'sugar', 'bread', 'flour',
+
+                     'egg', 'milk', 'cheese', 'pumpkin', 'mushroom', 'soup',
+
+                     'cake', 'pie', 'jam', 'juice', 'salad', 'fish', 'cone',
+
+                     'tangerine', 'blueberries', 'cucumber']
+
+    if any(k in n for k in food_keywords):
+
+        return "食物/饮品"
+
+    # 资源/材料
+
+    resource_keywords = ['dirt', 'sand', 'stone', 'coal', 'iron', 'silver', 'gold',
+
+                         'mithril', 'wood', 'water', 'steel', 'cabel', 'brick',
+
+                         'glass', 'clay', 'wool', 'silk', 'leather', 'bone',
+
+                         'shell', 'fur', 'feather', 'essence', 'ink']
+
+    if any(k in n for k in resource_keywords) and 'ingot' not in n:
+
+        return "资源/材料"
+
+    # 金属/锭
+
+    if 'ingot' in n:
+
+        return "金属/锭"
+
+    # 武器
+
+    weapon_keywords = ['sword', 'dagger', 'club', 'spear', 'staff', 'bow_',
+
+                       'mstaff', 'gun', 'rifle', 'pistol', 'cannon', 'flamethrower',
+
+                       'hammer', 'mace', 'axe_' if n.endswith('_axe') else '']  # 斧头类武器
+
+    if any(k in n for k in weapon_keywords):
+
+        return "武器"
+
+    # 工具类/斧头
+
+    if n.startswith('axe_') or n.startswith('pick_') or n.startswith('chopper'):
+
+        return "工具"
+
+    # 工具
+
+    tool_keywords = ['bucket', 'scissors', 'saw', 'fishing', 'sieve', 'grinding',
+
+                     'lamp_miner', 'parachute', 'climbing', 'ladder']
+
+    if any(k in n for k in tool_keywords):
+
+        return "工具"
+
+    # 防具
+
+    armor_keywords = ['helm', 'helmet', 'boots', 'shield', 'armor', 'hat',
+
+                      'cloak', 'shirt', 'apron', 'glove', 'backpack', 'bag_']
+
+    if any(k in n for k in armor_keywords):
+
+        return "防具/装备"
+
+    # 魔法/弹药
+
+    if n.startswith('ammo') or n.endswith('_arrow'):
+
+        return "弹药/魔法"
+
+    # 药水
+
+    if n.endswith('_elexir') or n.endswith('potion') or n.endswith('_ring') or n.endswith('amulet'):
+
+        return "药水/卷轴"
+
+    if n.startswith('regen_') or n.startswith('healt') or n.startswith('mana_'):
+
+        if n not in ('mana_pylon', 'mana_generator', 'mana_expander'):
+
+            return "药水/卷轴"
+
+    # 魔法/能量相关
+
+    magic_keywords = ['pylon', 'generator', 'expander', 'portal', 'rune',
+
+                      'spark', 'flame', 'tunder', 'fire_', 'magic']
+
+    if any(k in n for k in magic_keywords):
+
+        return "弹药/魔法"
+
+    # 家具
+
+    furniture_keywords = ['bed', 'chair', 'table', 'sofa', 'carpet', 'lamp',
+
+                          'clock', 'mirror', 'vase', 'bookshelf', 'picture',
+
+                          'plant_pot', 'cushion', 'curtain', 'shelf']
+
+    if any(k in n for k in furniture_keywords):
+
+        return "家具"
+
+    # 建筑
+
+    building_keywords = ['_wall', '_block', '_door', '_window', 'torch', 'barrel',
+
+                         'locker', 'staging', 'fence', 'gate', 'stair', 'roof',
+
+                         '_floor', 'foundation']
+
+    if any(k in n for k in building_keywords):
+
+        return "建筑"
+
+    # 装饰
+
+    decoration_keywords = ['garland', 'flower', 'plant', 'flag', 'decorative',
+
+                           'snow_globe', 'firework', 'skin_']
+
+    if any(k in n for k in decoration_keywords):
+
+        return "装饰"
+
+    # 特殊
+
+    special_keywords = ['alien', 'dragon', 'wyvern', 'vivern', 'portal_biome',
+
+                        'mcompas', 'mportal', 'mlight', 'mfire', 'mforest',
+
+                        'mhorn', 'mrain', 'mcollect', 'mexplosion', 'mimp',
+
+                        'point_click', 'm_' ,'rune']
+
+    if any(k in n for k in special_keywords):
+
+        return "特殊/任务"
+
+    return "配件/饰品"
+
+
+### 4. 核心内存操作
+
+
+def _get_item_array(pm, is_v2=False):
+    """获取物品数组起始和结束地址 (V1/V2)"""
+
+    if is_v2:
+
+        try:
+
+            mgr = pm.read_int(get_base(pm) + V2_RESOURCE_MGR)
+
+            if mgr:
+
+                arr_start = pm.read_int(mgr + V2_RES_ARR_BASE)
+
+                arr_end = pm.read_int(mgr + V2_RES_ARR_END)
+
+                if arr_start and arr_end:
+
+                    return arr_start, arr_end
+
+        except:
+
+            pass
+
+        return None, None
+
+    base_addr = get_base(pm) + ITEM_BASE_OFFSET
+
+    mgr = pm.read_int(base_addr)
+
+    if not mgr:
+
+        return None, None
+
+    arr_start = pm.read_int(mgr + ITEM_ARR_PTR)
+
+    arr_end = pm.read_int(mgr + ITEM_ARR_END)
+
+    return arr_start, arr_end
+
+def scan_all_items(pm, is_v2=False):
+    """扫描所有物品槽，返回物品列表 (V1/V2)"""
+    # Auto-detect V2 by checking resource manager
+    if not is_v2:
+        try:
+            mgr = pm.read_int(get_base(pm) + V2_RESOURCE_MGR)
+            if mgr:
+                arr_start = pm.read_int(mgr + V2_RES_ARR_BASE)
+                arr_end = pm.read_int(mgr + V2_RES_ARR_END)
+                if arr_start and arr_end and arr_start < arr_end:
+                    is_v2 = True
+        except:
+            pass
+
+    """扫描所有物品槽，返回物品列表 (V1/V2)"""
+
+    if is_v2:
+
+        try:
+
+            arr_start, arr_end = _get_item_array(pm, is_v2=True)
+
+            if not arr_start or not arr_end:
+
+                return []
+
+            items = []
+
+            total = (arr_end - arr_start) // V2_RES_ELEM_SIZE
+
+            for i in range(total):
+
+                slot_addr = arr_start + i * V2_RES_ELEM_SIZE
+
+                try:
+
+                    
+                    name_en = ""
+                    for name_off in (0x64, 0x5C, 0x60, 0x68, 0x6C, 0x70, 0x54, 0x50):
+                        name_en = _read_item_name(pm, slot_addr, name_off, 32, 32)
+                        if name_en:
+                            break
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                    if not _is_known_runtime_item_id(name_en):
+
+                        continue
+
+                    try:
+                        idx = pm.read_int(slot_addr + V2_ELEM_IDX)
+                    except:
+                        continue
+
+                    if idx != i:
+
+                        continue
+
+                    name_cn_raw = _read_utf8_string(pm, slot_addr + OFF_NAME_CN, 32)
+
+                    _, name_cn = get_item_names(name_en, name_cn_raw)
+
+                    key1 = 0
+                    enc1 = 0
+                    try:
+                        key1 = pm.read_int(slot_addr + V2_ELEM_KEY1)
+                        enc1 = pm.read_int(slot_addr + V2_ELEM_ENC1)
+                    except:
+                        pass
+                    qty = (key1 ^ enc1) & 0xFFFFFFFF
+                    if qty > 0x7FFFFFFF:
+                        qty -= 0x100000000
+
+                    if qty < 0:
+
+                        qty = 0
+
+                    category = _categorize_item(name_en)
+
+                    slot_key_raw = idx
+
+                    items.append({
+
+                        'slot_addr': slot_addr,
+
+                        'name_en': name_en,
+
+                        'name_cn': name_cn,
+
+                        'qty': qty,
+
+                        'dec1': enc1,
+
+                        'enc1': key1,
+
+                        'category': category,
+
+                        'slot_key': slot_key_raw,
+
+                    })
+
+                except:
+
+                    continue
+            return items
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        except:
+
+            return []
+
+    arr_start, arr_end = _get_item_array(pm, is_v2=False)
+
+    if not arr_start or not arr_end:
+
+        return []
+
+    items = []
+
+    slot_count = (arr_end - arr_start) // SLOT_SIZE
+
+    for i in range(slot_count):
+
+        slot_addr = arr_start + i * SLOT_SIZE
+        name_en = _read_item_name(pm, slot_addr, OFF_NAME_EN, 16, 32)
+
+        if not _is_known_runtime_item_id(name_en):
+
+            continue
+
+        name_cn_raw = _read_utf8_string(pm, slot_addr + OFF_NAME_CN, 32)
+
+        _, name_cn = get_item_names(name_en, name_cn_raw)
+
+        dec1 = pm.read_int(slot_addr + OFF_DEC1) or 0
+        enc1 = pm.read_int(slot_addr + OFF_ENC1) or 0
+        qty = (enc1 ^ dec1) & 0xFFFFFFFF
+        if qty > 0x7FFFFFFF:
+            qty -= 0x100000000
+        if qty < 0:
+            qty = 0
+
+        category = _categorize_item(name_en)
+
+        slot_key_raw = pm.read_int(slot_addr + OFF_SLOT_IDX)
+
+        items.append({
+
+            'slot_addr': slot_addr,
+
+            'name_en': name_en,
+
+            'name_cn': name_cn,
+
+            'qty': qty,
+
+            'dec1': dec1,
+
+            'enc1': enc1,
+            'slot_key': slot_key_raw,
+
+            'category': category,
+        })
+
+    return items
+
+def modify_item_quantity(pm, slot_addr, new_qty, is_v2=False):
+    """Write both encrypted quantity copies, verify them, or roll back.
+
+    The caller pauses the game before entering this function.  Keeping the
+    paired encrypted copies transactional prevents the old half-write state
+    that could corrupt an item stack if a process write failed midway.
+    """
+    originals = []
+    try:
+        new_qty = max(0, min(99999, int(new_qty)))
+        if is_v2:
+            key1 = pm.read_int(slot_addr + V2_ELEM_KEY1)
+            key2 = pm.read_int(slot_addr + V2_ELEM_KEY2)
+            if key1 is None or key2 is None:
+                return False, "找不到物品数量密钥"
+            fields = (
+                (slot_addr + V2_ELEM_ENC1, (int(key1) ^ new_qty) & 0xFFFFFFFF),
+                (slot_addr + V2_ELEM_ENC2, (int(key2) ^ new_qty) & 0xFFFFFFFF),
+            )
+            decode_fields = (
+                (slot_addr + V2_ELEM_ENC1, int(key1)),
+                (slot_addr + V2_ELEM_ENC2, int(key2)),
+            )
+        else:
+            enc1 = pm.read_int(slot_addr + OFF_ENC1)
+            enc2 = pm.read_int(slot_addr + OFF_ENC2)
+            if enc1 is None or enc2 is None:
+                return False, "找不到物品数量密钥"
+            fields = (
+                (slot_addr + OFF_DEC1, (int(enc1) ^ new_qty) & 0xFFFFFFFF),
+                (slot_addr + OFF_DEC2, (int(enc2) ^ new_qty) & 0xFFFFFFFF),
+            )
+            decode_fields = (
+                (slot_addr + OFF_DEC1, int(enc1)),
+                (slot_addr + OFF_DEC2, int(enc2)),
+            )
+
+        for address, value in fields:
+            before = pm.read_int(address)
+            if before is None:
+                raise RuntimeError("无法读取物品数量副本")
+            originals.append((address, int(before)))
+            pm.write_int(address, int(value))
+        for address, key in decode_fields:
+            stored = pm.read_int(address)
+            if stored is None or ((int(stored) ^ key) & 0xFFFFFFFF) != new_qty:
+                raise RuntimeError("物品数量读回校验失败")
+        return True, "已修改为 %d" % new_qty
+    except Exception as e:
+        for address, previous in reversed(originals):
+            try:
+                pm.write_int(address, previous)
+            except Exception:
+                pass
+        return False, "修改失败，已回滚：%s" % e
+
+def _try_update_item_display(pm, slot_addr, qty):
+    # Display state is game-owned.  Never write to guessed item offsets here:
+    # several of the old candidates are pointers/internal object fields.
+    return None
+    
+    """尝试更新物品在槽内的显示值（UTF-16LE编码）"""
+
+    try:
+
+        qty_str = str(qty)
+
+        qty_utf16 = qty_str.encode('utf-16-le')
+
+        # 尝试常见显示偏移（根据不同游戏版本适配）
+
+        display_offsets = [0x200, 0x208, 0x210, 0x218, 0x220, 0x228, 0x1F0, 0x1F8]
+
+        for off in display_offsets:
+
+            try:
+
+                pm.write_bytes(slot_addr + off, qty_utf16)
+
+            except Exception:
+
+                pass
+
+        # 也尝试写入普通4字节整数到可能的显示地址
+
+        int_offsets = [0x204, 0x20C, 0x214, 0x21C, 0x224, 0x22C, 0x1F4, 0x1FC]
+
+        for off in int_offsets:
+
+            try:
+
+                pm.write_int(slot_addr + off, qty)
+
+            except Exception:
+
+                pass
+
+    except Exception:
+
+        pass
+
+def scan_shop_data(pm, is_v2=False):
+    """扫描商店数据，返回 {slot_key: {price, qty, addr, is_v2}}"""
+
+    """扫描商店数据，返回 {slot_key: {price, qty, addr, is_v2}}
+
+    V2: 资源数组 (CraftWorld.exe+CA065C)
+
+    V1: 物品槽结构
+
+    """
+
+    # V2 资源数组优先
+
+    if is_v2:
+
+        try:
+
+            mgr = pm.read_int(get_base(pm) + V2_RESOURCE_MGR)
+
+            if mgr:
+
+                ab = pm.read_int(mgr + V2_RES_ARR_BASE)
+
+                ae = pm.read_int(mgr + V2_RES_ARR_END)
+
+                if ab and ae:
+
+                    sd = {}
+
+                    total = (ae - ab) // V2_RES_ELEM_SIZE
+
+                    for i in range(total):
+
+                        addr = ab + i * V2_RES_ELEM_SIZE
+
+                        try:
+
+                            nb = pm.read_bytes(addr + V2_ELEM_NAME, 30)
+
+                            ni = nb.find(b"\x00")
+
+                            if ni >= 0: nb = nb[:ni]
+
+                            ne = nb.decode("ascii")
+
+                            if not ne or len(ne) < 2: continue
+
+                            if pm.read_int(addr + V2_ELEM_IDX) != i: continue
+
+                            pr = pm.read_int(addr + V2_SHOP_PRICE)
+                            if pr == 4294967295 or pr == -1 or pr > 0x7FFFFFFF:
+                                continue
+
+                            qt = pm.read_int(addr + V2_SHOP_QTY)
+
+                            if True:
+
+                                sd[ne] = {"price": pr, "qty": qt, "addr": addr, "is_v2": True, "slot_idx": i}
+
+                        except:
+
+                            continue
+
+                    return sd  # V2模式下不降级到V1
+
+        except:
+
+            pass
+
+    # V1 回退
+
+    sd = {}
+
+    ab, ae = _get_item_array(pm)
+
+    if not ab or not ae: return sd
+
+    for i in range((ae - ab) // SLOT_SIZE):
+
+        sa = ab + i * SLOT_SIZE
+
+        try:
+
+            # [vtable=0 items scanned] vtable skip removed for shop scan
+
+
+            ne = _read_item_name(pm, sa, OFF_NAME_EN, 16, 32)
+
+            if not ne or len(ne) < 2: continue
+
+            sk = (pm.read_int(sa + OFF_SLOT_IDX)) & 0xFFFF
+
+            pr = pm.read_int(sa + OFF_SHOP_PRICE)
+            # convert invalid -1 to skip
+            if pr == 4294967295 or pr == -1 or pr > 0x7FFFFFFF:
+                continue
+
+            qt = pm.read_int(sa + OFF_SHOP_QTY)
+
+            if qt > 0 or pr > 0:
+                sd[ne] = {'price': pr, 'qty': qt, 'addr': sa, 'is_v2': False, 'slot_idx': i}
+
+        except:
+
+            continue
+
+    return sd
+
+def modify_shop_entry(pm, entry_addr, new_price=None, new_qty=None, is_v2=False):
+    """修改商店条目价格和数量"""
+
+    """修改商店物品的价格和数量 (V1/V2)"""
+
+    try:
+
+        po = V2_SHOP_PRICE if is_v2 else OFF_SHOP_PRICE
+
+        qo = V2_SHOP_QTY if is_v2 else OFF_SHOP_QTY
+
+        if new_price is not None:
+
+            pm.write_int(entry_addr + po, new_price)
+
+        if new_qty is not None:
+
+            pm.write_int(entry_addr + qo, new_qty)
+
+        return True, ""
+
+    except Exception as e:
+
+        return False, str(e)
+
+def find_recipe_array(pm):
+    """查找配方数组(V1)
+    +0x18是16字节ASCII直存，不是指针。
+    返回: (array_base, count) 或 (None, 0)
+    """
+    try:
+        base = get_base(pm)
+        item_base = pm.read_int(base + ITEM_BASE_OFFSET)
+        if not item_base:
+            return None, 0
+        for off in range(0x00, 0x100, 4):
+            try:
+                arr = pm.read_int(item_base + off)
+                if arr and arr > 0x10000:
+                    raw_name = pm.read_bytes(arr + RECIPE_OFF_NAME, 16)
+                    if raw_name:
+                        null_idx = raw_name.find(b'\x00')
+                        if null_idx >= 0:
+                            raw_name = raw_name[:null_idx]
+                        if raw_name and len(raw_name) >= 2:
+                            try:
+                                test_name = raw_name.decode("ascii", errors="replace").strip()
+                            except:
+                                continue
+                            if test_name and len(test_name) >= 2:
+                                arr2 = pm.read_int(item_base + off + 4)
+                                if arr2 and arr2 > arr:
+                                    total = (arr2 - arr) // RECIPE_SLOT_SIZE
+                                    if 10 <= total <= 2000:
+                                        return arr, total
+            except:
+                continue
+        return None, 0
+    except:
+        return None, 0
+
+def find_recipe_array_v2(pm):
+    """查找配方数组 - V2扩展搜索 (+0x18为ASCII直存)"""
+    try:
+        base = get_base(pm)
+        item_base = pm.read_int(base + ITEM_BASE_OFFSET)
+        if item_base:
+            for off in range(0x0, 0x200, 4):
+                try:
+                    ptr = pm.read_int(item_base + off)
+                    if ptr and ptr > 0x10000:
+                        id_val = pm.read_int(ptr + RECIPE_OFF_ID)
+                        raw_name = pm.read_bytes(ptr + RECIPE_OFF_NAME, 16)
+                        if raw_name:
+                            null_idx = raw_name.find(b'\x00')
+                            if null_idx >= 0:
+                                raw_name = raw_name[:null_idx]
+                            if raw_name and len(raw_name) >= 3:
+                                try:
+                                    name = raw_name.decode("ascii", errors="replace").strip()
+                                except:
+                                    continue
+                                if name and len(name) >= 3:
+                                    mat_ptr = pm.read_int(ptr + RECIPE_OFF_MATERIAL_PTR)
+                                    if mat_ptr and mat_ptr > 0x10000:
+                                        try:
+                                            mat_type = pm.read_int(mat_ptr + MATERIAL_OFF_TYPE)
+                                            if mat_type >= 0:
+                                                arr_base = None
+                                                for j in range(0, 500):
+                                                    test_addr = ptr - j * RECIPE_SLOT_SIZE
+                                                    try:
+                                                        test_raw = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                                                        if test_raw:
+                                                            nidx = test_raw.find(b'\x00')
+                                                            if nidx >= 0:
+                                                                test_raw = test_raw[:nidx]
+                                                            if test_raw and len(test_raw) >= 2:
+                                                                try:
+                                                                    test_raw.decode("ascii")
+                                                                except:
+                                                                    break
+                                                                arr_base = test_addr
+                                                            else:
+                                                                break
+                                                        else:
+                                                            break
+                                                    except:
+                                                        break
+                                                if arr_base is None:
+                                                    return ptr, 1
+                                                arr_end = ptr + RECIPE_SLOT_SIZE
+                                                total = (arr_end - arr_base) // RECIPE_SLOT_SIZE
+                                                if total < 1: total = 1
+                                                return arr_base, total
+                                        except:
+                                            pass
+                except:
+                    continue
+        return None, 0
+    except:
+        return None, 0
+
+def find_recipe_array_scan(pm):
+    """查找配方: 在物品数组附近搜索(+0x18为ASCII直存)"""
+    try:
+        base = get_base(pm)
+        arr_start, arr_end = _get_item_array(pm)
+        if arr_start and arr_end:
+            search_start = arr_start - 0x20000
+            search_end = arr_end + 0x20000
+            if search_start < base: search_start = base
+            addr = search_start
+            found_recipes = []
+            while addr < search_end:
+                try:
+                    val = pm.read_int(addr)
+                    if val and val > 0x10000:
+                        raw_name = pm.read_bytes(val + RECIPE_OFF_NAME, 16)
+                        if raw_name:
+                            null_idx = raw_name.find(b"\x00")
+                            if null_idx >= 0: raw_name = raw_name[:null_idx]
+                            if raw_name and len(raw_name) >= 2:
+                                try:
+                                    test_name = raw_name.decode("ascii", errors="replace").strip()
+                                except:
+                                    pass
+                                else:
+                                    if test_name and len(test_name) >= 2:
+                                        mat_ptr = pm.read_int(val + RECIPE_OFF_MATERIAL_PTR)
+                                        if mat_ptr and mat_ptr > 0x10000:
+                                            found_recipes.append(addr)
+                                            addr += RECIPE_SLOT_SIZE
+                                            continue
+                except:
+                    pass
+                addr += 4
+            if found_recipes:
+                base_addr = min(found_recipes)
+                base_addr = base_addr - (base_addr % RECIPE_SLOT_SIZE)
+                best_base = base_addr
+                for back in range(0, 0x10000, RECIPE_SLOT_SIZE):
+                    test_addr = base_addr - back
+                    if test_addr < base: break
+                    try:
+                        tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                        if tn:
+                            ni = tn.find(b"\x00")
+                            if ni >= 0: tn = tn[:ni]
+                            if tn and len(tn) >= 2:
+                                best_base = test_addr
+                            else:
+                                break
+                    except:
+                        break
+                return best_base, len(found_recipes)
+        return None, 0
+    except:
+        return None, 0
+
+
+    arr, cnt = find_recipe_array_by_string_search(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, cnt
+    # def find_recipe_array_by_pattern_scan(pm):
+    """备用配方搜索 - 模式扫描查找"""
+    try:
+        base = get_base(pm)
+        found_addrs = set()
+        # 方法1: 用pattern_scan_module搜索已知配方名
+        known_names = [b"table_wooden", b"stone_sword", b"wooden_sword", b"iron_sword", b"workbench"]
+        for kn in known_names:
+            try:
+                result = pm.pattern_scan_module(kn, MODULE_NAME)
+                if result:
+                    for delta in [0, 0xD8, -0xD8]:
+                        test_addr = result - delta - RECIPE_OFF_NAME
+                        if test_addr % RECIPE_SLOT_SIZE == 0:
+                            rid = pm.read_int(test_addr + RECIPE_OFF_ID)
+                            if rid >= 0 and rid <= 2000:
+                                mat_ptr = pm.read_int(test_addr + RECIPE_OFF_MATERIAL_PTR)
+                                if mat_ptr and mat_ptr > 0x100000:
+                                    found_addrs.add(test_addr)
+            except:
+                pass
+        if found_addrs:
+            base_addr = min(found_addrs)
+            base_addr = base_addr - (base_addr % RECIPE_SLOT_SIZE)
+            for back in range(0, 0x20000, RECIPE_SLOT_SIZE):
+                test_addr = base_addr - back
+                if test_addr < base: break
+                try:
+                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b'\x00')
+                        if ni >= 0: tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            base_addr = test_addr
+                        else:
+                            break
+                except:
+                    break
+            count = 0
+            for fwd in range(0, 2000):
+                test_addr = base_addr + fwd * RECIPE_SLOT_SIZE
+                try:
+                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b'\x00')
+                        if ni >= 0: tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            count += 1
+                        else:
+                            if count > 10:
+                                break
+                    else:
+                        break
+                except:
+                    break
+            if count >= 3:
+                return base_addr, count
+        # 方法2: 全模块内存扫描
+        arr_start, arr_end = _get_item_array(pm)
+        search_start = max(base, base)
+        search_end = base + 0x2000000
+        aligned_start = search_start - (search_start % RECIPE_SLOT_SIZE)
+        if aligned_start < search_start:
+            aligned_start += RECIPE_SLOT_SIZE
+        addr = aligned_start
+        candidates = set()
+        checked = 0
+        while addr < search_end and checked < 200000:
+            checked += 1
+            try:
+                rid = pm.read_int(addr + RECIPE_OFF_ID)
+                if rid >= 0 and rid <= 2000:
+                    raw = pm.read_bytes(addr + RECIPE_OFF_NAME, 16)
+                    if raw:
+                        null_idx = raw.find(b'\x00')
+                        if null_idx >= 0: raw = raw[:null_idx]
+                        if raw and len(raw) >= 3:
+                            try:
+                                raw.decode("ascii")
+                                mat_ptr = pm.read_int(addr + RECIPE_OFF_MATERIAL_PTR)
+                                if mat_ptr and mat_ptr > 0x100000:
+                                    candidates.add(addr)
+                            except:
+                                pass
+            except:
+                pass
+            addr += RECIPE_SLOT_SIZE
+            if len(candidates) > 10:
+                break
+        if candidates and len(candidates) >= 3:
+            base_addr = min(candidates)
+            base_addr = base_addr - (base_addr % RECIPE_SLOT_SIZE)
+            for back in range(0, 0x20000, RECIPE_SLOT_SIZE):
+                test_addr = base_addr - back
+                if test_addr < base: break
+                try:
+                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b'\x00')
+                        if ni >= 0: tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            base_addr = test_addr
+                        else:
+                            break
+                except:
+                    break
+            count = 0
+            for fwd in range(0, 2000):
+                test_addr = base_addr + fwd * RECIPE_SLOT_SIZE
+                try:
+                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
+                    if tn:
+                        ni = tn.find(b'\x00')
+                        if ni >= 0: tn = tn[:ni]
+                        if tn and len(tn) >= 2:
+                            count += 1
+                        else:
+                            if count > 10:
+                                break
+                    else:
+                        break
+                except:
+                    break
+            if count >= 3:
+                return base_addr, count
+        return None, 0
+    except:
+        return None, 0
+
+def get_recipe_array(pm):
+    """Get recipe array (cached). Returns (base_addr, max_slots=2000)."""
+    global _recipe_array_cache_base, _recipe_array_cache_count
+    import time as _tmod
+    global _recipe_array_cache_base, _recipe_array_cache_count, _recipe_array_last_scan
+    if _recipe_array_last_scan > 0 and (time.time() - _recipe_array_last_scan) < _recipe_array_ttl:
+        if _recipe_array_cache_base and _recipe_array_cache_count > 0:
+            return _recipe_array_cache_base, _recipe_array_cache_count
+    # \u4f18\u5148\u4f7f\u7528\u6a21\u5f0f\u6269\u5c55\u626b\u63cf
+    # Try string search first
+    arr, cnt = find_recipe_array_by_simple_scan(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, 2000
+    arr, cnt = find_recipe_array_by_string_search(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, 2000
+    arr, cnt = find_recipe_array(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, 2000
+    arr, cnt = find_recipe_array_v2(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, 2000
+    arr, cnt = find_recipe_array_scan(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, 2000
+    arr, cnt = find_recipe_array_robust(pm)
+    if arr and cnt > 0:
+        _recipe_array_cache_base = arr
+        _recipe_array_cache_count = cnt
+        _recipe_array_last_scan = time.time()
+        return arr, 2000
+
+def read_recipe_name(pm, recipe_addr):
+    """获取配方名称(从偏移+0x00读取16字节ASCII直存)"""
+    try:
+        raw = pm.read_bytes(recipe_addr + RECIPE_OFF_NAME, 16)
+        if raw:
+            null_idx = raw.find(b"\x00")
+            if null_idx >= 0:
+                raw = raw[:null_idx]
+            if raw:
+                name = raw.decode("ascii", errors="replace").strip()
+                if name and len(name) >= 2:
+                    return name
+    except:
+        pass
+    return None
+
+def get_recipe_unlock_state(pm, recipe_addr):
+    """获取配方解锁状态"""
+    try:
+        unlocked = pm.read_int(recipe_addr + 0x30)
+        return unlocked != 0
+    except:
+        return False
+
+def set_recipe_unlock_state(pm, recipe_addr, unlocked=True):
+    """设置配方解锁状态"""
+    try:
+        pm.write_int(recipe_addr + 0x30, 1 if unlocked else 0)
+        return True
+    except:
+        return False
+
+# V1 recipe layout override -------------------------------------------------
+# The early prototype below searched around the ResourceSlot array.  It can
+# find item names, but those are not Recipe objects.  Keep the old code in
+# the file for historical context, then replace its public helpers with the
+# verified World recipe vector implementation before any API can call them.
+def find_recipe_array(pm):
+    """Return World::m_recipes (std::vector<Recipe>) for the active V1 map."""
+    try:
+        base = get_base(pm)
+        world = int(pm.read_int(base + ITEM_BASE_OFFSET) or 0)
+        if world < 0x10000:
+            return None, 0
+        begin = int(pm.read_int(world + RECIPE_WORLD_BEGIN_OFF) or 0)
+        end = int(pm.read_int(world + RECIPE_WORLD_END_OFF) or 0)
+        span = end - begin
+        if begin < 0x10000 or span < 0 or span % RECIPE_SLOT_SIZE:
+            return None, 0
+        count = span // RECIPE_SLOT_SIZE
+        return (begin, count) if 1 <= count <= 10000 else (None, 0)
+    except Exception:
+        return None, 0
+
+
+def get_recipe_array(pm):
+    """Read the authoritative live recipe vector; cache only for this map."""
+    global _recipe_array_cache_base, _recipe_array_cache_count, _recipe_array_last_scan
+    begin, count = find_recipe_array(pm)
+    if begin and count:
+        _recipe_array_cache_base = begin
+        _recipe_array_cache_count = count
+        _recipe_array_last_scan = time.time()
+        return begin, count
+    _recipe_array_cache_base = None
+    _recipe_array_cache_count = 0
+    return None, 0
+
+
+def read_recipe_name(pm, recipe_addr):
+    """Read Recipe::m_name, an MSVC std::string at Recipe+0x08."""
+    try:
+        string_addr = int(recipe_addr) + RECIPE_OFF_NAME
+        length = int(pm.read_int(string_addr + 0x10) or 0)
+        if not 1 <= length <= 255:
+            return None
+        data_addr = string_addr if length <= 15 else int(pm.read_int(string_addr) or 0)
+        if data_addr < 0x10000:
+            return None
+        value = pm.read_bytes(data_addr, length).decode("ascii", errors="replace").strip()
+        return value if len(value) >= 2 else None
+    except Exception:
+        return None
+
+
+def get_recipe_unlock_state(pm, recipe_addr):
+    """Read Recipe::m_enabled; Tech/Reciper owns the actual unlock flow."""
+    try:
+        raw = pm.read_bytes(int(recipe_addr) + RECIPE_ENABLED_OFF, 1)
+        return bool(raw and raw[0])
+    except Exception:
+        return False
+
+
+def set_recipe_unlock_state(pm, recipe_addr, unlocked=True):
+    """Deprecated: never write a recipe unlock flag without native Tech sync."""
+    return False
+
+
+def scan_all_recipe_names(pm):
+    """Scan all recipes and return {name_en_lower: recipe_addr} mapping"""
+    try:
+        arr_base, count = get_recipe_array(pm)
+        if not arr_base or count < 1:
+            return {}
+        result = {}
+        for i in range(count):
+            recipe_addr = arr_base + i * RECIPE_SLOT_SIZE
+            try:
+                item_name = read_recipe_name(pm, recipe_addr)
+                if item_name and len(item_name) >= 2:
+                    result[item_name.lower().strip()] = recipe_addr
+            except:
+                continue
+        return result
+    except:
+        return {}
+
+def scan_all_recipes(pm, item_cache=None):
+    """Fast scan: read only recipe names/addresses (NOT grid data)."""
+    # Check if caller (class method) already has cached data
+    # When called from ModifierApp, self.recipe_data may already exist
+    global _recipe_array_cache_base, _recipe_array_cache_count
+    try:
+        arr_base, count = get_recipe_array(pm)
+        if not arr_base or count < 1:
+            return {}
+        recipes = {}
+        for i in range(count):
+            recipe_addr = arr_base + i * RECIPE_SLOT_SIZE
+            try:
+                rid = pm.read_int(recipe_addr + RECIPE_OFF_ID)
+                # Recipe ID 0 may be valid (e.g., ladder); check name instead
+                item_name = read_recipe_name(pm, recipe_addr)
+                if not item_name or len(item_name) < 2:
+                    continue
+                grid = None  # skip grid during scan, read on demand
+                unlocked = False  # skip unlock check, read on demand
+                recipe_id = pm.read_int(recipe_addr + RECIPE_OFF_ID)
+                recipes[item_name] = {
+                    'addr': recipe_addr,
+                'grid': None,  # read on demand
+                    'unlocked': unlocked,
+                    'id': recipe_id,
+                }
+            except:
+                continue
+        return recipes
+    except Exception as e:
+        return {}
+
+def scan_v2_recipes(pm):
+    """Scan heap for V2 recipe array, return {name: addr} dict"""
+    import ctypes
+    import pymem.memory
+    k32 = ctypes.windll.kernel32
+    class _M(ctypes.Structure):
+        _fields_ = [('BaseAddress', ctypes.c_ulonglong), ('AllocationBase', ctypes.c_ulonglong),
+                    ('AllocationProtect', wintypes.DWORD), ('RegionSize', ctypes.c_ulonglong),
+                    ('State', wintypes.DWORD), ('Protect', wintypes.DWORD),
+                    ('Type', wintypes.DWORD)]
+    V2_RS = 0xF0
+    av = 0; mbi = _M(); v2r = {}
+    while av < 0x70000000:
+        r = k32.VirtualQueryEx(pm.process_handle, ctypes.c_void_p(av), ctypes.byref(mbi), ctypes.sizeof(mbi))
+        if r == 0: break
+        if mbi.State == 0x1000 and mbi.Protect & 0x04 and mbi.RegionSize < 0x100000:
+            try:
+                data = pm.read_bytes(mbi.BaseAddress, min(mbi.RegionSize, 65536))
+                pos = data.find(b'ladder')
+                if pos >= 0 and pos >= 0x18:
+                    cand = mbi.BaseAddress + pos - 0x18
+                    rid = pm.read_int(cand + 0x10)
+                    if rid == 0:
+                        arr_b = cand
+                        for b in range(1, 500):
+                            try:
+                                t = cand - b * V2_RS
+                                tr = pm.read_int(t + 0x10)
+                                if tr > 5000: break
+                                arr_b = t
+                            except:
+                                break
+                        cc = 0
+                        while True:
+                            try:
+                                t = arr_b + cc * V2_RS
+                                tr = pm.read_int(t + 0x10)
+                                if tr > 5000: break
+                                rn = pm.read_bytes(t + 0x18, 16)
+                                nn = rn.find(b'\x00')
+                                if nn >= 0: rn = rn[:nn]
+                                nm = rn.decode("ascii", errors="replace").strip()
+                                if len(nm) >= 2: v2r[nm.lower()] = t
+                            except:
+                                break
+                            cc += 1
+                            if cc > 3000: break
+                        if cc > 100: return v2r
+            except:
+                pass
+        av = mbi.BaseAddress + mbi.RegionSize
+    return {}
+
+
+### 5. Web API 类
+
+
+pm = None; connected = False; base_addr = 0
+dwarf_cache = []; item_cache = []
+# A list alone cannot tell the interface whether a world truly has no entries,
+# the game was disconnected, or the live locator stopped matching.  Keep the
+# last read outcome separate from the cached payload.  Consumers that need the
+# legacy list can continue to use the existing helpers; the UI uses the state
+# envelopes below and therefore never has to guess from an empty list.
+_read_cache_state_lock = threading.RLock()
+_dwarf_cache_state = {"state": "未连接", "error": "尚未连接游戏", "updated_at": 0.0}
+_item_cache_state = {"state": "未连接", "error": "尚未连接游戏", "updated_at": 0.0}
+# The map heartbeat and the dwarf panel run on separate browser calls. Keep
+# their shared cache atomic so a transient Worker validation failure cannot
+# make dwarves disappear from the panel.
+_dwarf_cache_lock = threading.RLock()
+
+def _dwarf_cache_snapshot():
+    with _dwarf_cache_lock:
+        return [dict(entry) for entry in dwarf_cache]
+
+def _replace_dwarf_cache(entries):
+    global dwarf_cache
+    clean = [dict(entry) for entry in (entries or [])]
+    with _dwarf_cache_lock:
+        dwarf_cache = clean
+    return [dict(entry) for entry in clean]
+
+def _set_cached_read_state(kind, state, error=""):
+    """Store an explicit read result without destroying the last good cache."""
+    global _dwarf_cache_state, _item_cache_state
+    value = {"state": str(state or "读取失败"), "error": str(error or ""),
+             "updated_at": time.time()}
+    with _read_cache_state_lock:
+        if kind == "dwarves":
+            _dwarf_cache_state = value
+        elif kind == "items":
+            _item_cache_state = value
+    return dict(value)
+
+def _get_cached_read_state(kind):
+    with _read_cache_state_lock:
+        source = _dwarf_cache_state if kind == "dwarves" else _item_cache_state
+        return dict(source)
+
+def _tech_read_ascii(pm_obj, address, max_length=96):
+    """Read a safe ASCII tech node key from target memory."""
+    try:
+        if not address or not (0x10000 <= int(address) < 0x7FFFFFFF):
+            return ""
+        raw = pm_obj.read_bytes(int(address), max_length)
+        raw = raw.split(b"\x00", 1)[0]
+        if not raw or len(raw) > 80:
+            return ""
+        value = raw.decode("ascii")
+        return value if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value or "") else ""
+    except Exception:
+        return ""
+
+
+def _tech_node_key(pm_obj, node_addr):
+    """Node keys are either inline at +4 or referenced by a pointer at +4."""
+    inline = _tech_read_ascii(pm_obj, node_addr + TECH_NODE_NAME_OFF, 80)
+    if inline:
+        return inline
+    try:
+        ptr_key = _tech_read_ascii(pm_obj, pm_obj.read_int(node_addr + TECH_NODE_NAME_OFF), 80)
+        if ptr_key:
+            return ptr_key
+    except Exception:
+        pass
+    return _tech_v2_node_meta(pm_obj, node_addr)[0]
+
+
+def _tech_v2_node_meta(pm_obj, node_addr):
+    """Read V2 node id/title from the inline SSO string area.
+
+    The first node of every group stores its id at +4 like V1, but later
+    nodes embed the id at a variable offset.  Scan the record for the first
+    ASCII identifier token and the following 0F 00 00 00 title marker.
+    """
+    try:
+        raw = pm_obj.read_bytes(node_addr, 0x60)
+    except Exception:
+        return "", ""
+    if not raw or len(raw) < 0x20:
+        return "", ""
+    key = ""
+    match = re.search(rb"[A-Za-z][A-Za-z0-9_]{2,}", raw[4:])
+    if not match:
+        return "", ""
+    key = match.group(0).decode("ascii")
+    token_end = 4 + match.end()
+    marker = raw.find(b"\x0F\x00\x00\x00", token_end)
+    title = ""
+    if marker >= 0 and marker + 4 < len(raw):
+        title_raw = raw[marker + 4:].split(b"\x00", 1)[0]
+        try:
+            decoded = title_raw.decode("utf-8")
+            if decoded and any(ord(ch) >= 0x80 for ch in decoded):
+                title = decoded
+        except Exception:
+            title = ""
+    return key, title
+
+
+def _tech_game_dir():
+    try:
+        import psutil
+        return os.path.dirname(psutil.Process(pm.process_id).exe())
+    except Exception:
+        return ""
+
+
+def _load_tech_locale():
+    """Return {node_key: Chinese title} from the game's official locale file."""
+    result = {}
+    path = os.path.join(_tech_game_dir(), "lang", "tech_locale.csv")
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f, delimiter=";")
+            for row in reader:
+                key = (row.get("key") or "").strip()
+                title = (row.get("chinese") or "").strip()
+                if key:
+                    result[key] = title or key
+    except Exception:
+        pass
+    return result
+
+
+def _parse_tech_tree_file(path):
+    """Parse node -> recipes mapping from a *_techtree.csv file."""
+    result = {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+        for segment in text.replace("\r", "").replace("\n", ";").split(";"):
+            segment = re.sub(r"^\s*level:\d+\|", "", segment.strip())
+            segment = re.sub(r"^[<>!|\s]+", "", segment)
+            tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*", segment)
+            if len(tokens) >= 1:
+                result[tokens[0]] = tokens[1:]
+    except Exception:
+        pass
+    return result
+
+
+def _load_active_tech_recipes(node_keys):
+    """Pick the map/DLC technology CSV which best matches live node keys."""
+    data_dir = os.path.join(_tech_game_dir(), "data")
+    best, best_score = {}, -1
+    try:
+        for filename in os.listdir(data_dir):
+            if not filename.lower().endswith("techtree.csv"):
+                continue
+            parsed = _parse_tech_tree_file(os.path.join(data_dir, filename))
+            score = len(set(parsed).intersection(node_keys))
+            if score > best_score:
+                best, best_score = parsed, score
+    except Exception:
+        pass
+    return best
+
+
+def _read_live_tech_nodes(pm_obj, is_v2=None):
+    """Read the currently loaded map's real technology nodes from Reciper."""
+    base = get_base(pm_obj)
+    if is_v2 is None:
+        is_v2 = False
+    reciper_off = V2_TECH_RECIPER_PTR_OFFSET if is_v2 else TECH_RECIPER_PTR_OFFSET
+    groups_off = V2_TECH_GROUPS_OFFSET if is_v2 else TECH_GROUPS_OFFSET
+    group_stride = V2_TECH_GROUP_STRIDE if is_v2 else TECH_GROUP_STRIDE
+    node_size = V2_TECH_NODE_SIZE if is_v2 else TECH_NODE_SIZE
+    reciper = pm_obj.read_int(base + reciper_off)
+    if not reciper or not (0x10000 <= reciper < 0x7FFFFFFF):
+        raise RuntimeError("未找到科技树管理器，请先进入已载入的游戏地图")
+    nodes = []
+    for group in range(TECH_GROUP_COUNT):
+        vector = reciper + groups_off + group * group_stride
+        start = pm_obj.read_int(vector)
+        end = pm_obj.read_int(vector + 4)
+        if not start or not end or end < start or (end - start) % node_size:
+            continue
+        count = min((end - start) // node_size, 96)
+        for index in range(count):
+            address = start + index * node_size
+            key = _tech_node_key(pm_obj, address)
+            if not key:
+                continue
+            state = pm_obj.read_int(address + TECH_NODE_STATE_OFF)
+            if state not in TECH_STATE_LABELS:
+                continue
+            try:
+                progress = float(pm_obj.read_float(address + TECH_NODE_PROGRESS_OFF))
+            except Exception:
+                progress = 0.0
+            node = {
+                "id": key,
+                "address": address,
+                "group": group,
+                "index": index,
+                "state": state,
+                "progress": max(0.0, min(1.0, progress)),
+            }
+            if is_v2:
+                node["mem_title"] = _tech_v2_node_meta(pm_obj, address)[1]
+            nodes.append(node)
+    if not nodes:
+        raise RuntimeError("当前地图没有可读取的科技节点")
+    return nodes
+def _read_magic_value(pm_obj, address, value_type):
+    return float(pm_obj.read_float(address)) if value_type == "float" else int(pm_obj.read_int(address))
+
+
+def _scan_magic_items(pm_obj, cancelled=None):
+    """Find every supported player magic config in one fast private-heap pass.
+
+    A magic key may occur in XML buffers and monster definitions too.  We only
+    accept candidates whose following fixed-size records exactly match the
+    expected property order, then score their original values to select the
+    player spell instead of a similarly named monster spell.  The key search
+    uses raw byte finds instead of a regex, and each candidate is validated
+    from a single bulk read, so the one-time connection scan is far cheaper.
+    """
+    started = time.time()
+    if cancelled is None:
+        cancelled = lambda: False
+    definitions = {entry["id"]: entry for entry in MAGIC_DEFS}
+    needle = b"magic_"
+    # The effective light radius belongs to the mlight item configuration,
+    # not to its magic_light properties record.  Its validated field is +0x34.
+    light_needle = b"mlight\x00"
+    candidates = {key: [] for key in definitions}
+    light_candidates = []
+    strong_matches = set()
+    seen = set()
+    light_seen = set()
+    readable_writable = {0x04, 0x08, 0x40, 0x80}  # RW / WC / ERW / EWC
+    chunk_size = 0x200000
+    overlap = 0x240
+
+    def _is_ident_char(value):
+        return value == 95 or 48 <= value <= 57 or 65 <= value <= 90 or 97 <= value <= 122
+
+    def _process_candidate(record_address, definition):
+        keys = definition["keys"]
+        window = (len(keys) - 1) * MAGIC_PROP_STRIDE + 0x70 + 0x40
+        try:
+            block = pm_obj.read_bytes(record_address, window)
+        except Exception:
+            return
+        if not block or len(block) < window:
+            return
+        for index, name in enumerate(keys):
+            start = index * MAGIC_PROP_STRIDE
+            end = block.find(b"\x00", start)
+            if end == -1 or end > start + 40 or block[start:end] != name.encode("ascii"):
+                return
+        fields = []
+        score = 0
+        for field_name, field_title, value_type, original in definition["fields"]:
+            try:
+                key_index = keys.index(field_name)
+            except ValueError:
+                continue
+            if key_index <= 0:
+                continue
+            offset = (key_index - 1) * MAGIC_PROP_STRIDE + MAGIC_VALUE_OFF
+            try:
+                if value_type == "float":
+                    value = struct.unpack_from("<f", block, offset)[0]
+                else:
+                    value = struct.unpack_from("<i", block, offset)[0]
+            except Exception:
+                continue
+            if value_type == "float":
+                if math.isclose(value, float(original), rel_tol=0.0001, abs_tol=0.0001):
+                    score += 1
+            elif value == original:
+                score += 1
+            fields.append({"id": field_name, "title": field_title, "type": value_type,
+                           "address": record_address + offset, "value": value, "original": original})
+        if fields:
+            candidates[definition["id"]].append((score, record_address, fields))
+            # A full (or all-but-one, after a user edit) source-value match is
+            # sufficient.  Stop once every supported spell has a high-confidence
+            # record instead of scanning the rest of the large private heaps.
+            if score >= max(1, len(definition["fields"]) - 1):
+                strong_matches.add(definition["id"])
+
+    address = 0
+    while address < 0x80000000:
+        if cancelled():
+            return {}, int((time.time() - started) * 1000)
+        try:
+            mbi = pymem.memory.virtual_query(pm_obj.process_handle, address)
+        except Exception:
+            break
+        region_base = int(mbi.BaseAddress)
+        region_size = int(mbi.RegionSize)
+        next_address = region_base + region_size
+        protect = int(mbi.Protect)
+        # Property records live in normal private heap allocations.  Skipping
+        # large mapped/map-buffer regions keeps the scan fast without weakening
+        # field validation.
+        if (int(mbi.State) == 0x1000 and int(mbi.Type) == 0x20000 and 0x10000 <= region_size <= 0x400000
+                and (protect & 0x100) == 0 and (protect & 0xFF) in readable_writable):
+            offset = 0
+            while offset < region_size:
+                if cancelled():
+                    return {}, int((time.time() - started) * 1000)
+                read_size = min(chunk_size, region_size - offset)
+                read_base = region_base + offset
+                try:
+                    block = pm_obj.read_bytes(read_base, read_size)
+                except Exception:
+                    block = None
+                if block:
+                    pos = block.find(needle)
+                    while pos != -1:
+                        if cancelled():
+                            return {}, int((time.time() - started) * 1000)
+                        if pos == 0 or not _is_ident_char(block[pos - 1]):
+                            end = pos + len(needle)
+                            while end < len(block) and end - (pos + len(needle)) < 24 and _is_ident_char(block[end]):
+                                end += 1
+                            if end < len(block) and block[end] == 0:
+                                magic_id = "magic_" + block[pos + len(needle):end].decode("ascii")
+                                definition = definitions.get(magic_id)
+                                if definition:
+                                    record_address = read_base + pos
+                                    if record_address not in seen:
+                                        seen.add(record_address)
+                                        if definition["id"] not in strong_matches:
+                                            _process_candidate(record_address, definition)
+                        pos = block.find(needle, pos + 1)
+                    lpos = block.find(light_needle)
+                    while lpos != -1:
+                        if cancelled():
+                            return {}, int((time.time() - started) * 1000)
+                        name_address = read_base + lpos
+                        if name_address not in light_seen:
+                            light_seen.add(name_address)
+                            try:
+                                light_block = pm_obj.read_bytes(name_address, 0x40)
+                                radius = struct.unpack_from("<i", light_block, 0x34)[0] if light_block and len(light_block) >= 0x38 else 0
+                                # XML text and unrelated strings do not have a
+                                # plausible small integer at this runtime offset.
+                                if 1 <= radius <= 64:
+                                    light_candidates.append((name_address, name_address + 0x34, radius))
+                            except Exception:
+                                pass
+                        lpos = block.find(light_needle, lpos + 1)
+                if len(strong_matches) == len(definitions):
+                    break
+                if offset + read_size >= region_size:
+                    break
+                offset += max(1, read_size - overlap)
+            if len(strong_matches) == len(definitions):
+                break
+        if next_address <= address:
+            break
+        address = next_address
+
+    resolved = {}
+    for magic_id, options in candidates.items():
+        if not options:
+            continue
+        # Original values distinguish player spells from duplicated XML/monster entries.
+        score, record_address, fields = max(options, key=lambda item: (item[0], -item[1]))
+        definition = definitions[magic_id]
+        resolved[magic_id] = {
+            "id": magic_id, "title": definition["title"], "record": record_address,
+            "fields": {field["id"]: field for field in fields}, "score": score,
+        }
+    if "magic_light" in resolved and light_candidates:
+        # There should be one validated runtime item record.  Prefer the
+        # lowest address on the rare occasion several equivalent copies exist.
+        name_address, value_address, radius = min(light_candidates, key=lambda item: item[0])
+        resolved["magic_light"]["light_record"] = name_address
+        resolved["magic_light"]["fields"]["light_radius"] = {
+            "id": "light_radius", "title": "实际照明半径（新放置生效）",
+            "type": "int", "address": value_address, "value": radius, "original": 4,
+        }
+    return resolved, int((time.time() - started) * 1000)
+
+
+class Api:
+    # The runtime ShopDialog keeps the selected category and product index in
+    # these fields.  They are used only for a read-only native-selection probe
+    # until the full UI Event ABI is reproduced.
+    V1_SHOP_DIALOG_VTABLE_RVA = 0xBCC2D4
+    SHOP_DIALOG_CATEGORY_OFF = 0x204
+    SHOP_DIALOG_ITEM_INDEX_OFF = 0x210
+    SHOP_DIALOG_GROUPS_OFF = 0x15C
+    SHOP_DIALOG_GROUP_STRIDE = 0x18
+    SHOP_DIALOG_MAX_CATEGORY = 32
+    SHOP_DIALOG_MAX_ITEM_INDEX = 4096
+    _shop_dialog_probe_cache = {"pid": 0, "address": 0, "at": 0.0}
+    _shop_dialog_probe_lock = threading.RLock()
+    # World/task diagnostics deliberately use a closed status vocabulary. A
+    # local definition is never allowed to look like a live runtime read.
+    STATUS_VERIFIED = "已验证"
+    STATUS_FAILED = "读取失败"
+    STATUS_UNSUPPORTED = "版本不支持"
+    STATUS_UNVERIFIED = "语义未验证"
+    STATUS_DISCONNECTED = "未连接"
+    STATUS_EMPTY = "当前存档没有数据"
+    STATUS_STALE = "定位失效"
+    # Historical endpoints still use these names. Keep them as aliases of
+    # the unified UI states so a normal no-dialog/no-record condition never
+    # becomes an AttributeError or a fake successful read.
+    STATUS_OK = STATUS_VERIFIED
+    STATUS_NOT_CONNECTED = STATUS_DISCONNECTED
+    STATUS_NO_DATA = STATUS_EMPTY
+    STATUS_RELOCATION_FAILED = STATUS_STALE
+    # Training profiles deliberately only target skills that already exist on a
+    # dwarf. Adding/removing a skill record has a different native-vector
+    # safety contract and is therefore not included in V1.0 batch writes.
+    DWARF_TRAINING_PROFILES = {
+        "miner": {"name": "矿工", "skills": ("miner",)},
+        "warrior": {"name": "战士", "skills": ("swordsman",)},
+        "builder": {"name": "建筑师", "skills": ("carpenter", "stonecutter", "smith")},
+        "farmer": {"name": "农夫", "skills": ("logger", "hunter", "fisher", "cook")},
+        "mage": {"name": "法师", "skills": ("mage",)},
+    }
+    # All eight native fields were tested by the player in the current game
+    # build.  Keep the complete layout available in both the single-dwarf
+    # editor and the cultivation preset; the transaction still validates the
+    # slot class, object, snapshot and write-back before changing memory.
+    DWARF_TRAINING_VERIFIED_EQUIPMENT_SLOTS = tuple(
+        slot["key"] for slot in V1_DWARF_EQUIPMENT_SLOTS)
+    DWARF_TRAINING_EXPERIMENTAL_EQUIPMENT_SLOTS = ()
+    DWARF_INDIVIDUAL_VERIFIED_EQUIPMENT_SLOTS = tuple(
+        slot["key"] for slot in V1_DWARF_EQUIPMENT_SLOTS)
+    DWARF_INDIVIDUAL_CANDIDATE_EQUIPMENT_SLOT = ""
+    # Keep restored world tools available.  Their individual methods retain
+    # their own process/object/range checks instead of a global hidden switch.
+    HIGH_RISK_WORLD_WRITES_ENABLED = True
+    locks = {"gold":False,"mana":False,"xp":False}
+    # Separate from the legacy hard lock: this is a low-frequency economy rule
+    # that writes only after a floor/fixed-value boundary is crossed.
+    GOLD_ECONOMY_INTERVAL = 1.0
+    GOLD_ECONOMY_MAX = 2000000000
+    _gold_economy_guard = threading.RLock()
+    _gold_economy_state = {"enabled": False, "mode": "floor", "floor": None,
+                           "ceiling": None, "fixed": None, "generation": 0}
+    _gold_economy_last_before = None
+    _gold_economy_last_after = None
+    _gold_economy_events = []
+    MANA_CONTROL_MAX = 100000000.0
+    MANA_RESERVE_INTERVAL = 1.0
+    _mana_reserve_guard = threading.RLock()
+    _mana_reserve_state = {"enabled": False, "low_percent": 30.0,
+                           "restore_percent": 80.0, "generation": 0}
+    _pa1 = False; _pa2 = False
+    _recipe_scanned = False
+    _recipe_cache = {}
+    _shop_data = {}
+    _skill_base_cache = None
+    _skill_base_ver = None
+    _pet_house_original = None
+    _pet_infinite_original = {}
+    _portal_locks = {}
+    _portal_lock_guard = threading.RLock()
+    _portal_samples = {}
+    _portal_stability = {}
+    _v2_portal_objects = []
+    _v2_portal_scan_at = 0.0
+    _v2_portal_scan_pid = 0
+    _v2_portal_scan_lock = threading.RLock()
+    _magic_cache = {}
+    _magic_scan_ms = 0
+    _magic_process_id = 0
+    _magic_scan_running = False
+    # A completed scan which found no supported records must not be mistaken
+    # for a scan that has never started.  The latter may start one worker; the
+    # former is a real, visible compatibility result and must not spin a new
+    # process-wide scan on every UI refresh.
+    _magic_scan_completed = False
+    _magic_scan_error = ""
+    _native_magic_resources = {}
+    # Read-only task probe state is scoped to the exact connected process.
+    # It contains raw snapshots only long enough to compare a user-confirmed
+    # one-step task progress change; it never authorizes a task write.
+    _task_runtime_candidates = {}
+    _task_runtime_candidates_generation = 0
+    _task_runtime_probe_baselines = {}
+    # Pandora event records are parsed from XML into a heap table per map
+    # load.  Keep only validated dynamic addresses for this process.
+    _pandora_cache = None
+    _pandora_cache_pid = 0
+    _pandora_scan_ms = 0
+    _pandora_forced_key = ""
+    # Pandora uses two stable vtables in the Steam original.  The chest
+    # behaviour is transient; the spawner lives for the loaded map and owns
+    # the countdown used by its Update method.
+    PANDORA_CHEST_BEHAVIOUR_VTABLE_RVA = 0xBC4540
+    PANDORA_SPAWNER_VTABLE_RVA = 0xBC46E4
+    PANDORA_SPAWNER_TIMER_OFF = 0x118
+    PANDORA_CHEST_TALK_PTR_OFF = 0x148
+    # CE verification on a live generated chest: the std::string length is
+    # +0x158 (19 for ``pandora_chest_talk_``) and capacity is +0x15C (31).
+    # The prior +4-shift made every real chest fail the strict validator.
+    PANDORA_CHEST_TALK_LEN_OFF = 0x158
+    PANDORA_CHEST_TALK_CAP_OFF = 0x15C
+    _pandora_runtime_cache = {}
+    _pandora_runtime_scan_lock = threading.RLock()
+    _pandora_chest_seen_for_override = False
+    _pandora_empty_confirmations = 0
+    # 昼夜/速度对象会随着重开游戏或退出地图而失效。这里只保存经过完整
+    # 校验的动态地址，正常轮询不会再次扫描整块内存。
+    _time_controls_cache = None
+    _time_controls_scan_lock = threading.RLock()
+    _time_controls_last_failed_scan = 0.0
+    _time_controls_scan_error = ""
+    # Monster-wave portal controls are installed only on demand.  The code
+    # cave is per-process and is always removed before disconnecting.
+    _wave_portal_controller = None
+    _wave_portal_lock = threading.RLock()
+    # The full map payload is large.  Keep only a lightweight identity for the
+    # current map so the UI can refresh dwarf markers without serialising every
+    # tile again.  A reconnect always clears this identity.
+    _map_cache_signature = None
+    _map_cache_key = ""
+    # Reusable player-side settings. They are persisted in the per-user
+    # %LOCALAPPDATA%\CraftWorldModifier\config\user_data.json store.
+    # beside map pins so a game restart never loses a prepared item profile.
+    ITEM_QUICK_LIMIT = 80
+    FEATURE_PRESET_LIMIT = 30
+    MANA_MAX_LOCK_INTERVAL = 0.45
+    MANA_MAX_LOCK_LIMIT = 10000000.0
+    _mana_max_lock_guard = threading.RLock()
+    _mana_max_lock_enabled = False
+    _mana_max_lock_target = None
+    _mana_max_lock_generation = 0
+    # Timers are short-lived per-process controls.  Unlike the mana-cap lock,
+    # these are deliberately not persisted: a new map creates new runtime
+    # objects and should always begin unlocked.
+    TIMER_LOCK_INTERVAL = 0.35
+    _timer_lock_guard = threading.RLock()
+    _timer_locks = {
+        "countdown": {"enabled": False, "target": None, "generation": 0},
+        "game_time": {"enabled": False, "target": None, "generation": 0},
+        "game_speed": {"enabled": False, "target": None, "generation": 0},
+        "pandora": {"enabled": False, "target": None, "generation": 0},
+    }
+    # Every game-memory write and process transition shares this gate.  It is
+    # separate from the pause lock so ordinary writes cannot race a suspended
+    # write batch or a disconnect/reconnect operation.
+    _memory_write_lock = threading.RLock()
+    _process_pause_lock = threading.RLock()
+    # A pywebview API call can outlive the browser window that started it.
+    # Keep a small, monotonic session marker so background workers from a
+    # previous connection (or a closing window) can never publish stale data
+    # into a newly opened UI session.
+    _runtime_session_lock = threading.RLock()
+    _runtime_session_generation = 0
+    _runtime_shutdown = False
+    # Every recurring writer/scanner is registered here.  Session generation
+    # prevents stale memory access; the registry additionally lets shutdown
+    # observe and reap workers instead of leaving anonymous daemon threads
+    # behind after a WebView2 close or reconnect.
+    _runtime_workers_lock = threading.RLock()
+    _runtime_workers = set()
+    _magic_scan_token = 0
+    # Undo history is session-only. Runtime addresses never cross a reconnect;
+    # offline entries additionally bind to the exact post-write SHA-256.
+    OPERATION_HISTORY_LIMIT = 50
+    _operation_history_lock = threading.RLock()
+    _operation_history = []
+    _operation_history_next_id = 1
+    # This is deliberately session-only. A successful same-value readback
+    # proves the current process/layout, not every later game restart.
+    _stable_baseline_save_readback = None
+    # Compatibility Doctor is deliberately read-only.  A successful connect
+    # may still expose read-only pages, but every direct memory write must
+    # pass this lightweight structural check first.  This protects against a
+    # game update, a half-loaded save, and accidentally attaching to an
+    # unrelated CraftWorld.exe build.
+    _compatibility_doctor = {"ok": False, "write_ready": False,
+                             "checked_pid": 0, "checks": [],
+                             "summary": "尚未检查"}
+    _compatibility_doctor_lock = threading.RLock()
+    # The merged default/user configuration must never be read/rewritten
+    # concurrently by two pywebview API calls.
+    _config_lock = threading.RLock()
+    # A previous modifier build overwrote these three bytes inside the save
+    # writer.  The replacement corrupts the caller stack when the game saves.
+    LEGACY_SAVE_PATCH_RVA = 0x003FC311
+    LEGACY_SAVE_PATCH_BYTES = bytes((0x83, 0xC4, 0x0C))
+
+    def _begin_runtime_session(self):
+        """Invalidate old workers and allow requests for a new connection."""
+        self._invalidate_runtime_operation_history('游戏连接已重置，旧运行时地址不再有效')
+        with self._runtime_session_lock:
+            self._runtime_session_generation += 1
+            self._runtime_shutdown = False
+            self._magic_scan_token += 1
+            self._magic_scan_running = False
+            self._magic_scan_completed = False
+            self._task_runtime_candidates = {}
+            self._task_runtime_candidates_generation = self._runtime_session_generation
+            self._task_runtime_probe_baselines = {}
+            self._stable_baseline_save_readback = None
+            return self._runtime_session_generation
+
+    def _end_runtime_session(self):
+        """Stop background workers before process/window teardown."""
+        self._invalidate_runtime_operation_history('游戏已断开，运行时操作不能跨会话撤销')
+        with self._runtime_session_lock:
+            self._runtime_shutdown = True
+            self._runtime_session_generation += 1
+            self._magic_scan_token += 1
+            self._magic_scan_running = False
+            self._magic_scan_completed = False
+            self._task_runtime_candidates = {}
+            self._task_runtime_candidates_generation = self._runtime_session_generation
+            self._task_runtime_probe_baselines = {}
+            self._stable_baseline_save_readback = None
+            return self._runtime_session_generation
+
+    @staticmethod
+    def _operation_history_value(value):
+        '''Keep history JSON-safe and prevent later callers mutating it.'''
+        if isinstance(value, dict):
+            return {str(key): Api._operation_history_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Api._operation_history_value(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _record_operation(self, kind, scope, target, field, before, after,
+                          readback_ok=True, runtime_generation=None,
+                          runtime_pid=None, meta=None):
+        '''Append one verified, session-local operation history entry.'''
+        with self._operation_history_lock:
+            operation_id = int(self._operation_history_next_id)
+            self._operation_history_next_id += 1
+            entry = {
+                'id': operation_id,
+                'kind': str(kind),
+                'scope': str(scope),
+                # A live-memory readback proves only the current process
+                # state. It is not a completed persistence test until the
+                # player re-enters the save and the exact field is read again.
+                'state': ('runtime_readback_verified_pending_reentry'
+                          if str(scope) == 'runtime' else '已完成'),
+                'verification_state': ('pending_reentry'
+                                       if str(scope) == 'runtime' else 'not_required'),
+                'verification_note': ('已完成暂停写入与即时读回；仍需退出并重新进入同一存档后复核。'
+                                      if str(scope) == 'runtime' else ''),
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'target': self._operation_history_value(target or {}),
+                'field': str(field or ''),
+                'before': self._operation_history_value(before),
+                'after': self._operation_history_value(after),
+                'readback_ok': bool(readback_ok),
+                'undo_available': bool(readback_ok),
+                'undo_reason': '',
+                'runtime_generation': runtime_generation,
+                'runtime_pid': runtime_pid,
+                'meta': self._operation_history_value(meta or {}),
+            }
+            self._operation_history.append(entry)
+            overflow = len(self._operation_history) - int(self.OPERATION_HISTORY_LIMIT)
+            if overflow > 0:
+                del self._operation_history[:overflow]
+            return self._operation_history_value(entry)
+
+    def _invalidate_runtime_operation_history(self, reason):
+        '''Disable undo for live-memory entries when their address session ends.'''
+        with self._operation_history_lock:
+            for entry in self._operation_history:
+                if entry.get('scope') != 'runtime' or not entry.get('undo_available'):
+                    continue
+                entry['state'] = '已失效'
+                entry['undo_available'] = False
+                entry['undo_reason'] = str(reason or '运行时会话已失效')
+
+    def _operation_history_entry(self, operation_id):
+        try:
+            operation_id = int(operation_id)
+        except (TypeError, ValueError):
+            return None
+        with self._operation_history_lock:
+            for entry in reversed(self._operation_history):
+                if int(entry.get('id', -1)) == operation_id:
+                    return entry
+        return None
+
+    def get_operation_history(self):
+        '''Return newest-first copies suitable for the WebView frontend.'''
+        with self._operation_history_lock:
+            return [self._operation_history_value(entry)
+                    for entry in reversed(self._operation_history)]
+
+    def confirm_runtime_operation_reentry(self, operation_id):
+        """Confirm a runtime operation only after the player reloads the save.
+
+        This is deliberately a read-only confirmation. It re-resolves the live
+        target and compares it with the operation snapshot before changing the
+        audit state; it never treats an in-session write as persistent.
+        """
+        entry = self._operation_history_entry(operation_id)
+        if not entry:
+            return {'ok': False, 'error': '未找到操作记录'}
+        if entry.get('scope') != 'runtime':
+            return {'ok': False, 'error': '只有运行时写入需要重进存档复核'}
+        verification = str(entry.get('verification_state') or '')
+        if verification not in ('pending_reentry', 'undo_pending_reentry'):
+            return {'ok': False, 'error': '该操作当前不需要重进存档复核'}
+        if not self._runtime_operation_is_current(entry):
+            return {'ok': False, 'error': '游戏连接已变化；请重新扫描并从新的会话开始验证'}
+        target = entry.get('target') or {}
+        expected = entry.get('before') if verification == 'undo_pending_reentry' else entry.get('after')
+        try:
+            kind = str(entry.get('kind') or '')
+            if kind == 'dwarf_personal_skill':
+                dwarf = self._live_dwarf_by_index(target.get('dwarf_index'))
+                if not dwarf or (target.get('dwarf_name') and dwarf.get('name') != target.get('dwarf_name')):
+                    raise RuntimeError('找不到原矮人；请刷新后确认编号和名称未变化')
+                live = {row['id']: float(row['value'])
+                        for row in self._read_v1_personal_skills(int(dwarf.get('edi') or 0))}
+                if not isinstance(expected, dict) or any(
+                        key not in live or abs(live[key] - float(value)) > 0.05
+                        for key, value in expected.items()):
+                    raise RuntimeError('个人技能读回与记录值不一致')
+            elif kind == 'dwarf_equipment':
+                dwarf = self._live_dwarf_by_index(target.get('dwarf_index'))
+                if not dwarf or (target.get('dwarf_name') and dwarf.get('name') != target.get('dwarf_name')):
+                    raise RuntimeError('找不到原矮人；请刷新后确认编号和名称未变化')
+                info = self.get_dwarf_equipment(target.get('dwarf_index'))
+                if not info.get('ok'):
+                    raise RuntimeError(info.get('error') or '无法重新读取装备栏')
+                live = {row['key']: int(row['value']) for row in info.get('slots', [])}
+                if not isinstance(expected, dict) or any(
+                        live.get(key) != int(value) for key, value in expected.items()):
+                    raise RuntimeError('装备槽读回与记录值不一致')
+            elif kind == 'runtime_item_qty':
+                item_id = str(target.get('item_id') or '')
+                item = next((row for row in item_cache if row.get('name_en') == item_id), None)
+                if not item:
+                    raise RuntimeError('未找到该物品的重新扫描结果；请先重新扫描仓库')
+                if int(item.get('qty', -1)) != int(expected):
+                    raise RuntimeError('物品数量读回与记录值不一致')
+            elif kind == 'dwarf_training_preset':
+                ok, error = self._verify_dwarf_training_snapshot(expected)
+                if not ok:
+                    raise RuntimeError(error)
+            elif kind == 'magic_profile':
+                ok, error = self._verify_magic_snapshot(expected)
+                if not ok:
+                    raise RuntimeError(error)
+            else:
+                raise RuntimeError('该操作类型尚不支持重进存档复核')
+        except Exception as exc:
+            return {'ok': False, 'error': '重进存档复核失败：%s' % exc}
+        with self._operation_history_lock:
+            entry['verification_state'] = 'passed'
+            entry['verification_note'] = '已在退出并重新进入同一存档后读回，并由用户人工确认。'
+            entry['verified_after_reentry_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+            entry['state'] = ('已撤销（重进已确认）'
+                              if verification == 'undo_pending_reentry' else '已完成')
+        return {'ok': True, 'operation_id': entry.get('id'), 'state': entry.get('state')}
+
+    def _runtime_operation_is_current(self, entry):
+        if not entry or entry.get('scope') != 'runtime':
+            return False
+        try:
+            expected_generation = int(entry.get('runtime_generation'))
+            expected_pid = int(entry.get('runtime_pid'))
+        except (TypeError, ValueError):
+            return False
+        with self._runtime_session_lock:
+            if self._runtime_shutdown or expected_generation != int(self._runtime_session_generation):
+                return False
+        try:
+            return bool(connected and pm is not None and int(pm.process_id) == expected_pid)
+        except Exception:
+            return False
+
+    def _finish_operation_undo(self, entry, result):
+        '''Mark a history entry only after the underlying transaction read back.'''
+        if not isinstance(result, dict) or not result.get('ok'):
+            return result
+        with self._operation_history_lock:
+            entry['state'] = '已撤销（待重进确认）'
+            entry['verification_state'] = 'undo_pending_reentry'
+            entry['verification_note'] = '撤销已完成即时读回；仍需退出并重新进入同一存档后复核。'
+            entry['undo_available'] = False
+            entry['undo_reason'] = '已成功撤销'
+            entry['undone_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        result['operation_id'] = entry.get('id')
+        return result
+
+    def _invalidate_operation(self, entry, reason):
+        with self._operation_history_lock:
+            entry['state'] = '已失效'
+            entry['undo_available'] = False
+            entry['undo_reason'] = str(reason or '操作已失效')
+        return {'ok': False, 'error': str(reason or '操作已失效')}
+
+    def undo_operation(self, operation_id):
+        '''Undo one verified operation only if its current state still matches.'''
+        entry = self._operation_history_entry(operation_id)
+        if not entry:
+            return {'ok': False, 'error': '未找到操作记录'}
+        if not entry.get('undo_available'):
+            return {'ok': False, 'error': entry.get('undo_reason') or '该操作不能撤销'}
+        kind = entry.get('kind')
+        if entry.get('scope') == 'runtime':
+            if not self._runtime_operation_is_current(entry):
+                return self._invalidate_operation(entry, '游戏连接已变化，旧内存操作不能撤销')
+            target = entry.get('target') or {}
+            if kind == 'runtime_item_qty':
+                result = self._modify_item_qty_transaction(
+                    target.get('item_id'), entry.get('before'),
+                    expected_current=entry.get('after'), record_history=False)
+                return self._finish_operation_undo(entry, result)
+            if kind == 'dwarf_equipment':
+                result = self.save_dwarf_equipment(
+                    target.get('dwarf_index'), entry.get('before'),
+                    _expected_current=entry.get('after'), _record_history=False)
+                return self._finish_operation_undo(entry, result)
+            if kind == 'dwarf_personal_skill':
+                ok = self._save_dwarf_personal_skills_transaction(
+                    target.get('dwarf_index'), entry.get('before'),
+                    _expected_current=entry.get('after'), _record_history=False)
+                return self._finish_operation_undo(
+                    entry, {'ok': bool(ok),
+                            'error': '' if ok else '个人技能已变化或撤销写入未通过读回'})
+            if kind == 'dwarf_training_preset':
+                before_rows = entry.get('before') or []
+                after_by_idx = {int(row.get('idx', -1)): row for row in (entry.get('after') or [])
+                                if isinstance(row, dict)}
+                restore_rows = []
+                for before_row in before_rows:
+                    if not isinstance(before_row, dict):
+                        return self._invalidate_operation(entry, '培养预设快照格式无效')
+                    idx = int(before_row.get('idx', -1))
+                    after_row = after_by_idx.get(idx)
+                    if not after_row:
+                        return self._invalidate_operation(entry, '培养预设缺少撤销快照')
+                    restore_rows.append({
+                        'idx': idx, 'name': before_row.get('name') or '',
+                        'skills_before': before_row.get('skills') or {},
+                        'skills_after': after_row.get('skills') or {},
+                        'equipment_before': before_row.get('equipment') or {},
+                        'equipment_after': after_row.get('equipment') or {},
+                    })
+                result = self._restore_dwarf_training_rows(restore_rows, True)
+                if not result.get('ok'):
+                    # Best effort: do not leave an undo half-applied if a later
+                    # guarded write rejects the batch because the game changed.
+                    self._restore_dwarf_training_rows(restore_rows, False)
+                return self._finish_operation_undo(entry, result)
+            if kind == 'magic_profile':
+                result = self._apply_magic_snapshot_transaction(
+                    entry.get('before') or {}, entry.get('after') or {},
+                    source='撤销魔法方案', record_history=False)
+                return self._finish_operation_undo(entry, result)
+            return self._invalidate_operation(entry, '该运行时操作类型不支持撤销')
+        if entry.get('scope') != 'offline' or kind not in ('offline_inventory', 'offline_technology'):
+            return self._invalidate_operation(entry, '该操作类型不支持撤销')
+        with self._save_manager_lock:
+            ok, error = self._save_require_game_stopped()
+            if not ok:
+                return {'ok': False, 'error': error}
+            target = entry.get('target') or {}
+            slot_key = target.get('slot_key')
+            slot, error = self._save_slot_from_key(slot_key)
+            if not slot:
+                return self._invalidate_operation(entry, error)
+            filename = target.get('file')
+            source_path = os.path.join(slot['path'], str(filename or ''))
+            expected_sha = (entry.get('meta') or {}).get('post_sha')
+            if (not filename or not os.path.isfile(source_path) or not expected_sha or
+                    self._save_hash(source_path) != expected_sha):
+                return self._invalidate_operation(
+                    entry, '存档已被其他操作或游戏改动，拒绝用旧记录覆盖')
+            target_kind = 'inventory' if kind == 'offline_inventory' else 'technology'
+            prepared = self._offline_save_prepare_edit(
+                slot_key, target_kind, target.get('entry_id'), entry.get('before'),
+                history_context={'record_history': False, 'undo_of': entry.get('id')})
+            if not prepared.get('ok'):
+                return prepared
+            result = self.confirm_offline_save_edit(
+                slot_key, prepared.get('token'), 'APPLY_OFFLINE_EDIT')
+            return self._finish_operation_undo(entry, result)
+
+    def _spawn_runtime_worker(self, target, args=(), name="ctw-worker"):
+        """Register a short-lived runtime worker and remove it on exit."""
+        holder = {}
+
+        def runner():
+            try:
+                return target(*args)
+            finally:
+                thread = holder.get("thread")
+                if thread is not None:
+                    with self._runtime_workers_lock:
+                        self._runtime_workers.discard(thread)
+
+        thread = threading.Thread(target=runner, daemon=True, name=name)
+        holder["thread"] = thread
+        with self._runtime_workers_lock:
+            self._runtime_workers.add(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._runtime_workers_lock:
+                self._runtime_workers.discard(thread)
+            raise
+        return thread
+
+    def _join_runtime_workers(self, timeout=1.5):
+        """Reap invalidated background workers without ever joining self.
+
+        Workers are bound to a session generation and therefore stop on the
+        next loop boundary.  This method is intentionally called *after* a
+        disconnect has cleared ``connected`` so that no worker can acquire a
+        new process through the global handle while it is being reaped.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        current = threading.current_thread()
+        with self._runtime_workers_lock:
+            workers = list(self._runtime_workers)
+        for worker in workers:
+            if worker is current:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                worker.join(remaining)
+            except RuntimeError:
+                continue
+        with self._runtime_workers_lock:
+            self._runtime_workers = {worker for worker in self._runtime_workers
+                                     if worker.is_alive()}
+            alive = len(self._runtime_workers)
+        if alive:
+            print("runtime workers still stopping:", alive)
+        return alive
+
+    def _runtime_session_current(self, generation, pm_obj=None):
+        with self._runtime_session_lock:
+            return (not self._runtime_shutdown and
+                    int(generation) == int(self._runtime_session_generation) and
+                    connected and pm is not None and
+                    (pm_obj is None or pm is pm_obj))
+
+    def _runtime_lock_worker_context(self):
+        """Capture the exact process/session a recurring writer may touch."""
+        with self._runtime_session_lock:
+            return int(self._runtime_session_generation), pm
+
+    def _runtime_lock_worker_current(self, name, generation, pm_obj):
+        return bool(self.locks.get(name, False)) and self._runtime_session_current(generation, pm_obj)
+
+    def _start_lock_worker(self, name, target, *args):
+        """Bind a recurring writer to the exact Pymem session that starts it."""
+        generation, pm_obj = self._runtime_lock_worker_context()
+        if not self._runtime_lock_worker_current(name, generation, pm_obj):
+            self.locks[name] = False
+            return False
+        self._spawn_runtime_worker(target,
+                                   args=(*args, generation, pm_obj),
+                                   name="ctw-%s-lock" % name)
+        return True
+
+    def _ensure_item_lock_restore_worker(self):
+        """Start one item-lock worker, bound to the current process session."""
+        if self._lock_restore_active:
+            return True
+        session_generation, pm_obj = self._runtime_lock_worker_context()
+        if not self._runtime_session_current(session_generation, pm_obj):
+            return False
+        self._lock_restore_active = True
+        self._spawn_runtime_worker(self._lock_restore_loop,
+                                   args=(session_generation, pm_obj),
+                                   name="ctw-item-lock")
+        return True
+
+    def shutdown(self):
+        """Window-close hook: stop writers and detach before WebView2 dies."""
+        with self._memory_write_lock:
+            self._end_runtime_session()
+            if connected or pm:
+                try:
+                    self.disconnect()
+                except Exception as exc:
+                    # Closing must not be cancelled just because the target has
+                    # already exited; all background loops were invalidated above.
+                    print("modifier shutdown cleanup:", exc)
+            else:
+                self._set_mana_max_lock_runtime(False, None)
+                self._clear_timer_locks()
+                self._lock_restore_active = False
+        self._join_runtime_workers()
+        return True
+
+    def _config_path(self):
+        """Return the clean, package-owned default configuration path."""
+        return os.path.join(_package_config_dir(), "marks.json")
+
+    def _user_config_path(self):
+        """Return the writable per-user configuration path."""
+        return os.path.join(_config_dir(), "user_data.json")
+
+    def _legacy_config_paths(self):
+        root = _application_dir()
+        return (os.path.join(root, "marks.json"),
+                os.path.join(root, "marks.json.bak"))
+
+    def _legacy_user_config_paths(self):
+        root = _application_dir()
+        return (os.path.join(root, "config", "user_data.json"),
+                os.path.join(root, "config", "user_data.json.bak"),
+                os.path.join(root, "marks.json"),
+                os.path.join(root, "marks.json.bak"))
+
+    def _write_user_config_unlocked(self, cfg):
+        """Atomically save only user-owned settings and retain one backup."""
+        cfg_path = self._user_config_path()
+        backup_path = cfg_path + ".bak"
+        tmp_path = "%s.%s.%s.tmp" % (cfg_path, os.getpid(), threading.get_ident())
+        backup_tmp = "%s.%s.%s.tmp" % (backup_path, os.getpid(), threading.get_ident())
+        try:
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+            _hide_user_data_root(_user_data_root())
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(cfg if isinstance(cfg, dict) else {}, handle,
+                          ensure_ascii=False, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "rb") as source, open(backup_tmp, "wb") as backup:
+                    shutil.copyfileobj(source, backup)
+                    backup.flush()
+                    os.fsync(backup.fileno())
+                os.replace(backup_tmp, backup_path)
+            os.replace(tmp_path, cfg_path)
+            return True
+        except Exception as exc:
+            print("user_data.json atomic save error:", exc)
+            return False
+        finally:
+            for stale in (tmp_path, backup_tmp):
+                try:
+                    if os.path.exists(stale):
+                        os.remove(stale)
+                except OSError:
+                    pass
+
+    def _read_config_unlocked(self):
+        """Read defaults plus user settings, migrating the old flat files once."""
+        defaults = _read_json_object(self._config_path()) or dict(DEFAULT_CONFIG)
+        user_path = self._user_config_path()
+        user = _read_json_object(user_path)
+        migrated = False
+        if user is None:
+            user = _read_json_object(user_path + ".bak")
+            if user is not None:
+                print("user_data.json 无效，已使用 user_data.json.bak")
+        if user is None:
+            for legacy_path in self._legacy_user_config_paths():
+                user = _read_json_object(legacy_path)
+                if user is not None:
+                    migrated = True
+                    break
+            if user is None:
+                user = {}
+
+            # Older builds kept portal plans in a second sidecar file. They
+            # are imported into the unified user configuration exactly once.
+            if not isinstance(user.get("portal_director_presets"), dict):
+                legacy_portal = _read_json_object(
+                    os.path.join(_application_dir(), "portal_director_presets.json"))
+                if isinstance(legacy_portal, dict):
+                    user["portal_director_presets"] = legacy_portal
+                    migrated = True
+            if migrated:
+                self._write_user_config_unlocked(user)
+                print("已将旧版用户配置迁移到 %LOCALAPPDATA%\\CraftWorldModifier\\config\\user_data.json")
+        return _merge_config(defaults, user)
+
+    def _read_config(self):
+        with self._config_lock:
+            return self._read_config_unlocked()
+
+    def _write_config_unlocked(self, cfg):
+        """Write only user-owned settings; never overwrite package defaults."""
+        return self._write_user_config_unlocked(cfg)
+
+    def _update_config(self, update):
+        """Serialize read-modify-write updates so independent settings persist."""
+        with self._config_lock:
+            cfg = self._read_config_unlocked()
+            update(cfg)
+            return self._write_config_unlocked(cfg)
+
+    # ==================== 修改器更新中心 ====================
+    @staticmethod
+    def _update_version_tuple(value):
+        """Parse a conservative numeric version; unknown suffixes are ignored."""
+        parts = re.findall(r"\d+", str(value or ""))
+        if not parts:
+            return None
+        values = [int(item) for item in parts[:4]]
+        values.extend([0] * (4 - len(values)))
+        return tuple(values)
+
+    @staticmethod
+    def _update_url(value):
+        """Accept only HTTP(S), file URLs, or an explicit local file path."""
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        # Windows drive letters are reported as a URI scheme by urlparse
+        # (``C:\\...`` -> scheme ``c``); check an existing local file first.
+        local_candidate = os.path.abspath(os.path.expanduser(value))
+        if os.path.isfile(local_candidate):
+            return local_candidate
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme in ("http", "https"):
+            return value
+        if parsed.scheme == "file":
+            return urllib.request.url2pathname(parsed.path)
+        if parsed.scheme:
+            return ""
+        return ""
+
+    @staticmethod
+    def _update_safe_rel(value):
+        """Normalize a relative package path and reject traversal/absolute paths."""
+        value = str(value or "").replace("\\", "/").strip()
+        if not value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
+            return ""
+        parts = [part for part in value.split("/") if part not in ("", ".")]
+        if not parts or any(part == ".." for part in parts):
+            return ""
+        return "/".join(parts)
+
+    @classmethod
+    def _update_allowed_rel(cls, value):
+        rel = cls._update_safe_rel(value)
+        if not rel:
+            return ""
+        lower = rel.lower()
+        name = lower.rsplit("/", 1)[-1]
+        if lower in {item.lower() for item in UPDATE_ALLOWED_SOURCE_NAMES}:
+            return rel
+        if name in {item.lower() for item in UPDATE_ALLOWED_EXE_NAMES}:
+            return rel
+        if "/" not in rel and any(name.startswith(prefix.lower()) for prefix in UPDATE_ALLOWED_SOURCE_PREFIXES):
+            return rel
+        return ""
+
+    @staticmethod
+    def _update_strip_package_root(name):
+        """Strip one common archive directory without accepting traversal."""
+        rel = Api._update_safe_rel(name)
+        if not rel:
+            return ""
+        allowed = Api._update_allowed_rel(rel)
+        if allowed:
+            return allowed
+        pieces = rel.split("/")
+        if len(pieces) > 1:
+            return Api._update_allowed_rel("/".join(pieces[1:]))
+        return ""
+
+    @staticmethod
+    def _update_stream_bytes(url, limit):
+        """Read a bounded local/HTTP payload and return bytes plus resolved URL."""
+        parsed = urllib.parse.urlparse(str(url or ""))
+        if parsed.scheme in ("http", "https"):
+            request = urllib.request.Request(str(url), headers={"User-Agent": "CraftWorldModifier/%s" % APP_VERSION,
+                                                                  "Cache-Control": "no-cache"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                declared = int(response.headers.get("Content-Length") or 0)
+                if declared and declared > int(limit):
+                    raise ValueError("远程文件超过允许大小限制")
+                chunks, total = [], 0
+                while True:
+                    chunk = response.read(min(1024 * 1024, int(limit) - total + 1))
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > int(limit):
+                        raise ValueError("远程文件超过允许大小限制")
+                    chunks.append(chunk)
+                return b"".join(chunks), str(url)
+        path = str(url or "")
+        if parsed.scheme == "file":
+            path = urllib.request.url2pathname(parsed.path)
+        path = os.path.abspath(os.path.expanduser(path))
+        size = os.path.getsize(path)
+        if size > int(limit):
+            raise ValueError("本地文件超过允许大小限制")
+        with open(path, "rb") as handle:
+            return handle.read(), path
+
+    def _update_feed_url(self, supplied=""):
+        """Return the built-in release API endpoint; never read user config."""
+        value = str(supplied or os.environ.get(UPDATE_FEED_ENV) or UPDATE_RELEASE_API_URL or "").strip()
+        return self._update_url(value)
+
+    def get_update_info(self):
+        """Return local version, built-in release source, staged package and mode."""
+        ready = self._read_staged_update()
+        return {"ok": True, "app": APP_ID, "name": "CraftWorld 修改器", "version": APP_VERSION,
+                "frozen": bool(getattr(sys, "frozen", False)), "app_dir": _application_dir(),
+                "feed_url": self._update_feed_url(), "staged": ready or None}
+
+    def set_update_manifest_url(self, value):
+        return {"ok": False, "error": "更新服务已内置，不需要设置更新清单地址"}
+
+    def _read_update_manifest(self, manifest_url=""):
+        source = self._update_feed_url(manifest_url)
+        if not source:
+            return None, "尚未配置内置更新服务"
+        try:
+            raw, resolved = self._update_stream_bytes(source, UPDATE_MAX_MANIFEST_BYTES)
+            payload = json.loads(raw.decode("utf-8-sig"))
+            if not isinstance(payload, dict):
+                return None, "更新服务返回的数据格式无效"
+            version = str(payload.get("version") or payload.get("tag_name") or "").strip().lstrip("vV")
+            notes = str(payload.get("notes") or payload.get("body") or "")
+            package = payload.get("package") if isinstance(payload.get("package"), dict) else {}
+            if not package:
+                assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
+                asset = next((row for row in assets if isinstance(row, dict) and str(row.get("name") or "").lower() == "craftworldmodifier.exe"), None)
+                if asset is None:
+                    asset = next((row for row in assets if isinstance(row, dict) and str(row.get("name") or "").lower().startswith("craftworldmodifier") and str(row.get("name") or "").lower().endswith(".exe")), None)
+                if asset:
+                    package = {"url": asset.get("browser_download_url") or asset.get("url") or "",
+                               "size": asset.get("size") or 0,
+                               "sha256": asset.get("digest") or payload.get("sha256") or "",
+                               "format": "exe"}
+            package = dict(package)
+            package_url = str(package.get("url") or payload.get("download_url") or "").strip()
+            if package_url and not urllib.parse.urlparse(package_url).scheme:
+                package_url = urllib.parse.urljoin(resolved, package_url)
+            digest = str(package.get("sha256") or "").strip().lower()
+            if digest.startswith("sha256:"):
+                digest = digest.split(":", 1)[1]
+            package.update({"url": package_url, "sha256": digest,
+                            "size": int(package.get("size") or payload.get("size") or 0),
+                            "format": str(package.get("format") or "exe").strip().lower()})
+            if not self._update_version_tuple(version):
+                return None, "更新服务没有返回有效版本号"
+            return {"app_id": APP_ID, "version": version, "channel": payload.get("channel", "stable"),
+                    "published_at": payload.get("published_at") or payload.get("published_at_at") or "",
+                    "notes": notes, "package": package, "feed_url": source, "resolved_feed_url": resolved}, ""
+        except urllib.error.HTTPError as exc:
+            return None, "读取内置更新服务失败：HTTP %s" % exc.code
+        except urllib.error.URLError as exc:
+            return None, "读取内置更新服务失败：%s" % exc.reason
+        except Exception as exc:
+            return None, "读取内置更新服务失败：%s" % exc
+
+    def check_for_update(self, manifest_url=""):
+        manifest, error = self._read_update_manifest(manifest_url)
+        if not manifest:
+            return {"ok": False, "available": False, "version": APP_VERSION, "error": error}
+        remote_version = self._update_version_tuple(manifest.get("version"))
+        current_version = self._update_version_tuple(APP_VERSION)
+        available = bool(remote_version and current_version and remote_version > current_version)
+        package = manifest.get("package") or {}
+        package_ready = bool(package.get("url"))
+        if available and not package_ready:
+            manifest["notes"] = (manifest.get("notes") + "\n" if manifest.get("notes") else "") + "该版本暂未提供下载包。"
+        return {"ok": True, "available": available, "current_version": APP_VERSION,
+                "version": str(manifest.get("version")), "manifest": manifest,
+                "package_ready": package_ready, "message": "发现新版本" if available else "当前已是最新版本"}
+
+    def _read_staged_update(self):
+        ready_path = os.path.join(_application_dir(), "updates", "ready.json")
+        ready = _read_json_object(ready_path)
+        if not isinstance(ready, dict):
+            return None
+        stage_dir = os.path.abspath(str(ready.get("stage_dir") or ""))
+        updates_root = os.path.abspath(os.path.join(_application_dir(), "updates"))
+        try:
+            if os.path.commonpath([stage_dir, updates_root]) != updates_root:
+                return None
+        except ValueError:
+            return None
+        files = [self._update_safe_rel(item) for item in (ready.get("files") or [])]
+        files = [item for item in files if item and os.path.isfile(os.path.join(stage_dir, *item.split("/")))]
+        if not stage_dir or not files:
+            return None
+        ready["files"] = files
+        return ready
+
+    def stage_update(self, manifest_url=""):
+        checked = self.check_for_update(manifest_url)
+        if not checked.get("ok") or not checked.get("available"):
+            return checked
+        manifest = checked.get("manifest") or {}
+        package = manifest.get("package") or {}
+        package_url = self._update_url(package.get("url"))
+        if not package_url:
+            return {"ok": False, "error": "新版本没有可用下载地址"}
+        try:
+            raw, resolved = self._update_stream_bytes(package_url, UPDATE_MAX_PACKAGE_BYTES)
+            expected_size = int(package.get("size") or 0)
+            if expected_size and expected_size != len(raw):
+                return {"ok": False, "error": "更新包大小校验失败"}
+            digest = hashlib.sha256(raw).hexdigest().lower()
+            expected_hash = str(package.get("sha256") or "").lower()
+            if expected_hash and digest != expected_hash:
+                return {"ok": False, "error": "更新包 SHA-256 校验失败"}
+            updates_root = os.path.join(_application_dir(), "updates")
+            os.makedirs(updates_root, exist_ok=True)
+            stage_dir = tempfile.mkdtemp(prefix="stage-", dir=updates_root)
+            package_format = str(package.get("format") or "").lower()
+            if not package_format:
+                package_format = "zip" if str(package_url).lower().split("?", 1)[0].endswith(".zip") else "exe"
+            files = []
+            if package_format == "zip":
+                with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
+                    for info in archive.infolist():
+                        if info.is_dir() or (info.external_attr >> 16) & 0o170000 == 0o120000:
+                            continue
+                        rel = self._update_strip_package_root(info.filename)
+                        if not rel:
+                            continue
+                        target = os.path.abspath(os.path.join(stage_dir, *rel.split("/")))
+                        if os.path.commonpath([target, os.path.abspath(stage_dir)]) != os.path.abspath(stage_dir):
+                            raise ValueError("更新包包含越界路径")
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with archive.open(info, "r") as source, open(target, "wb") as destination:
+                            shutil.copyfileobj(source, destination, length=1024 * 1024)
+                        files.append(rel)
+            elif package_format in ("exe", "binary"):
+                rel = "CraftWorldModifier.exe"
+                target = os.path.join(stage_dir, rel)
+                with open(target, "wb") as handle:
+                    handle.write(raw)
+                files.append(rel)
+            else:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+                return {"ok": False, "error": "不支持的更新包格式：%s" % package_format}
+            if not files:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+                return {"ok": False, "error": "更新包没有包含允许替换的修改器文件"}
+            ready = {"app_id": APP_ID, "version": str(manifest.get("version")), "current_version": APP_VERSION,
+                     "stage_dir": stage_dir, "files": sorted(set(files)), "format": package_format,
+                     "package_sha256": digest, "package_size": len(raw), "manifest": manifest,
+                     "staged_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+            ready_path = os.path.join(updates_root, "ready.json")
+            temporary = ready_path + ".tmp"
+            with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(ready, handle, ensure_ascii=False, indent=2)
+                handle.flush(); os.fsync(handle.fileno())
+            os.replace(temporary, ready_path)
+            return {"ok": True, "available": True, "version": ready["version"], "files": ready["files"],
+                    "stage_dir": stage_dir, "size": len(raw), "sha256": digest,
+                    "restart_supported": bool(getattr(sys, "frozen", False) or os.path.isfile(__file__))}
+        except zipfile.BadZipFile:
+            return {"ok": False, "error": "更新包不是有效 ZIP 文件"}
+        except Exception as exc:
+            return {"ok": False, "error": "下载或暂存更新失败：%s" % exc}
+
+    def apply_staged_update(self):
+        """Schedule a safe copy after this process exits; never touches game data."""
+        ready = self._read_staged_update()
+        if not ready:
+            return {"ok": False, "error": "没有已校验的暂存更新"}
+        stage_dir = os.path.abspath(ready["stage_dir"])
+        app_dir = os.path.abspath(_application_dir())
+        mappings = []
+        if getattr(sys, "frozen", False):
+            exe_source = os.path.join(stage_dir, "CraftWorldModifier.exe")
+            if not os.path.isfile(exe_source):
+                return {"ok": False, "error": "更新包中没有 CraftWorldModifier.exe"}
+            mappings.append((exe_source, os.path.abspath(sys.executable)))
+        else:
+            current_script = os.path.abspath(__file__)
+            current_ui = os.path.abspath(_resource_path("ui_v1.0.html"))
+            for rel in ready["files"]:
+                source = os.path.abspath(os.path.join(stage_dir, *rel.split("/")))
+                if rel.lower().startswith("craft_web_"):
+                    target = current_script
+                elif rel.lower().startswith("ui_v"):
+                    target = current_ui
+                else:
+                    target = os.path.abspath(os.path.join(app_dir, *rel.split("/")))
+                mappings.append((source, target))
+        if not mappings:
+            return {"ok": False, "error": "没有可应用的更新文件"}
+        command_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_update_%s.cmd" % uuid.uuid4().hex)
+        lines = ["@echo off", "setlocal", "timeout /t 2 /nobreak >nul"]
+        for source, target in mappings:
+            lines.append('copy /Y "%s" "%s" >nul' % (source.replace('"', '""'), target.replace('"', '""')))
+            lines.append("if errorlevel 1 exit /b 1")
+        if getattr(sys, "frozen", False):
+            lines.append('start "" "%s"' % os.path.abspath(sys.executable).replace('"', '""'))
+        else:
+            lines.append('start "" "%s" "%s"' % (sys.executable.replace('"', '""'), os.path.abspath(__file__).replace('"', '""')))
+        lines.extend(["endlocal", "del \"%~f0\""])
+        try:
+            with open(command_path, "w", encoding="utf-8", newline="\r\n") as handle:
+                handle.write("\r\n".join(lines) + "\r\n")
+            flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
+            subprocess.Popen(["cmd.exe", "/d", "/c", command_path], close_fds=True, creationflags=flags)
+            threading.Thread(target=self._close_after_update, name="ctw-update-exit", daemon=True).start()
+            return {"ok": True, "restarting": True, "version": ready.get("version"), "message": "更新已排队，关闭修改器后将替换并重新启动"}
+        except Exception as exc:
+            return {"ok": False, "error": "无法启动更新程序：%s" % exc}
+
+    @staticmethod
+    def _close_after_update():
+        """Let the JS response return, then close the pywebview window."""
+        time.sleep(0.8)
+        try:
+            windows = list(getattr(webview, "windows", []) or [])
+            if windows:
+                windows[0].destroy()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _valid_game_root(value):
+        """Return a verified Craft The World directory, or an empty string."""
+        try:
+            root = os.path.abspath(os.path.expanduser(str(value or "").strip()))
+            if os.path.isfile(root) and os.path.basename(root).lower() == MODULE_NAME.lower():
+                root = os.path.dirname(root)
+            data_dir = os.path.join(root, "data")
+            executable = os.path.join(root, MODULE_NAME)
+            if os.path.isdir(data_dir) and os.path.isfile(executable):
+                return root
+        except Exception:
+            pass
+        return ""
+
+    def _running_game_root(self):
+        try:
+            if not pm or not getattr(pm, "process_id", 0):
+                return ""
+            import psutil
+            return self._valid_game_root(os.path.dirname(psutil.Process(pm.process_id).exe()))
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _local_data_summary(root):
+        """Count the local files which power translations, recipes and gear."""
+        data_dir = os.path.join(root, "data")
+        try:
+            data_files = os.listdir(data_dir)
+        except OSError:
+            data_files = []
+        is_resource = lambda name: bool(re.fullmatch(r"craft_resources(?:_(\d+))?\.xml", name, re.I))
+        is_recipe = lambda name: bool(re.fullmatch(r"recipes(?:_(\d+))?\.xml", name, re.I))
+        mods_dir = os.path.join(root, "mods")
+        mod_dirs, mod_resource_files, mod_translation_files = set(), 0, 0
+        if os.path.isdir(mods_dir):
+            for current, _dirs, files in os.walk(mods_dir):
+                relative = os.path.relpath(current, mods_dir)
+                if relative != ".":
+                    mod_dirs.add(relative.split(os.sep, 1)[0])
+                mod_resource_files += sum(1 for name in files if is_resource(name))
+                mod_translation_files += sum(1 for name in files if name.lower() == "craft_resources.csv")
+        return {
+            "resources": sum(1 for name in data_files if is_resource(name)),
+            "recipes": sum(1 for name in data_files if is_recipe(name)),
+            "mods": len(mod_dirs),
+            "mod_resources": mod_resource_files,
+            "mod_translations": mod_translation_files,
+            "tech_locale": os.path.isfile(os.path.join(root, "lang", "tech_locale.csv")),
+        }
+
+    def _activate_local_game_root(self, root, source):
+        """Reload every local-data cache without touching game memory."""
+        global GAME_ROOT, GAME_DATA_DIR, GAME_RESOURCE_TRANSLATIONS, GAME_RESOURCE_IDS, ITEM_NAME_MAP
+        root = self._valid_game_root(root)
+        if not root:
+            return {"ok": False, "needs_path": True,
+                    "error": "未找到有效的 CraftTheWorld 游戏目录，请选择包含 CraftWorld.exe 与 data 文件夹的位置"}
+        GAME_ROOT = root
+        GAME_DATA_DIR = os.path.join(root, "data")
+        GAME_RESOURCE_TRANSLATIONS = _load_mod_resource_translations()
+        GAME_RESOURCE_IDS = _load_resource_id_whitelist()
+        ITEM_NAME_MAP = load_item_name_map()
+        self._item_config_loaded = False
+        self._translations = {}
+        self._v1_equipment_class_map_cache = None
+        self._v1_equipment_catalog_cache = None
+        self._update_config(lambda cfg: cfg.update({"local_game_root": root}))
+        files = self._local_data_summary(root)
+        return {"ok": True, "game_root": root, "source": source, "files": files,
+                "message": "本地数据已同步"}
+
+    def sync_local_data(self):
+        """Find the installed game automatically and refresh local data caches."""
+        candidates = []
+        try:
+            saved = self._read_config().get("local_game_root", "")
+            if saved:
+                candidates.append((saved, "已保存的位置"))
+        except Exception:
+            pass
+        running = self._running_game_root()
+        if running:
+            candidates.append((running, "当前游戏进程"))
+        candidates.append((GAME_ROOT, "当前目录"))
+        candidates.append((DEFAULT_GAME_ROOT, "默认 Steam 目录"))
+        seen = set()
+        for candidate, source in candidates:
+            key = os.path.normcase(os.path.abspath(str(candidate or ""))) if candidate else ""
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if self._valid_game_root(candidate):
+                return self._activate_local_game_root(candidate, source)
+        return {"ok": False, "needs_path": True,
+                "error": "没有自动定位到游戏目录。请选择包含 CraftWorld.exe 与 data 文件夹的位置"}
+
+    def choose_local_game_dir(self):
+        """Let the player choose a game folder after automatic discovery fails."""
+        initial = GAME_ROOT if os.path.isdir(GAME_ROOT) else os.path.expanduser("~")
+        try:
+            window = webview.windows[0] if getattr(webview, "windows", None) else None
+            selected = window.create_file_dialog(webview.FOLDER_DIALOG, directory=initial) if window else None
+        except Exception as exc:
+            return {"ok": False, "needs_path": True, "error": "无法打开目录选择窗口：%s" % exc}
+        if not selected:
+            return {"ok": False, "cancelled": True, "error": "未选择游戏目录"}
+        if isinstance(selected, (list, tuple)):
+            selected = selected[0] if selected else ""
+        return self._activate_local_game_root(selected, "手动选择")
+
+    @staticmethod
+    def _valid_runtime_pointer(value):
+        try:
+            # 32-bit CraftWorld allocations can legitimately reside above 2 GB
+            # (for example 0x9Axxxxxx under WOW64).  The former 0x7FFF0000 cap
+            # silently discarded every such live Worker before object validation.
+            pointer = int(value or 0) & 0xFFFFFFFF
+            return 0x10000 <= pointer < 0xFFF00000
+        except Exception:
+            return False
+
+    def _run_compatibility_doctor(self):
+        """Read-only validation for the loaded game layout.
+
+        This is intentionally limited to structures that all direct writers
+        already depend on: the executable image, the active resource vector,
+        and (for Steam V1) the dwarf manager vector.  It is not a guessed
+        version number and it never writes executable or save data.
+        """
+        checks = []
+        errors = []
+
+        def add(key, label, state, detail, verification=None):
+            if verification is None:
+                if state == "ok":
+                    verification = self.STATUS_VERIFIED
+                elif any(word in str(detail) for word in ("不匹配", "不支持", "不是受支持")):
+                    verification = self.STATUS_UNSUPPORTED
+                else:
+                    verification = self.STATUS_FAILED
+            checks.append({"key": key, "label": label, "state": state,
+                           "verification": verification, "detail": detail})
+            if state == "error":
+                errors.append(detail)
+
+        try:
+            if not pm or not getattr(pm, "process_id", 0):
+                add("process", "游戏进程", "error", "未连接游戏进程")
+            else:
+                pid = int(pm.process_id)
+                base = int(get_base() or 0)
+                if not self._valid_runtime_pointer(base):
+                    add("module", "游戏模块", "error", "无法读取 CraftWorld.exe 模块基址")
+                elif pm.read_bytes(base, 2) != b"MZ":
+                    add("module", "游戏模块", "error", "模块头校验失败，当前进程不是受支持的游戏映像")
+                else:
+                    add("module", "游戏模块", "ok", "CraftWorld.exe 模块头已确认")
+
+                is_v2 = self._detect_v2()
+                manager_ptr_addr = base + (V2_RESOURCE_MGR if is_v2 else ITEM_BASE_OFFSET)
+                manager = pm.read_int(manager_ptr_addr) if base else 0
+                if not self._valid_runtime_pointer(manager):
+                    add("resource_manager", "资源表", "error", "资源管理器尚未就绪；请进入已载入的存档后重试")
+                else:
+                    begin = pm.read_int(manager + (V2_RES_ARR_BASE if is_v2 else ITEM_ARR_PTR))
+                    end = pm.read_int(manager + (V2_RES_ARR_END if is_v2 else ITEM_ARR_END))
+                    stride = V2_RES_ELEM_SIZE if is_v2 else SLOT_SIZE
+                    if (not self._valid_runtime_pointer(begin) or not self._valid_runtime_pointer(end) or
+                            int(end) < int(begin) or (int(end) - int(begin)) % stride):
+                        add("resource_vector", "资源数组", "error", "资源数组结构与当前版本不匹配")
+                    else:
+                        count = (int(end) - int(begin)) // stride
+                        if count < 1 or count > 10000:
+                            add("resource_vector", "资源数组", "error", "资源数组数量异常：%d" % count)
+                        else:
+                            add("resource_vector", "资源数组", "ok", "已确认 %d 个资源槽" % count)
+
+                if not is_v2:
+                    dwarf_mgr = (int(pm.read_int(base + 0xDC3614) or 0) & 0xFFFFFFFF) if base else 0
+                    if not self._valid_runtime_pointer(dwarf_mgr):
+                        add("dwarf_manager", "矮人列表", "warn", "矮人管理器尚未载入；矮人写入将保持禁用",
+                            self.STATUS_FAILED)
+                    else:
+                        begin = int(pm.read_int(dwarf_mgr + 0x40) or 0) & 0xFFFFFFFF
+                        end = int(pm.read_int(dwarf_mgr + 0x44) or 0) & 0xFFFFFFFF
+                        if (not self._valid_runtime_pointer(begin) or not self._valid_runtime_pointer(end) or
+                                int(end) < int(begin) or (int(end) - int(begin)) % 4 or
+                                (int(end) - int(begin)) // 4 > 256):
+                            add("dwarf_manager", "矮人列表", "warn", "矮人列表当前不可用；请载入存档后再修改矮人",
+                                self.STATUS_FAILED)
+                        else:
+                            add("dwarf_manager", "矮人列表", "ok", "矮人列表结构已确认")
+                else:
+                    add("dwarf_manager", "矮人列表", "warn", "巨龙版矮人写入仍由各功能单独校验",
+                        self.STATUS_UNSUPPORTED)
+        except Exception as exc:
+            add("doctor", "兼容检查", "error", "兼容检查读取失败：%s" % exc)
+
+        # World writes intentionally remain outside the compatibility verdict.
+        # The low-level layout can be readable while the semantics of a writer
+        # have not yet been established for this game build/save state.
+        add("world_write_policy", "世界写入入口", "可用",
+            "保留地图、潘多拉、传送门、时间与波次等既有入口；Doctor 仅报告当前版本的定位状态，不会隐藏功能。",
+            self.STATUS_UNVERIFIED)
+
+        ok = not errors
+        result = {
+            "ok": ok, "write_ready": ok,
+            "checked_pid": int(getattr(pm, "process_id", 0) or 0),
+            "checked_at": time.strftime("%H:%M:%S"),
+            "version": "巨龙版" if (pm and self._detect_v2()) else "Steam 原版",
+            "checks": checks,
+            "summary": "兼容检查通过，可安全使用已验证写入功能" if ok else (errors[0] if errors else "兼容检查未通过"),
+        }
+        with self._compatibility_doctor_lock:
+            self._compatibility_doctor = result
+        return result
+
+    def get_compatibility_doctor(self, refresh=False):
+        """Expose the latest read-only compatibility result to the UI."""
+        with self._compatibility_doctor_lock:
+            cached = dict(self._compatibility_doctor or {})
+        if (refresh or not cached.get("checked_pid") or
+                int(cached.get("checked_pid", 0) or 0) != int(getattr(pm, "process_id", 0) or 0)):
+            cached = self._run_compatibility_doctor()
+        # The Doctor result must also describe the hard boundary around legacy
+        # world writes. This is metadata only: asking for it never probes or
+        # changes game memory.
+        result = dict(cached or {})
+        result["write_policy"] = self.get_write_safety_status()
+        return result
+
+    @staticmethod
+    def _preflight_file_hash(path):
+        """Hash an executable incrementally; this is only called on demand."""
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                block = handle.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _preflight_executable_fingerprint(self, pid, base):
+        """Read an evidence-oriented PE fingerprint without assuming a build."""
+        result = {
+            "state": self.STATUS_FAILED, "edition": "未识别", "exe_path": "",
+            "exe_name": "", "exe_size": 0, "exe_sha256": "", "pe_timestamp": "",
+            "module_base": "0x%X" % int(base or 0), "signatures": [],
+        }
+        try:
+            import psutil
+            exe_path = os.path.abspath(psutil.Process(int(pid)).exe())
+            result.update({"exe_path": exe_path, "exe_name": os.path.basename(exe_path),
+                           "exe_size": int(os.path.getsize(exe_path)),
+                           "exe_sha256": self._preflight_file_hash(exe_path),
+                           "edition": "巨龙版" if self._detect_v2() else "Steam 原版"})
+            if os.path.basename(exe_path).lower() != MODULE_NAME.lower():
+                result["state"] = self.STATUS_FAILED
+                result["error"] = "当前修改器目标不是 CraftWorld.exe"
+                return result
+            result["state"] = self.STATUS_VERIFIED
+        except Exception as exc:
+            result["error"] = "主程序文件指纹读取失败：%s" % exc
+            return result
+
+        def raw_at(address, size):
+            try:
+                value = pm.read_bytes(int(address), int(size))
+                return bytes(value or b"")
+            except Exception:
+                return b""
+
+        mz = raw_at(base, 2)
+        result["signatures"].append({
+            "key": "module_mz", "label": "模块 DOS 头", "address": "0x%X" % int(base or 0),
+            "expected": "4D 5A", "actual": mz.hex(" ").upper() or "未读取",
+            "state": self.STATUS_VERIFIED if mz == b"MZ" else self.STATUS_FAILED,
+            "detail": "CraftWorld.exe 映像 MZ 原始字节匹配" if mz == b"MZ" else "模块原始字节不匹配或无法读取",
+        })
+        pe_offset_raw = raw_at(int(base or 0) + 0x3C, 4)
+        pe_offset = struct.unpack("<I", pe_offset_raw)[0] if len(pe_offset_raw) == 4 else 0
+        pe = raw_at(int(base or 0) + pe_offset, 4) if pe_offset else b""
+        timestamp_raw = raw_at(int(base or 0) + pe_offset + 8, 4) if pe == b"PE\0\0" else b""
+        if len(timestamp_raw) == 4:
+            timestamp = struct.unpack("<I", timestamp_raw)[0]
+            result["pe_timestamp"] = "%d (0x%08X)" % (timestamp, timestamp)
+        result["signatures"].append({
+            "key": "module_pe", "label": "PE 签名", "address": "0x%X" % (int(base or 0) + pe_offset),
+            "expected": "50 45 00 00", "actual": pe.hex(" ").upper() or "未读取",
+            "state": self.STATUS_VERIFIED if pe == b"PE\0\0" else self.STATUS_FAILED,
+            "detail": "PE 原始字节匹配；时间戳 %s" % (result["pe_timestamp"] or "未读取") if pe == b"PE\0\0" else "PE 头无法确认",
+        })
+        legacy_addr = int(base or 0) + int(self.LEGACY_SAVE_PATCH_RVA)
+        legacy = raw_at(legacy_addr, len(self.LEGACY_SAVE_PATCH_BYTES))
+        dangerous = legacy == self.LEGACY_SAVE_PATCH_BYTES
+        result["signatures"].append({
+            "key": "legacy_save_patch", "label": "旧存档补丁保护", "address": "0x%X" % legacy_addr,
+            "expected": "不得为 " + self.LEGACY_SAVE_PATCH_BYTES.hex(" ").upper(),
+            "actual": legacy.hex(" ").upper() or "未读取",
+            "state": self.STATUS_FAILED if dangerous or not legacy else self.STATUS_VERIFIED,
+            "detail": "检测到已知会破坏调用栈的旧补丁；禁止继续写入" if dangerous else ("未检测到已知危险旧补丁" if legacy else "无法读取该保护字节"),
+        })
+        return result
+
+    def _preflight_runtime_capabilities(self, doctor):
+        """Perform only small, read-only probes; never initiate a full scan."""
+        rows = []
+        def add(key, label, state, detail):
+            rows.append({"key": key, "label": label, "state": state, "detail": detail})
+
+        if not connected or not pm:
+            for key, label in (("map", "地图读取"), ("dwarves", "矮人读取"),
+                               ("equipment", "装备读取"), ("tasks", "任务 / Chronicles")):
+                add(key, label, self.STATUS_FAILED, "未连接游戏，未执行运行时读取。")
+            return rows
+        try:
+            map_info = self.map_status()
+            if map_info.get("ok"):
+                detail = "地图结构已解析"
+                if map_info.get("changed"):
+                    detail += "；地图缓存待重建，未进行全图读取"
+                else:
+                    detail += "；当前地图 %s × %s" % (map_info.get("width", "?"), map_info.get("height", "?"))
+                add("map", "地图读取", "可用", detail)
+            else:
+                add("map", "地图读取", self.STATUS_FAILED, map_info.get("error") or "地图结构未准备好")
+        except Exception as exc:
+            add("map", "地图读取", self.STATUS_FAILED, str(exc))
+
+        dwarf_check = next((row for row in doctor.get("checks", []) if row.get("key") == "dwarf_manager"), {})
+        dwarves = _dwarf_cache_snapshot()
+        if dwarf_check.get("verification") == self.STATUS_VERIFIED:
+            add("dwarves", "矮人读取", "可用", "矮人列表结构已确认；当前缓存 %d 名（不会在体检中强制刷新）。" % len(dwarves))
+        elif dwarves:
+            add("dwarves", "矮人读取", self.STATUS_UNVERIFIED, "缓存有 %d 名矮人，但当前结构未在本次体检中确认。" % len(dwarves))
+        else:
+            add("dwarves", "矮人读取", self.STATUS_FAILED, dwarf_check.get("detail") or "尚未读到矮人列表")
+
+        if self._detect_v2():
+            add("equipment", "装备读取", self.STATUS_UNSUPPORTED, "装备结构目前仅验证 Steam 原版。")
+        elif not dwarves:
+            add("equipment", "装备读取", self.STATUS_UNVERIFIED, "没有已读取矮人样本；不会在体检中强制刷新矮人。")
+        elif dwarves[0].get("idx") is None:
+            add("equipment", "装备读取", self.STATUS_UNVERIFIED, "当前矮人缓存缺少稳定索引；不会猜测装备对象地址。")
+        else:
+            equipment = self.get_dwarf_equipment(int(dwarves[0].get("idx")))
+            if equipment.get("ok"):
+                add("equipment", "装备读取", "可用", "已对一名当前缓存矮人只读验证 %d 个装备槽。" % len(equipment.get("slots") or []))
+            else:
+                add("equipment", "装备读取", self.STATUS_FAILED, equipment.get("error") or "装备样本读取失败")
+
+        try:
+            world = self.get_world_diagnostics(False)
+            task = ((world.get("tasks") or {}).get("runtime") or {})
+            definitions = ((world.get("tasks") or {}).get("definitions") or [])
+            if task.get("verification") == self.STATUS_VERIFIED:
+                add("tasks", "任务 / Chronicles", "可用", task.get("reason") or "已验证运行时任务读取")
+            elif definitions:
+                add("tasks", "任务 / Chronicles", self.STATUS_UNVERIFIED,
+                    "本地任务定义可读；实时任务阶段/目标仍未验证（不会在体检中触发全内存扫描）。")
+            else:
+                add("tasks", "任务 / Chronicles", task.get("verification") or self.STATUS_FAILED,
+                    task.get("reason") or "任务定义或运行时状态未读取")
+        except Exception as exc:
+            add("tasks", "任务 / Chronicles", self.STATUS_FAILED, str(exc))
+        return rows
+
+    def _preflight_save_status(self):
+        """Summarise save roots and backups without creating or modifying them."""
+        state, processes, process_error = self._save_game_state()
+        backup_root = self._save_backup_root()
+        roots = []
+        for root in self._save_roots():
+            path = root.get("path", "")
+            roots.append({"label": root.get("label", "存档目录"), "path": path,
+                          "exists": os.path.isdir(path), "readable": os.access(path, os.R_OK) if os.path.isdir(path) else False})
+        slots = []
+        try:
+            catalog = self.get_save_manager_catalog()
+            for slot in catalog.get("slots", []):
+                slots.append({"slot": slot.get("slot"), "profile_label": slot.get("profile_label"),
+                              "files": len(slot.get("files") or []), "snapshots": len(slot.get("snapshots") or [])})
+        except Exception as exc:
+            process_error = (process_error + "；" if process_error else "") + "存档目录读取失败：%s" % exc
+        return {
+            "game_state": state, "processes": processes, "process_error": process_error,
+            "roots": roots, "slots": slots, "backup_root": backup_root,
+            "backup_exists": os.path.isdir(backup_root),
+            "backup_writable": os.access(backup_root, os.W_OK) if os.path.isdir(backup_root) else os.access(os.path.dirname(backup_root), os.W_OK),
+            "steam_cloud_warning": "Steam Cloud 可能在后续同步时覆盖本地存档；体检只提示风险，不修改 Steam Cloud 或存档。",
+        }
+
+    def get_connection_preflight_report(self, refresh=True):
+        """Return the full on-demand connection preflight report (read-only)."""
+        created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        pid = int(getattr(pm, "process_id", 0) or 0) if connected and pm else 0
+        base = int(get_base() or 0) if pid else 0
+        doctor = self.get_compatibility_doctor(bool(refresh))
+        fingerprint = self._preflight_executable_fingerprint(pid, base) if pid else {
+            "state": self.STATUS_FAILED, "edition": "未识别", "exe_path": "", "exe_name": "",
+            "exe_size": 0, "exe_sha256": "", "pe_timestamp": "", "module_base": "0x0",
+            "signatures": [], "error": "未连接游戏进程",
+        }
+        capabilities = self._preflight_runtime_capabilities(doctor)
+        policy = self.get_write_safety_status()
+        save = self._preflight_save_status()
+        process_ok = bool(pid and fingerprint.get("exe_name", "").lower() == MODULE_NAME.lower())
+        connection = {
+            "connected": bool(connected and pm), "pid": pid, "target_process": fingerprint.get("exe_name") or "未连接",
+            "target_path": fingerprint.get("exe_path") or "", "state": "可用" if process_ok else self.STATUS_FAILED,
+            "detail": "修改器已连接到 CraftWorld.exe（PID %d）" % pid if process_ok else (fingerprint.get("error") or "修改器尚未连接到正确的 CraftWorld.exe"),
+            "ce_state": self.STATUS_UNVERIFIED,
+            "ce_detail": "修改器无法可靠读取 Cheat Engine 当前目标；请在 CE 顶部进程栏手动确认 PID %s。" % (pid or "—"),
+        }
+        failed = [row for row in capabilities if row.get("state") == self.STATUS_FAILED]
+        failed += [row for row in fingerprint.get("signatures", []) if row.get("state") == self.STATUS_FAILED]
+        summary = "连接前体检完成：%d 项可用，%d 项读取失败，%d 项语义未验证；定位异常会报告，不会自动隐藏既有功能。" % (
+            sum(1 for row in capabilities if row.get("state") == "可用"), len(failed),
+            sum(1 for row in capabilities if row.get("state") == self.STATUS_UNVERIFIED))
+        return {"ok": process_ok and not failed, "read_only": True, "report_version": 1,
+                "created_at": created_at, "summary": summary, "connection": connection,
+                "fingerprint": fingerprint, "doctor": doctor, "runtime_capabilities": capabilities,
+                "write_policy": policy, "save": save}
+
+    @staticmethod
+    def _preflight_report_text(report):
+        """Produce a compact, attachable plain-text counterpart to report JSON."""
+        lines = ["Craft The World 修改器 — 连接前体检报告", "生成时间：" + str(report.get("created_at") or ""),
+                 "摘要：" + str(report.get("summary") or ""), "", "[连接]"]
+        conn = report.get("connection") or {}
+        lines.extend(["状态：%s" % conn.get("state", "读取失败"), "PID：%s" % conn.get("pid", "—"),
+                      "目标：%s" % conn.get("target_path", "未读取"), "CE：%s" % conn.get("ce_detail", "未验证")])
+        fp = report.get("fingerprint") or {}
+        lines.extend(["", "[主程序指纹]", "版本：%s" % fp.get("edition", "未识别"),
+                      "大小：%s" % fp.get("exe_size", "—"), "SHA-256：%s" % fp.get("exe_sha256", "未读取"),
+                      "PE 时间戳：%s" % fp.get("pe_timestamp", "未读取")])
+        for row in fp.get("signatures") or []:
+            lines.append("- [%s] %s：%s（期望 %s，实际 %s）" % (row.get("state"), row.get("label"), row.get("detail"), row.get("expected"), row.get("actual")))
+        lines.append("\n[运行时能力]")
+        for row in report.get("runtime_capabilities") or []:
+            lines.append("- [%s] %s：%s" % (row.get("state"), row.get("label"), row.get("detail")))
+        lines.append("\n[写入许可]")
+        for row in (report.get("write_policy") or {}).get("entries") or []:
+            lines.append("- [%s] %s：%s" % (row.get("state"), row.get("feature"), row.get("reason")))
+        save = report.get("save") or {}
+        lines.extend(["", "[存档与备份]", "游戏状态：%s" % save.get("game_state", "未知"),
+                      "备份目录：%s（存在=%s，可写=%s）" % (save.get("backup_root", ""), save.get("backup_exists"), save.get("backup_writable")),
+                      "提示：%s" % save.get("steam_cloud_warning", "")])
+        for root in save.get("roots") or []:
+            lines.append("- 存档根目录 %s：%s（存在=%s，可读=%s）" % (root.get("label"), root.get("path"), root.get("exists"), root.get("readable")))
+        for slot in save.get("slots") or []:
+            lines.append("- %s / %s：%s 个文件，%s 个快照" % (slot.get("profile_label"), slot.get("slot"), slot.get("files"), slot.get("snapshots")))
+        return "\n".join(lines) + "\n"
+
+    def export_connection_preflight_report(self):
+        """Export local JSON/TXT diagnostics; game memory and saves stay read-only."""
+        report = self.get_connection_preflight_report(True)
+        root = os.path.join(_application_dir(), "diagnostics")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pid = int((report.get("connection") or {}).get("pid") or 0)
+        stem = "ctw_preflight_%s_pid%s" % (stamp, pid or "offline")
+        try:
+            os.makedirs(root, exist_ok=True)
+            json_path, text_path = os.path.join(root, stem + ".json"), os.path.join(root, stem + ".txt")
+            for path, content in ((json_path, json.dumps(report, ensure_ascii=False, indent=2)),
+                                  (text_path, self._preflight_report_text(report))):
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            return {"ok": True, "json_path": json_path, "text_path": text_path, "report": report}
+        except Exception as exc:
+            return {"ok": False, "error": "诊断报告导出失败：%s" % exc, "report": report}
+
+    def _stable_baseline_file(self, path):
+        """Return a compact, human-checkable source fingerprint without writes."""
+        absolute = os.path.abspath(path)
+        try:
+            with open(absolute, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()[:12]
+            return {"path": absolute, "exists": True, "sha256": digest}
+        except Exception as exc:
+            return {"path": absolute, "exists": False, "sha256": "", "error": str(exc)}
+
+    @staticmethod
+    def _stable_baseline_row(key, label, status, detail):
+        return {"key": key, "label": label, "status": status, "detail": detail}
+
+    def get_stable_baseline_status(self):
+        """Expose the exact running source pair and the safe-write policy.
+
+        This intentionally does not read game memory. It is safe to call before
+        connecting and makes an old copied script immediately visible in the UI.
+        """
+        packaged = bool(getattr(sys, "frozen", False))
+        script_path = os.path.abspath(sys.executable if packaged else __file__)
+        source_dir = _application_dir() if packaged else os.path.dirname(script_path)
+        ui_path = _resource_path("ui_v1.0.html")
+        # A packaged build has no source .py beside the EXE; its stable pair is
+        # the executable plus the resolved UI resource. In source mode the
+        # active directory is the explicit test/release target.
+        expected_root = source_dir
+        script_info = self._stable_baseline_file(script_path)
+        ui_info = self._stable_baseline_file(ui_path)
+        expected = os.path.normcase(source_dir) == os.path.normcase(expected_root)
+        source_status = "可用" if (expected and script_info.get("exists") and ui_info.get("exists")) else "读取失败"
+        source_detail = ("实际启动源：%s | Python #%s | HTML #%s" % (
+            source_dir, script_info.get("sha256") or "—", ui_info.get("sha256") or "—"
+        ))
+        if not expected:
+            source_detail = "当前脚本不在稳定版目录：%s；应从 %s 启动" % (source_dir, expected_root)
+        elif not script_info.get("exists") or not ui_info.get("exists"):
+            source_detail = "稳定版源文件不完整：%s" % (script_info.get("error") or ui_info.get("error") or "未知错误")
+        readback = getattr(self, "_stable_baseline_save_readback", None)
+        if isinstance(readback, dict) and readback.get("ok"):
+            readback_status = "可用"
+            readback_detail = ("已完成当前会话的单矮人生命同值写入与即时读回："
+                               "#%d %s，%.1f → %.1f。" % (
+                                   int(readback.get("idx", -1)),
+                                   str(readback.get("name", "未命名")),
+                                   float(readback.get("before", 0.0)),
+                                   float(readback.get("after", 0.0))))
+        elif isinstance(readback, dict):
+            readback_status = "读取失败"
+            readback_detail = "当前会话的同值写后读回失败：%s" % (readback.get("error") or "未知错误")
+        else:
+            readback_status = "语义未验证"
+            readback_detail = "尚未执行当前会话的单对象同值写后读回；不会因此把写入功能伪装成可用。"
+        checks = [
+            self._stable_baseline_row("runtime_source", "运行来源", source_status, source_detail),
+            self._stable_baseline_row("map_edit", "地图编辑写入",
+                                      "已开启" if self.MAP_DIRECT_WRITES_ENABLED else "可手动开启",
+                                      "地图页可手动开关编辑；其它世界入口保留并由各功能自身校验。"),
+            self._stable_baseline_row("save_readback", "保存与读回", readback_status, readback_detail),
+        ]
+        return {"ok": source_status == "可用", "checked_at": time.strftime("%H:%M:%S"),
+                "script": script_info, "ui": ui_info, "expected_root": expected_root,
+                "connected_pid": int(getattr(pm, "process_id", 0) or 0) if connected and pm else 0,
+                "checks": checks}
+
+    def run_stable_baseline_regression(self):
+        """Run an explicit, read-only real-game regression for stable features.
+
+        No game value, map tile, save file, equipment or skill is written here.
+        A write/readback result remains semantically unverified until a user
+        chooses a deliberate, narrowly scoped verification in the UI.
+        """
+        report = self.get_stable_baseline_status()
+        checks = list(report.get("checks", []))
+        def add(key, label, status, detail):
+            checks.append(self._stable_baseline_row(key, label, status, detail))
+        if not pm or not connected:
+            for key, label in (("dwarf_refresh", "矮人刷新"), ("map_local_refresh", "地图局部刷新"),
+                               ("item_filter", "物品筛选"), ("equipment_read", "装备编辑读取"),
+                               ("personal_skill_read", "个人技能读取")):
+                add(key, label, "读取失败", "未连接游戏，未执行读取。")
+            report.update({"ok": False, "checks": checks,
+                           "summary": "未连接游戏；仅确认了稳定版运行来源与写入策略。"})
+            return report
+        doctor = self.get_compatibility_doctor(True)
+        if not doctor.get("ok"):
+            add("compatibility", "版本结构", "版本不支持", doctor.get("summary") or "兼容检查未通过")
+        else:
+            add("compatibility", "版本结构", "可用", doctor.get("summary") or "兼容结构已通过只读检查")
+        dwarves = []
+        try:
+            dwarves = self.scan_dwarves_stable()
+            expected_dwarves = None if self._detect_v2() else self._v1_dwarf_vector_count()
+            if isinstance(dwarves, list) and expected_dwarves is not None and len(dwarves) < expected_dwarves:
+                add("dwarf_refresh", "矮人刷新", "读取失败", "矮人列表正在变动：结构为 %d 名，稳定读取到 %d 名；不会把缺失伪装成空数据。" % (expected_dwarves, len(dwarves)))
+            elif isinstance(dwarves, list) and dwarves:
+                ready = sum(1 for row in dwarves if isinstance(row, dict) and row.get("skills_ready"))
+                add("dwarf_refresh", "矮人刷新", "可用", "已读取 %d 名矮人；个人技能就绪 %d 名。" % (len(dwarves), ready))
+            elif isinstance(dwarves, list):
+                add("dwarf_refresh", "矮人刷新", "读取失败", "矮人列表为空；可能正在载入存档或当前版本结构不匹配。")
+            else:
+                add("dwarf_refresh", "矮人刷新", "读取失败", "矮人读取返回了无效结构。")
+        except Exception as exc:
+            add("dwarf_refresh", "矮人刷新", "读取失败", "矮人读取异常：%s" % exc)
+        try:
+            map_meta = self.map_metadata()
+            if not map_meta.get("ok"):
+                add("map_local_refresh", "地图局部刷新", "读取失败", map_meta.get("error") or "地图元数据读取失败")
+            else:
+                width, height = int(map_meta.get("width", 0)), int(map_meta.get("height", 0))
+                if width < 1 or height < 1:
+                    add("map_local_refresh", "地图局部刷新", "读取失败", "地图尺寸无效：%dx%d" % (width, height))
+                else:
+                    row, col = height // 2, width // 2
+                    region = self.map_read_regions([{"r0": row, "c0": col, "r1": row, "c1": col}])
+                    if region.get("ok") and not region.get("changed"):
+                        add("map_local_refresh", "地图局部刷新", "可用", "已读取中心 1×1 区块；地图 %d×%d。" % (width, height))
+                    elif region.get("changed"):
+                        add("map_local_refresh", "地图局部刷新", "读取失败", "地图缓冲区在回归期间改变，请重新执行回归。")
+                    else:
+                        add("map_local_refresh", "地图局部刷新", "读取失败", region.get("error") or "局部区块返回无效")
+        except Exception as exc:
+            add("map_local_refresh", "地图局部刷新", "读取失败", "地图局部读取异常：%s" % exc)
+        # This retired read-only regression must never alter the user's
+        # explicit map-edit session state.  It only reports the current state.
+        map_enabled = bool(self.MAP_DIRECT_WRITES_ENABLED)
+        add("map_edit_gate", "地图编辑开关", "可用" if map_enabled else "写入已关闭",
+            "当前地图编辑%s；可由地图页的手动开关切换。" % ("已开启" if map_enabled else "已关闭"))
+        try:
+            count = int(self.scan_items() or 0)
+            rows = self.get_items(0, min(80, max(1, count))) if count else []
+            if count > 0 and isinstance(rows, list):
+                add("item_filter", "物品筛选", "可用", "已读取 %d 个物品；筛选数据源有效。" % count)
+            elif count == 0:
+                add("item_filter", "物品筛选", "读取失败", "物品容器为空或未能识别；不会把空列表伪装成可用。")
+            else:
+                add("item_filter", "物品筛选", "读取失败", "物品筛选数据结构无效。")
+        except Exception as exc:
+            add("item_filter", "物品筛选", "读取失败", "物品读取异常：%s" % exc)
+        if not dwarves:
+            add("equipment_read", "装备编辑读取", "读取失败", "没有可验证的矮人对象。")
+            add("personal_skill_read", "个人技能读取", "读取失败", "没有可验证的矮人对象。")
+        else:
+            idx = int(dwarves[0].get("idx", 0))
+            try:
+                equipment = self.get_dwarf_equipment(idx)
+                if equipment.get("ok") and isinstance(equipment.get("slots"), list):
+                    add("equipment_read", "装备编辑读取", "可用", "已读取矮人 #%d 的 %d 个装备槽。" % (idx, len(equipment.get("slots", []))))
+                else:
+                    detail = equipment.get("error") or "装备槽返回无效"
+                    status = "版本不支持" if "仅验证" in detail or "版本" in detail else "读取失败"
+                    add("equipment_read", "装备编辑读取", status, detail)
+            except Exception as exc:
+                add("equipment_read", "装备编辑读取", "读取失败", "装备读取异常：%s" % exc)
+            try:
+                row = next((item for item in dwarves if int(item.get("idx", -1)) == idx), {})
+                skills = row.get("skills") if isinstance(row, dict) else None
+                if row.get("skills_ready") and isinstance(skills, list):
+                    add("personal_skill_read", "个人技能读取", "可用", "已读取矮人 #%d 的 %d 项个人技能。" % (idx, len(skills)))
+                elif isinstance(skills, list):
+                    add("personal_skill_read", "个人技能读取", "语义未验证", "技能记录暂未完全就绪；显示为空不等于没有技能。")
+                else:
+                    add("personal_skill_read", "个人技能读取", "读取失败", "个人技能读取结构无效。")
+            except Exception as exc:
+                add("personal_skill_read", "个人技能读取", "读取失败", "个人技能读取异常：%s" % exc)
+        summary_counts = {}
+        for row in checks:
+            summary_counts[row.get("status", "读取失败")] = summary_counts.get(row.get("status", "读取失败"), 0) + 1
+        report.update({"ok": all(row.get("status") not in ("读取失败", "版本不支持") for row in checks),
+                       "checks": checks, "doctor": doctor,
+                       "summary": " · ".join("%s %d" % (key, value) for key, value in summary_counts.items()),
+                       "checked_at": time.strftime("%H:%M:%S")})
+        return report
+
+    def _require_safe_write(self, feature):
+        """Require a live target; Doctor remains diagnostic, not a feature gate."""
+        if not pm or not connected:
+            return "请先连接游戏"
+        return ""
+
+    def _require_high_risk_world_write(self, feature):
+        """Keep the minimum runtime guard for restored legacy world actions.
+
+        The former stable-build policy used this helper as an unconditional
+        deny switch.  That made implemented controls appear available while
+        every request was refused.  Feature methods still perform their own
+        map/object/range checks; this only blocks detached-process writes.
+        """
+        if not pm or not connected:
+            return "请先连接游戏后再执行%s" % feature
+        return ""
+
+    def get_write_safety_status(self):
+        """Return the authoritative state of every legacy write entrypoint.
+
+        Kept separate from Compatibility Doctor so the UI (and a stale cached
+        page) can explain a blocked operation without touching game memory.
+        """
+        rows = []
+        for endpoint, policy in _WRITE_SAFETY_POLICY.items():
+            rows.append({
+                "endpoint": endpoint,
+                "feature": policy["feature"],
+                "state": policy["state"],
+                # Verified endpoints do not need a block reason. Keep the
+                # diagnostics schema uniform without making normal writes
+                # fail merely because that optional description is absent.
+                "reason": policy.get("reason", "已完成独立验证，可在对应功能中使用。"),
+            })
+        rows.sort(key=lambda row: (row["state"], row["feature"], row["endpoint"]))
+        return {
+            "ok": True,
+            "read_only": False,
+            "safe_state": WRITE_SAFETY_VERIFIED,
+            "user_tested_state": WRITE_SAFETY_USER_TESTED,
+            "experimental_state": WRITE_SAFETY_EXPERIMENTAL,
+            "disabled_state": WRITE_SAFETY_DISABLED,
+            "safe_count": sum(1 for row in rows if row["state"] == WRITE_SAFETY_VERIFIED),
+            "user_tested_count": sum(1 for row in rows if row["state"] == WRITE_SAFETY_USER_TESTED),
+            "experimental_count": sum(1 for row in rows if row["state"] == WRITE_SAFETY_EXPERIMENTAL),
+            "disabled_count": sum(1 for row in rows if row["state"] == WRITE_SAFETY_DISABLED),
+            "entries": rows,
+        }
+
+    def list_processes(self):
+        """列出所有 CraftWorld.exe 进程"""
+        import psutil
+        try:
+            matches = []
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    nm = p.info.get('name', '')
+                except:
+                    continue
+                if nm and nm.lower() == MODULE_NAME.lower():
+                    try:
+                        exe_path = p.exe()
+                    except:
+                        exe_path = ""
+                    ver = "v1 \u539f\u7248"
+                    exe_lower = exe_path.lower()
+                    if "dragon" in exe_lower or "\u5de8\u9f99" in exe_path:
+                        ver = "v2 \u5de8\u9f99\u7248"
+                    matches.append({"pid": p.info['pid'], "label": ver, "exe": exe_path})
+                    if len(matches) >= 2:
+                        break
+            return matches
+        except:
+            return []
+
+    def connect(self, pid=0):
+        """连接到游戏进程"""
+        return self.connect_pid(pid)
+    def connect_pid(self, pid=0):
+        """通过 PID 连接到游戏进程"""
+        self._begin_runtime_session()
+        # A reconnect must not let a writer from the old process continue with
+        # the newly assigned global pm object. The serialized connect gate is
+        # held by the API wrapper, so clear every recurring writer first.
+        self.locks["gold"] = False
+        self._stop_gold_economy_runtime()
+        self._stop_mana_reserve_runtime()
+        self.locks["mana"] = False
+        self.locks["xp"] = False
+        self._lock_restore_active = False
+        self._set_mana_max_lock_runtime(False, None)
+        self._clear_timer_locks()
+        with self._portal_lock_guard:
+            self._portal_locks.clear()
+        self._restore_pet_limit_override_internal()
+        self._dispose_wave_portal_controller()
+        self._v2_cache = None
+        self._skill_base_cache = None
+        self._skill_base_ver = None
+        self._magic_cache = {}
+        self._magic_scan_ms = 0
+        self._magic_process_id = 0
+        self._magic_scan_running = False
+        self._magic_scan_completed = False
+        self._magic_scan_error = ""
+        self._native_magic_resources = {}
+        self._pandora_cache = None
+        self._pandora_cache_pid = 0
+        self._pandora_scan_ms = 0
+        self._pandora_forced_key = ""
+        self._clear_pandora_runtime_cache()
+        self._v2_portal_objects = []
+        self._v2_portal_scan_at = 0.0
+        self._v2_portal_scan_pid = 0
+        self._clear_time_controls_cache()
+        self._map_cache_signature = None
+        self._map_cache_key = ""
+        self._pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0, "houses": [], "pets": []}
+        self._pet_limit_override_original = None
+        self._pet_limit_override_value = None
+        self._load_dwarf_names()
+        self._load_item_config()
+        global pm, connected, dwarf_cache, item_cache
+        try:
+            if pid and pid > 0:
+                print("Connecting to PID:", pid)
+                pm = pymem.Pymem(); pm.open_process_from_id(pid); connected = True; get_base()
+            else:
+                print("Connecting by name:", MODULE_NAME)
+                pm = pymem.Pymem(MODULE_NAME); connected = True; get_base()
+            if self._has_legacy_save_patch():
+                # Never try to repair executable bytes in a running process.
+                # A full game restart restores the clean image safely.
+                pm = None; connected = False; dwarf_cache = []; item_cache = []
+                return {"success":False,"error":"检测到旧版修改器遗留的存档代码补丁；请完全退出并重新启动游戏后再连接"}
+            doctor = self._run_compatibility_doctor()
+            self.scan_dwarves_stable()
+            self.scan_items()
+            self.scan_shop()
+            self._restore_mana_max_lock()
+            # One batch scan is started with the connection, but runs in the
+            # background so that the rest of the modifier is ready immediately.
+            self._start_magic_scan()
+            dwarf_state = _get_cached_read_state("dwarves")
+            item_state = _get_cached_read_state("items")
+            return {"success":True,"pid":pm.process_id,
+                    # A count is meaningful only after a verified read.  Do
+                    # not turn a locator failure into a convincing-looking 0
+                    # in the connection banner.
+                    "dwarves": len(dwarf_cache) if dwarf_state.get("state") == self.STATUS_VERIFIED else None,
+                    "items": len(item_cache) if item_state.get("state") == self.STATUS_VERIFIED else None,
+                    "dwarves_state": dwarf_state,
+                    "items_state": item_state,
+                    "magic":0,"magic_scanning":True,"doctor":doctor}
+        except Exception as e:
+            return {"success":False,"error":str(e)}
+
+    def _has_legacy_save_patch(self):
+        """Detect, but deliberately never modify, the known corrupt code patch."""
+        try:
+            raw = pm.read_bytes(get_base() + self.LEGACY_SAVE_PATCH_RVA, 3)
+            return raw == self.LEGACY_SAVE_PATCH_BYTES
+        except Exception:
+            return False
+
+    def disconnect(self):
+        """断开与游戏进程的连接"""
+        self._restore_pet_limit_override_internal()
+        self._end_runtime_session()
+        self._set_mana_max_lock_runtime(False, None)
+        self._lock_restore_active = False
+        self.locks["gold"] = False
+        self._stop_gold_economy_runtime()
+        self._stop_mana_reserve_runtime()
+        self.locks["mana"] = False
+        self.locks["xp"] = False
+        self._clear_timer_locks()
+        self._dispose_wave_portal_controller()
+        self._v2_cache = None
+        global pm, connected, dwarf_cache, item_cache
+        try:
+            if pm and (self._pa1 or self._pa2):
+                b = get_base()
+                if self._pa1 and self._pet_house_original:
+                    is_v2 = self._detect_v2()
+                    off = V2_PET_LIMIT1_OFFSET if is_v2 else V1_PET_LIMIT1_OFFSET
+                    pm.write_bytes(b + off, self._pet_house_original, len(self._pet_house_original))
+                for off, raw in self._pet_infinite_original.items():
+                    pm.write_bytes(b + off, raw, len(raw))
+        except:
+            pass
+        self._pa1 = False
+        self._pa2 = False
+        self._pet_house_original = None
+        self._pet_infinite_original = {}
+        self._portal_locks = {}
+        self._portal_samples = {}
+        self._portal_stability = {}
+        self._v2_portal_objects = []
+        self._v2_portal_scan_at = 0.0
+        self._v2_portal_scan_pid = 0
+        self._magic_cache = {}
+        self._magic_scan_ms = 0
+        self._magic_process_id = 0
+        self._magic_scan_running = False
+        self._magic_scan_completed = False
+        self._magic_scan_error = ""
+        self._native_magic_resources = {}
+        self._clear_pandora_runtime_cache()
+        self._clear_time_controls_cache()
+        self._map_cache_signature = None
+        self._map_cache_key = ""
+        self._pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0, "houses": [], "pets": []}
+        self._pet_limit_override_original = None
+        self._pet_limit_override_value = None
+        with self._compatibility_doctor_lock:
+            self._compatibility_doctor = {"ok": False, "write_ready": False,
+                                          "checked_pid": 0, "checks": [],
+                                          "summary": "已断开游戏"}
+        # Clear the global handle before the serialized wrapper joins workers.
+        # A stale scanner can then only observe an invalid session and exit;
+        # it can never publish data from a detached/reused process.
+        pm=None;connected=False;dwarf_cache=[];item_cache=[]
+        _set_cached_read_state("dwarves", self.STATUS_DISCONNECTED, "已断开游戏连接")
+        _set_cached_read_state("items", self.STATUS_DISCONNECTED, "已断开游戏连接")
+        return True
+
+
+    # ==================== ?????? ====================
+    MAP_COL_W = 0x20
+    MAP_DATA_OFF = 0x20
+    MAP_BLOCK_SIZE = 0xB4000
+    MAP_SAFE_EDIT_LIMIT = 128
+    # Whole-map exploration only changes the proven per-tile exploration bit.
+    # Keep its larger limit separate from regular map edit operations.
+    MAP_EXPLORE_ALL_MAX_CELLS = 250000
+    MAP_DIRECT_WRITES_ENABLED = False
+    # Read-only live refresh limits.  The browser uses small dwarf-nearby
+    # regions plus one background band, so normal worlds stay far below this.
+    MAP_REGION_MAX_COUNT = 24
+    MAP_REGION_MAX_CELLS = 150000
+    MAP_EMPTY = bytes.fromhex("FF FF FF FF FF FF 00 00 00 00 00 00 00 00 FF 32 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 3F")
+
+    def _map_row_stride(self, width):
+        """The map payload is tightly packed; its row width changes per save."""
+        return int(width) * self.MAP_COL_W
+
+    def _map_identity(self, width, height, world_width, world_height, payload):
+        """Build a persistent world key from fields map edits deliberately preserve."""
+        digest = __import__("hashlib").blake2s(digest_size=12)
+        digest.update(f"{width}x{height}:{world_width:.1f}x{world_height:.1f}".encode("ascii"))
+        stride = self._map_row_stride(width)
+        # Map operations touch byte ranges 0..12 only. Bytes 14..31 hold
+        # generated metadata and remain stable for a saved world.
+        for row in sorted({0, height - 1, *[(height - 1) * n // 7 for n in range(1, 7)]}):
+            for col in sorted({0, width - 1, *[(width - 1) * n // 7 for n in range(1, 7)]}):
+                off = row * stride + col * self.MAP_COL_W + 14
+                digest.update(payload[off:off + 18])
+        return "world-" + digest.hexdigest()
+
+    def _map_cache_id(self, data, width, height, world_width, world_height):
+        """Small identity used by map_status; it deliberately reads no tiles."""
+        try:
+            pid = int(pm.process_id) if pm else 0
+        except Exception:
+            pid = 0
+        return (pid, int(data), int(width), int(height),
+                round(float(world_width), 3), round(float(world_height), 3))
+
+    def _map_dwarf_markers(self, width, height, world_width, world_height):
+        """Return live dwarf positions without touching the large map payload."""
+        dwarves = []
+        for dwarf in _dwarf_cache_snapshot():
+            try:
+                x, y = float(dwarf["x"]), float(dwarf["y"])
+                col, row = x * width / world_width, y * height / world_height
+                if 0 <= col < width and 0 <= row < height:
+                    marker = dict(dwarf)
+                    marker.update({"col": col, "row": row})
+                    dwarves.append(marker)
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+        return dwarves
+
+    def _map_resolve(self):
+        global pm, connected, base_addr
+        if not connected or pm is None or not base_addr:
+            return None
+        # base_addr stores the CraftWorld.exe module base; the world/map root
+        # is held at the V1 static offset below.
+        obj = pm.read_int(base_addr + ITEM_BASE_OFFSET)
+        data = pm.read_int(obj + 0x43C)
+        w = pm.read_int(obj + 0x450)
+        h = pm.read_int(obj + 0x454)
+        world_w = pm.read_float(obj + 0x1C0)
+        world_h = pm.read_float(obj + 0x1C4)
+        if not data or not (1 <= w <= 1000 and 1 <= h <= 1000):
+            return None
+        if not world_w or not world_h:
+            world_w, world_h = float(w * 60), float(h * 60)
+        return data, w, h, float(world_w), float(world_h)
+
+    def _runtime_read_unavailable_state(self):
+        """Classify a missing runtime structure without substituting fake data."""
+        if not connected or pm is None:
+            return self.STATUS_DISCONNECTED, "尚未连接游戏"
+        try:
+            if not self._map_resolve():
+                return self.STATUS_EMPTY, "游戏已连接，但当前没有载入可读取的存档地图"
+        except Exception:
+            pass
+        return self.STATUS_STALE, "当前版本的定位地址或对象结构已失效，请重新连接或检查版本"
+
+    @staticmethod
+    def _read_envelope(ok, state, data=None, error="", **extra):
+        """Stable shape for UI reads with an unambiguous failure payload.
+
+        A failed read must never look like a valid empty inventory or empty
+        dwarf roster.  Consumers receive ``data=None`` for every failure and
+        may only treat an empty list as a confirmed, successful empty result.
+        """
+        result = {
+            "ok": bool(ok),
+            "state": str(state),
+            "data": data if ok else None,
+        }
+        if ok and result["data"] is None:
+            result["data"] = []
+        if error:
+            result["error"] = str(error)
+        result.update(extra)
+        return result
+
+    def _map_bases(self, data):
+        # data is the live map payload pointer returned by the map manager.
+        # Old code searched the whole process for similarly shaped allocations
+        # and wrote every match, including stale buffers.  That could corrupt
+        # retired maps and cause a delayed crash in the world/AI update.
+        return [data - self.MAP_DATA_OFF]
+
+    def map_blocks(self):
+        m = {}
+        by_en = {}
+        tpath = _resource_path("item_translations.txt")
+        if os.path.exists(tpath):
+            try:
+                for line in open(tpath, encoding="utf-8", errors="replace"):
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if not k or not v:
+                        continue
+                    if k.isdigit() and "|" in v:
+                        en, zh = v.split("|", 1)
+                        m[int(k)] = {"en": en.strip(), "zh": zh.strip(), "src": "runtime", "bg": ""}
+                    else:
+                        by_en[k.lower()] = v
+            except Exception:
+                pass
+        if not m:
+            rpath = _resource_path("runtime_blocks.csv")
+            if os.path.exists(rpath):
+                try:
+                    import csv as _csv
+                    with open(rpath, encoding="utf-8-sig") as f:
+                        rd = _csv.reader(f)
+                        next(rd, None)
+                        for line in rd:
+                            if len(line) >= 2:
+                                try:
+                                    wid = int(line[0])
+                                except Exception:
+                                    continue
+                                m[wid] = {"en": line[1], "zh": "", "src": "runtime", "bg": ""}
+                except Exception:
+                    pass
+        for wid, it in m.items():
+            if not it.get("zh"):
+                it["zh"] = by_en.get(str(it.get("en", "")).lower(), "")
+        return m
+
+    def map_metadata(self):
+        """Read map dimensions and live markers without transferring tile payload."""
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, width, height, world_width, world_height = resolved
+            signature = self._map_cache_id(data, width, height, world_width, world_height)
+            # A metadata-only identity is intentionally temporary. map_read_regions
+            # will adopt the same signature before any tile request is accepted.
+            self._map_cache_signature = signature
+            map_key = self._map_cache_key or ("live-%d-%dx%d" % (int(pm.process_id), int(width), int(height)))
+            self._map_cache_key = map_key
+            return {"ok": True, "state": self.STATUS_VERIFIED, "width": int(width), "height": int(height),
+                    "world_width": float(world_width), "world_height": float(world_height),
+                    "map_key": map_key, "dwarves": self._map_dwarf_markers(width, height, world_width, world_height),
+                    "write_enabled": bool(self.MAP_DIRECT_WRITES_ENABLED), "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT), "tile_mode": "viewport_only"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "地图元数据读取异常：%s" % exc}
+
+    def get_portal_director_surface_profile(self):
+        """Read only the top terrain cell of every map column for portal placement.
+
+        This intentionally transfers a compact per-column profile rather than
+        the entire map.  Scenario placement can therefore choose ground/sky
+        coordinates without ever placing a portal inside underground terrain.
+        """
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, width, height, world_width, world_height = resolved
+            row_len = self._map_row_stride(width)
+            payload = pm.read_bytes(data, row_len * height)
+            if payload is None or len(payload) != row_len * height:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "地图地表轮廓读取不完整"}
+            surface_rows, surface_water = [], []
+            for col in range(int(width)):
+                surface = -1
+                water = 0
+                for row in range(int(height)):
+                    off = row * row_len + col * self.MAP_COL_W
+                    ground = struct.unpack_from("<H", payload, off + 2)[0]
+                    if ground != 0xFFFF:
+                        surface = row - 1
+                        if surface >= 0:
+                            above = surface * row_len + col * self.MAP_COL_W
+                            water = int(payload[above + 12]) & 31
+                        break
+                surface_rows.append(surface)
+                surface_water.append(water)
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "width": int(width), "height": int(height),
+                    "surface_rows": surface_rows, "surface_water": surface_water,
+                    "dwarves": self._map_dwarf_markers(width, height, world_width, world_height)}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "地图地表轮廓读取失败：%s" % exc}
+
+    def get_portal_director_grid_map(self, max_width=240, max_height=140):
+        """Return a compact occupancy grid for click-to-place portal previews.
+
+        Each returned character represents whether its source map area contains
+        any foreground terrain block.  It deliberately ignores inner/outer
+        material identity: the director only needs to distinguish air from
+        terrain so it can refuse underground placements.
+        """
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, width, height, world_width, world_height = resolved
+            width, height = int(width), int(height)
+            row_len = self._map_row_stride(width)
+            payload = pm.read_bytes(data, row_len * height)
+            if payload is None or len(payload) != row_len * height:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "方格地图读取不完整"}
+            try:
+                grid_width = max(1, min(width, int(max_width)))
+                grid_height = max(1, min(height, int(max_height)))
+            except (TypeError, ValueError, OverflowError):
+                grid_width, grid_height = min(width, 240), min(height, 140)
+            rows = []
+            occupied_count = 0
+            for gy in range(grid_height):
+                r0 = gy * height // grid_height
+                r1 = max(r0 + 1, (gy + 1) * height // grid_height)
+                chars = []
+                for gx in range(grid_width):
+                    c0 = gx * width // grid_width
+                    c1 = max(c0 + 1, (gx + 1) * width // grid_width)
+                    occupied = False
+                    for row in range(r0, r1):
+                        base = row * row_len
+                        for col in range(c0, c1):
+                            if struct.unpack_from("<H", payload, base + col * self.MAP_COL_W + 2)[0] != 0xFFFF:
+                                occupied = True
+                                break
+                        if occupied:
+                            break
+                    chars.append("1" if occupied else "0")
+                    if occupied:
+                        occupied_count += 1
+                rows.append("".join(chars))
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "width": width, "height": height,
+                    "grid_width": grid_width, "grid_height": grid_height,
+                    "rows": rows, "occupied_count": occupied_count,
+                    "dwarves": self._map_dwarf_markers(width, height, world_width, world_height)}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "方格地图读取失败：%s" % exc}
+
+    def map_scan(self):
+        global pm, connected
+        try:
+            r = self._map_resolve()
+            if not r:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, w, h, world_w, world_h = r
+            row_len = self._map_row_stride(w)
+            payload = pm.read_bytes(data, row_len * h)
+            if payload is None or len(payload) != row_len * h:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "地图数据读取不完整；地图缓冲区可能已重建，请重新进入存档后再试"}
+            bg, w2, water, front, explored = [], [], [], [], []
+            bgcnt = {}
+            for row in range(h):
+                row_start = row * row_len
+                for col in range(w):
+                    off = row_start + col * self.MAP_COL_W
+                    d0 = struct.unpack_from("<I", payload, off)[0]
+                    w2v = struct.unpack_from("<H", payload, off + 2)[0]
+                    bgb = struct.unpack_from("<i", payload, off + 8)[0]
+                    wv = payload[off + 12]
+                    ev = 0 if (bgb & 2) else 1
+                    low = d0 & 0xFFFF
+                    fv = low if low != 0xFFFF else 0xFFFF
+                    bg.append(bgb); w2.append(w2v); water.append(wv); front.append(fv); explored.append(ev)
+                    bgcnt.setdefault(w2v, {})
+                    bgcnt[w2v][bgb] = bgcnt[w2v].get(bgb, 0) + 1
+            bg_hint = {k: max(v.items(), key=lambda x: x[1])[0] for k, v in bgcnt.items()}
+            map_key = self._map_identity(w, h, world_w, world_h, payload)
+            self._map_cache_signature = self._map_cache_id(data, w, h, world_w, world_h)
+            self._map_cache_key = map_key
+            dwarves = self._map_dwarf_markers(w, h, world_w, world_h)
+            return {"ok": True, "state": self.STATUS_VERIFIED, "width": w, "height": h, "world_width": world_w, "world_height": world_h, "map_key": map_key, "bg": bg, "w2": w2, "water": water, "front": front, "explored": explored, "bg_hint": bg_hint, "dwarves": dwarves,
+                    "write_enabled": bool(self.MAP_DIRECT_WRITES_ENABLED), "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT)}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "地图读取异常：%s" % e}
+
+    def map_status(self):
+        """Cheap map heartbeat used after the initial full map read.
+
+        It resolves the current map and refreshes dwarf markers, but never
+        reads or transfers the 32-byte-per-cell payload.  A changed map buffer
+        (such as loading another save) tells the browser to perform one full
+        map_scan and rebuild its cache.
+        """
+        try:
+            r = self._map_resolve()
+            if not r:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, w, h, world_w, world_h = r
+            signature = self._map_cache_id(data, w, h, world_w, world_h)
+            changed = signature != self._map_cache_signature
+            result = {"ok": True, "state": self.STATUS_VERIFIED, "changed": changed,
+                      "write_enabled": bool(self.MAP_DIRECT_WRITES_ENABLED),
+                      "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT)}
+            if changed:
+                result["reason"] = "map_buffer_changed"
+                return result
+            result.update({"width": w, "height": h,
+                           "world_width": world_w, "world_height": world_h,
+                           "map_key": self._map_cache_key,
+                           "dwarves": self._map_dwarf_markers(w, h, world_w, world_h)})
+            return result
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "地图状态读取异常：%s" % e}
+
+    def map_read_regions(self, regions):
+        """Read selected live map rectangles without serialising the full map.
+
+        Regions use inclusive r0/c0/r1/c1 coordinates.  This endpoint is
+        intentionally read-only: the browser requests the visible area and,
+        when necessary, small areas around live dwarf markers.
+        """
+        try:
+            r = self._map_resolve()
+            if not r:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, w, h, world_w, world_h = r
+            signature = self._map_cache_id(data, w, h, world_w, world_h)
+            if signature != self._map_cache_signature:
+                return {"ok": True, "changed": True, "reason": "map_buffer_changed"}
+            if not isinstance(regions, list):
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "区域参数无效"}
+            if len(regions) > self.MAP_REGION_MAX_COUNT:
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "区域数量过多"}
+
+            clean = []
+            total_cells = 0
+            for region in regions:
+                if not isinstance(region, dict):
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "区域格式无效"}
+                try:
+                    r0, c0 = int(region["r0"]), int(region["c0"])
+                    r1, c1 = int(region["r1"]), int(region["c1"])
+                except (KeyError, TypeError, ValueError):
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "区域坐标无效"}
+                r0, c0 = max(0, r0), max(0, c0)
+                r1, c1 = min(h - 1, r1), min(w - 1, c1)
+                if r0 > r1 or c0 > c1:
+                    continue
+                cells = (r1 - r0 + 1) * (c1 - c0 + 1)
+                total_cells += cells
+                if total_cells > self.MAP_REGION_MAX_CELLS:
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "本次地图区域过大"}
+                clean.append((r0, c0, r1, c1))
+
+            stride = self._map_row_stride(w)
+            result_regions = []
+            for r0, c0, r1, c1 in clean:
+                rows, cols = r1 - r0 + 1, c1 - c0 + 1
+                bg, w2, water, front, explored = [], [], [], [], []
+                for row in range(r0, r1 + 1):
+                    row_addr = data + row * stride + c0 * self.MAP_COL_W
+                    payload = pm.read_bytes(row_addr, cols * self.MAP_COL_W)
+                    if payload is None or len(payload) != cols * self.MAP_COL_W:
+                        return {"ok": False, "state": self.STATUS_STALE,
+                                "error": "地图区域读取不完整；地图缓冲区可能已重建"}
+                    for col in range(cols):
+                        off = col * self.MAP_COL_W
+                        d0 = struct.unpack_from("<I", payload, off)[0]
+                        low = d0 & 0xFFFF
+                        front.append(low if low != 0xFFFF else 0xFFFF)
+                        w2.append(struct.unpack_from("<H", payload, off + 2)[0])
+                        flags = struct.unpack_from("<i", payload, off + 8)[0]
+                        bg.append(flags)
+                        # Bit 1 is the fog/exploration flag.  Keep it in the
+                        # live region response as well as the full scan, or
+                        # the exploration view becomes stale until a manual
+                        # whole-map refresh.
+                        explored.append(0 if (flags & 0x02) else 1)
+                        water.append(payload[off + 12])
+                result_regions.append({"r0": r0, "c0": c0, "rows": rows, "cols": cols,
+                                       "bg": bg, "w2": w2, "water": water, "front": front,
+                                       "explored": explored})
+            return {"ok": True, "state": self.STATUS_VERIFIED, "changed": False,
+                    "dwarves": self._map_dwarf_markers(w, h, world_w, world_h),
+                    "regions": result_regions,
+                    "write_enabled": bool(self.MAP_DIRECT_WRITES_ENABLED), "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT)}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "地图局部读取异常：%s" % e}
+
+
+    def map_find_resource(self, resource_id, limit=30):
+        """Find a selected resource on demand without mutating the map.
+
+        This intentionally performs a complete, explicit scan only after the
+        user presses the resource-location button. Normal rendering and
+        timer-driven refreshes never call it.
+        """
+        try:
+            target = int(resource_id)
+            result_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "资源 ID 无效"}
+        if target < 0 or target > 0xFFFF:
+            return {"ok": False, "error": "资源 ID 超出地图字段范围"}
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                return {"ok": False, "error": "未连接或当前地图未载入"}
+            data, width, height, world_width, world_height = resolved
+            signature = self._map_cache_id(data, width, height, world_width, world_height)
+            if signature != self._map_cache_signature:
+                return {"ok": True, "changed": True, "reason": "map_buffer_changed"}
+            stride, matches = self._map_row_stride(width), []
+            for row in range(height):
+                payload = pm.read_bytes(data + row * stride, stride)
+                if payload is None or len(payload) != stride:
+                    return {"ok": False, "error": "资源定位时地图行读取不完整"}
+                for col in range(width):
+                    off = col * self.MAP_COL_W
+                    inner = struct.unpack_from("<H", payload, off + 2)[0]
+                    outer_raw = struct.unpack_from("<I", payload, off)[0] & 0xFFFF
+                    outer = outer_raw if outer_raw != 0xFFFF else 0xFFFF
+                    if inner == target:
+                        matches.append({"row": row, "col": col, "layer": "inner"})
+                    if outer == target:
+                        matches.append({"row": row, "col": col, "layer": "outer"})
+                    if len(matches) >= result_limit:
+                        return {"ok": True, "changed": False, "resource_id": target,
+                                "matches": matches, "truncated": True,
+                                "write_enabled": False}
+            return {"ok": True, "changed": False, "resource_id": target,
+                    "matches": matches, "truncated": False, "write_enabled": False}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_map_pins(self, map_key):
+        """Return pins belonging to one generated world/save."""
+        try:
+            cfg = self._read_config()
+            pins = (cfg.get("map_pins", {}) or {}).get(str(map_key), [])
+            return [pin for pin in pins if isinstance(pin, dict)]
+        except Exception:
+            return []
+
+    def _clean_map_pins(self, pins):
+        """Return only the portable part of a map-pin collection."""
+        clean = []
+        for pin in pins if isinstance(pins, list) else []:
+            try:
+                row, col = int(pin.get("row")), int(pin.get("col"))
+                if row < 0 or col < 0:
+                    continue
+                name = str(pin.get("name", "标记点")).strip()[:36] or "标记点"
+                clean.append({"name": name, "row": row, "col": col})
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return clean
+
+    def save_map_pins(self, map_key, pins):
+        """Persist a sanitised pin list without disturbing other settings."""
+        try:
+            if not isinstance(map_key, str) or not map_key.startswith("world-"):
+                return False
+            clean = self._clean_map_pins(pins)
+            def update(cfg):
+                all_pins = dict(cfg.get("map_pins", {}) or {})
+                all_pins[map_key] = clean
+                cfg["map_pins"] = all_pins
+            return self._update_config(update)
+        except Exception as e:
+            print("save_map_pins error:", e)
+            return False
+
+    def map_replace(self, row, col, bg, word, water=0):
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式：地图方块写入已暂停，避免破坏寻路/碰撞等游戏内部状态"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "\u672a\u8fde\u63a5"}
+            data, w, h, *_ = r
+            if not (0 <= row < h and 0 <= col < w):
+                return {"ok": False, "error": "\u5750\u6807\u8d8a\u754c"}
+            bases = self._map_bases(data)
+            off = row * self._map_row_stride(w) + col * self.MAP_COL_W
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    cell = base + self.MAP_DATA_OFF + off
+                    d0 = ((word & 0xFFFF) << 16) | 0xFFFF
+                    pm.write_int(cell, d0)
+                    pm.write_int(cell + 8, bg)
+                    pm.write_bytes(cell + 12, bytes([0x80 | (water & 0x1F)]), 1)
+            finally:
+                self._resume(hnd)
+            a = bases[0] + self.MAP_DATA_OFF + off
+            return {"ok": True, "row": row, "col": col, "bg": pm.read_int(a + 8), "word": pm.read_int(a + 2) & 0xFFFF}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def map_replace_front(self, row, col, front_id):
+        """????????d0 ? 16 ? = front_id?0 ????"""
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式：地图方块写入已暂停，避免破坏寻路/碰撞等游戏内部状态"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "\u672a\u8fde\u63a5"}
+            data, w, h, *_ = r
+            if not (0 <= row < h and 0 <= col < w):
+                return {"ok": False, "error": "\u5750\u6807\u8d8a\u754c"}
+            bases = self._map_bases(data)
+            off = row * self._map_row_stride(w) + col * self.MAP_COL_W
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    cell = base + self.MAP_DATA_OFF + off
+                    d0 = pm.read_int(cell) & 0xFFFFFFFF
+                    new_d0 = (d0 & 0xFFFF0000) | (front_id & 0xFFFF)
+                    pm.write_int(cell, new_d0)
+            finally:
+                self._resume(hnd)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def map_apply_cells(self, cells):
+        """Atomically update known map fields while preserving the other 32-byte cell data."""
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式：区域填充已暂停，避免破坏寻路/碰撞等游戏内部状态"}
+            if not isinstance(cells, list) or not cells:
+                return {"ok": False, "error": "没有可写入的格子"}
+            if len(cells) > self.MAP_SAFE_EDIT_LIMIT:
+                return {"ok": False, "error": "安全模式下单次最多修改 128 格；请分批操作"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "未连接"}
+            data, w, h, *_ = r
+            rows = {}
+            for item in cells:
+                if not isinstance(item, dict):
+                    return {"ok": False, "error": "格子数据格式错误"}
+                row, col = int(item["row"]), int(item["col"])
+                if not (0 <= row < h and 0 <= col < w):
+                    return {"ok": False, "error": "坐标越界"}
+                inner = int(item["inner"]) & 0xFFFF
+                front = int(item["front"]) & 0xFFFF
+                bg = int(item["bg"])
+                water = max(0, min(31, int(item["water"])))
+                rows.setdefault(row, {})[col] = (inner, front, bg, water)
+
+            bases = self._map_bases(data)
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    for row, changes in rows.items():
+                        row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(w)
+                        row_data = bytearray(pm.read_bytes(row_addr, w * self.MAP_COL_W))
+                        for col, (inner, front, bg, water) in changes.items():
+                            off = col * self.MAP_COL_W
+                            struct.pack_into("<H", row_data, off, front)
+                            struct.pack_into("<H", row_data, off + 2, inner)
+                            struct.pack_into("<i", row_data, off + 8, bg)
+                            # The low five bits hold water level, but CraftWorld
+                            # only treats it as live water when bit 7 is set.
+                            # Single-cell water editing has always written 0x80;
+                            # do the same for batch/selection changes so filling
+                            # an originally dry cell actually creates water.
+                            row_data[off + 12] = (row_data[off + 12] & 0x60) | 0x80 | water
+                        pm.write_bytes(row_addr, bytes(row_data), len(row_data))
+            finally:
+                self._resume(hnd)
+            return {"ok": True, "cells": len(cells)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def map_set_water(self, row, col, level):
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式：地图水位写入已暂停，避免破坏寻路/碰撞等游戏内部状态"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "\u672a\u8fde\u63a5"}
+            data, w, h, *_ = r
+            bases = self._map_bases(data)
+            off = row * self._map_row_stride(w) + col * self.MAP_COL_W
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    pm.write_bytes(base + self.MAP_DATA_OFF + off + 12, bytes([0x80 | (level & 0x1F)]), 1)
+            finally:
+                self._resume(hnd)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def map_set_explored(self, cells, explored=True):
+        """Batch set or clear the per-tile explored flag."""
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式：探索标志写入已暂停，避免破坏寻路/碰撞等游戏内部状态"}
+            if not isinstance(cells, list) or not cells:
+                return {"ok": False, "error": "没有可写入的格子"}
+            if len(cells) > self.MAP_SAFE_EDIT_LIMIT:
+                return {"ok": False, "error": "安全模式下单次最多修改 128 格；请分批操作"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "未连接"}
+            data, w, h, *_ = r
+            rows = {}
+            for item in cells:
+                if isinstance(item, dict):
+                    row, col = int(item["row"]), int(item["col"])
+                else:
+                    row, col = int(item[0]), int(item[1])
+                if not (0 <= row < h and 0 <= col < w):
+                    return {"ok": False, "error": "坐标越界"}
+                rows.setdefault(row, set()).add(col)
+
+            bases = self._map_bases(data)
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    for row, cols in rows.items():
+                        row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(w)
+                        row_data = bytearray(pm.read_bytes(row_addr, w * self.MAP_COL_W))
+                        for col in cols:
+                            off = col * self.MAP_COL_W + 8
+                            flags = struct.unpack_from("<I", row_data, off)[0]
+                            if explored:
+                                flags &= ~0x02
+                            else:
+                                flags |= 0x02
+                            struct.pack_into("<I", row_data, off, flags)
+                        pm.write_bytes(row_addr, bytes(row_data), len(row_data))
+            finally:
+                self._resume(hnd)
+            return {"ok": True, "cells": len(cells), "explored": bool(explored)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def map_explore_all(self):
+        """Mark every tile in the current live map as explored.
+
+        This is intentionally separate from ``map_set_explored``: normal map
+        edits remain capped at a small selection, while this operation changes
+        only the verified ``0x02`` unexplored flag.  Rows are snapshotted before
+        modification and restored if a write/readback check fails.
+        """
+        global pm
+        if not self.MAP_DIRECT_WRITES_ENABLED:
+            return {"ok": False, "error": "请先开启地图编辑，再执行全图探索"}
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, width, height, *_ = resolved
+            width, height = int(width), int(height)
+            total = width * height
+            if total <= 0 or total > int(self.MAP_EXPLORE_ALL_MAX_CELLS):
+                return {"ok": False, "error": "当前地图面积异常（%d 格），未执行写入" % total}
+
+            bases = self._map_bases(data)
+            if len(bases) != 1:
+                return {"ok": False, "error": "未确认唯一的活动地图数据缓冲区，未执行写入"}
+            base = int(bases[0])
+            row_size = width * self.MAP_COL_W
+            snapshots = []
+            changed = 0
+            hnd = self._suspend(pm.process_id)
+            try:
+                for row in range(height):
+                    row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(width)
+                    original = bytes(pm.read_bytes(row_addr, row_size))
+                    row_data = bytearray(original)
+                    row_changed = 0
+                    for col in range(width):
+                        off = col * self.MAP_COL_W + 8
+                        flags = struct.unpack_from("<I", row_data, off)[0]
+                        if flags & 0x02:
+                            struct.pack_into("<I", row_data, off, flags & ~0x02)
+                            row_changed += 1
+                    if row_changed:
+                        snapshots.append((row_addr, original))
+                        pm.write_bytes(row_addr, bytes(row_data), row_size)
+                        changed += row_changed
+
+                # Full readback, not a UI-only success indicator.  It also
+                # catches a changed map pointer or an ignored write immediately.
+                remaining = 0
+                for row in range(height):
+                    row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(width)
+                    row_data = pm.read_bytes(row_addr, row_size)
+                    for col in range(width):
+                        flags = struct.unpack_from("<I", row_data, col * self.MAP_COL_W + 8)[0]
+                        if flags & 0x02:
+                            remaining += 1
+                if remaining:
+                    raise RuntimeError("写后读回发现 %d 格仍为未探索" % remaining)
+            except Exception:
+                for row_addr, original in reversed(snapshots):
+                    try:
+                        pm.write_bytes(row_addr, original, len(original))
+                    except Exception:
+                        pass
+                raise
+            finally:
+                self._resume(hnd)
+
+            return {"ok": True, "width": width, "height": height, "cells": total,
+                    "changed": changed, "message": "已将全图 %d 格标记为已探索（实际更新 %d 格）" % (total, changed)}
+        except Exception as e:
+            return {"ok": False, "error": "全图探索失败，已尝试回滚：%s" % e}
+
+    def map_fill(self, bg, word, water=0):
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式已禁用全图填充；请先开启地图编辑"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "\u672a\u8fde\u63a5"}
+            data, w, h, *_ = r
+            bases = self._map_bases(data)
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    for row in range(h):
+                        row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(w)
+                        row_data = bytearray(pm.read_bytes(row_addr, w * self.MAP_COL_W))
+                        for col in range(w):
+                            off = col * self.MAP_COL_W
+                            struct.pack_into("<H", row_data, off, 0xFFFF)
+                            struct.pack_into("<H", row_data, off + 2, word & 0xFFFF)
+                            struct.pack_into("<i", row_data, off + 8, int(bg))
+                            row_data[off + 12] = (row_data[off + 12] & 0xE0) | (water & 0x1F)
+                        pm.write_bytes(row_addr, bytes(row_data), len(row_data))
+            finally:
+                self._resume(hnd)
+            return {"ok": True, "cells": w * h}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def map_clear(self):
+        global pm
+        try:
+            if not self.MAP_DIRECT_WRITES_ENABLED:
+                return {"ok": False, "error": "安全模式已禁用全图清空；请先开启地图编辑"}
+            r = self._map_resolve()
+            if not r:
+                return {"ok": False, "error": "\u672a\u8fde\u63a5"}
+            data, w, h, *_ = r
+            bases = self._map_bases(data)
+            hnd = self._suspend(pm.process_id)
+            try:
+                for base in bases:
+                    for row in range(h):
+                        row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(w)
+                        row_data = bytearray(pm.read_bytes(row_addr, w * self.MAP_COL_W))
+                        for col in range(w):
+                            off = col * self.MAP_COL_W
+                            struct.pack_into("<H", row_data, off, 0xFFFF)
+                            struct.pack_into("<H", row_data, off + 2, 0xFFFF)
+                            struct.pack_into("<i", row_data, off + 8, 0)
+                            row_data[off + 12] = row_data[off + 12] & 0xE0
+                        pm.write_bytes(row_addr, bytes(row_data), len(row_data))
+            finally:
+                self._resume(hnd)
+            return {"ok": True, "cells": w * h}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_map_write_enabled(self, enabled):
+        """Explicitly enable or disable the limited live map editor."""
+        if not bool(enabled):
+            self.MAP_DIRECT_WRITES_ENABLED = False
+            return {"ok": True, "write_enabled": False,
+                    "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT),
+                    "message": "地图编辑已关闭"}
+        global pm, connected
+        if not connected or pm is None:
+            self.MAP_DIRECT_WRITES_ENABLED = False
+            return {"ok": False, "write_enabled": False,
+                    "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT),
+                    "error": "请先连接游戏"}
+        try:
+            if not self._map_resolve():
+                self.MAP_DIRECT_WRITES_ENABLED = False
+                return {"ok": False, "write_enabled": False,
+                        "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT),
+                        "error": "未读取到有效地图；请先进入已加载的存档地图"}
+            self.MAP_DIRECT_WRITES_ENABLED = True
+            return {"ok": True, "write_enabled": True,
+                    "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT),
+                    "message": "地图编辑已开启：单次最多 %d 格" % int(self.MAP_SAFE_EDIT_LIMIT)}
+        except Exception as e:
+            self.MAP_DIRECT_WRITES_ENABLED = False
+            return {"ok": False, "write_enabled": False,
+                    "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT),
+                    "error": "地图编辑初始化失败：%s" % e}
+
+    # ==================== 魔法传送门 ====================
+    PORTAL_CONTAINER_OFF = 0x194
+    PORTAL_SLOT_START = 0x3C
+    PORTAL_SLOT_END = 0x100
+    PORTAL_TIMER_OFF = 0x1C0
+    PORTAL_SIG_OFF = 0x184
+    PORTAL_KIND_OFF = 0x18C
+    PORTAL_ACTIVE_OFF = 0x1C4
+    V2_PORTAL_SIGNATURE = b"\x00\x00\xC8\x42\x00\x00\x48\x43"  # +0x184=100.0, +0x188=200.0
+    V2_PORTAL_SCAN_TTL = 5.0
+
+    def _scan_v2_portal_objects(self):
+        """Scan writable private heaps for active magic portal objects (V2).
+
+        The V2 game does not expose the same sparse slot table as V1, so the
+        portal signature (100.0/200.0 at +0x184/+0x188) is used instead.  The
+        result is cached for a few seconds; refreshes then only re-read the
+        known objects.
+        """
+        global pm, connected
+        if not connected or pm is None:
+            return []
+        try:
+            process_id = int(pm.process_id)
+            now = time.time()
+            with self._v2_portal_scan_lock:
+                if (self._v2_portal_scan_pid == process_id
+                        and self._v2_portal_objects
+                        and now - self._v2_portal_scan_at < self.V2_PORTAL_SCAN_TTL):
+                    return list(self._v2_portal_objects)
+                signature = self.V2_PORTAL_SIGNATURE
+                objects = []
+                seen = set()
+                writable_protect = {0x04, 0x08, 0x40, 0x80}
+
+                class _MBI(ctypes.Structure):
+                    _fields_ = [
+                        ("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
+                        ("AllocationProtect", ctypes.c_uint32), ("RegionSize", ctypes.c_size_t),
+                        ("State", ctypes.c_uint32), ("Protect", ctypes.c_uint32), ("Type", ctypes.c_uint32),
+                    ]
+
+                kernel32 = ctypes.windll.kernel32
+                mbi = _MBI()
+                address = 0x10000
+                limit = 0x80000000
+                while address < limit:
+                    try:
+                        queried = kernel32.VirtualQueryEx(pm.process_handle, address, ctypes.byref(mbi), ctypes.sizeof(mbi))
+                    except Exception:
+                        queried = 0
+                    if not queried:
+                        address += 0x10000
+                        continue
+                    region_base = int(mbi.BaseAddress or 0)
+                    region_size = int(mbi.RegionSize or 0)
+                    next_address = region_base + region_size
+                    if next_address <= address:
+                        address += 0x1000
+                        continue
+                    protect = int(mbi.Protect)
+                    if (mbi.State != 0x1000 or mbi.Type != 0x20000 or protect & 0x100
+                            or (protect & 0xFF) not in writable_protect or region_size < 4):
+                        address = next_address
+                        continue
+                    offset = 0
+                    while offset < region_size:
+                        read_size = min(0x200000, region_size - offset)
+                        read_base = region_base + offset
+                        try:
+                            block = pm.read_bytes(read_base, read_size)
+                        except Exception:
+                            block = None
+                        if block:
+                            pos = block.find(signature)
+                            while pos != -1:
+                                obj = read_base + pos - self.PORTAL_SIG_OFF
+                                if obj not in seen:
+                                    seen.add(obj)
+                                    try:
+                                        f1 = pm.read_float(obj + self.PORTAL_SIG_OFF)
+                                        f2 = pm.read_float(obj + self.PORTAL_SIG_OFF + 4)
+                                        kind = pm.read_int(obj + self.PORTAL_KIND_OFF)
+                                        timer = pm.read_float(obj + self.PORTAL_TIMER_OFF)
+                                        active_flag = pm.read_int(obj + self.PORTAL_ACTIVE_OFF)
+                                    except Exception:
+                                        continue
+                                    if (f1 is None or f2 is None or kind is None or timer is None
+                                            or active_flag is None):
+                                        continue
+                                    if (abs(f1 - 100.0) > 0.001 or abs(f2 - 200.0) > 0.001
+                                            or (kind & 0xFF) != 1):
+                                        continue
+                                    if not math.isfinite(timer) or timer < -0.01 or timer > 36000:
+                                        continue
+                                    if timer <= 0.01:
+                                        continue
+                                    objects.append(obj)
+                                pos = block.find(signature, pos + 1)
+                        if offset + read_size >= region_size:
+                            break
+                        offset += max(1, read_size - 8)
+                    address = next_address
+                self._v2_portal_objects = objects
+                self._v2_portal_scan_at = now
+                self._v2_portal_scan_pid = process_id
+                return list(objects)
+        except Exception:
+            return []
+
+    def _portal_entries(self):
+        """Enumerate active magic portal objects (V1 slot table / V2 heap scan)."""
+        global pm, connected
+        if not connected or pm is None:
+            return None, "未连接"
+        try:
+            entries = {}
+            current_samples = {}
+
+            def accept(obj, slot):
+                try:
+                    f1 = pm.read_float(obj + self.PORTAL_SIG_OFF)
+                    f2 = pm.read_float(obj + self.PORTAL_SIG_OFF + 4)
+                    kind = pm.read_int(obj + self.PORTAL_KIND_OFF)
+                    timer = pm.read_float(obj + self.PORTAL_TIMER_OFF)
+                    active_flag = pm.read_int(obj + self.PORTAL_ACTIVE_OFF)
+                except Exception:
+                    return
+                if f1 is None or f2 is None or kind is None or timer is None or active_flag is None:
+                    return
+                if abs(f1 - 100.0) > 0.001 or abs(f2 - 200.0) > 0.001 or (kind & 0xFF) != 1:
+                    return
+                if not math.isfinite(timer) or timer < -0.01 or timer > 36000:
+                    return
+                if timer <= 0.01:
+                    return
+                previous_timer = self._portal_samples.get(obj)
+                if previous_timer is not None and abs(previous_timer - float(timer)) < 0.05:
+                    self._portal_stability[obj] = self._portal_stability.get(obj, 0) + 1
+                else:
+                    self._portal_stability[obj] = 0
+                current_samples[obj] = float(timer)
+                # A stale canceled object can retain a positive cached timer.
+                # Keep a new object visible immediately, then hide it only
+                # after several stable samples with an inactive state flag.
+                if active_flag != 0 and self._portal_stability.get(obj, 0) >= 3:
+                    return
+                entry = entries.setdefault(obj, {"object": obj, "slots": [], "timer": float(timer)})
+                entry["slots"].append(slot)
+                entry["timer"] = float(timer)
+
+            if self._detect_v2():
+                for obj in self._scan_v2_portal_objects():
+                    accept(obj, obj)
+            else:
+                root = pm.read_int(get_base() + ITEM_BASE_OFFSET)
+                container = root and pm.read_int(root + self.PORTAL_CONTAINER_OFF)
+                if not container or container < 0x10000:
+                    return None, "未找到传送门容器"
+                for slot in range(self.PORTAL_SLOT_START, self.PORTAL_SLOT_END + 1, 4):
+                    obj = pm.read_int(container + slot)
+                    if not obj or obj < 0x10000 or obj >= 0x80000000:
+                        continue
+                    accept(obj, slot)
+
+            self._portal_samples = current_samples
+            self._portal_stability = {obj: self._portal_stability.get(obj, 0) for obj in current_samples}
+            return list(entries.values()), None
+        except Exception as e:
+            return None, str(e)
+
+    def get_portals(self):
+        entries, error = self._portal_entries()
+        if entries is None:
+            if not connected or pm is None:
+                state = self.STATUS_DISCONNECTED
+            else:
+                state = self.STATUS_STALE
+            return {"ok": False, "state": state,
+                    "error": error or "传送门对象定位失败", "portals": None}
+        portals = []
+        for entry in entries:
+            timer = entry["timer"]
+            portals.append({
+                "object": entry["object"],
+                "timer_address": entry["object"] + self.PORTAL_TIMER_OFF,
+                "timer": timer,
+                "active": True,
+                "slots": entry["slots"],
+                "locked": entry["object"] in self._portal_locks,
+            })
+        portals.sort(key=lambda p: (not p["active"], p["slots"][0]))
+        return {"ok": True, "state": self.STATUS_VERIFIED, "portals": portals}
+
+    def _portal_by_object(self, object_addr):
+        entries, _ = self._portal_entries()
+        if not entries:
+            return None
+        for entry in entries:
+            if entry["object"] == int(object_addr):
+                return entry
+        return None
+
+    def set_portal_timer(self, object_addr, seconds):
+        blocked = self._require_high_risk_world_write("传送门倒计时写入")
+        if blocked:
+            return {"ok": False, "error": blocked}
+        try:
+            seconds = float(seconds)
+            if not math.isfinite(seconds) or seconds < 1 or seconds > 36000:
+                return {"ok": False, "error": "时间范围为 1~36000 秒"}
+            entry = self._portal_by_object(object_addr)
+            if not entry:
+                return {"ok": False, "error": "传送门已消失，请刷新"}
+            hnd = self._suspend(pm.process_id)
+            try:
+                pm.write_float(entry["object"] + self.PORTAL_TIMER_OFF, seconds)
+            finally:
+                self._resume(hnd)
+            return {"ok": True, "timer": seconds}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def add_portal_time(self, object_addr, seconds=60):
+        blocked = self._require_high_risk_world_write("传送门倒计时写入")
+        if blocked:
+            return {"ok": False, "error": blocked}
+        entry = self._portal_by_object(object_addr)
+        if not entry:
+            return {"ok": False, "error": "传送门已消失，请刷新"}
+        return self.set_portal_timer(object_addr, min(36000, entry["timer"] + float(seconds)))
+
+    def close_portal(self, object_addr):
+        """Ask the game to close one magic portal on its next normal update.
+
+        The portal's own update destroys it when its duration reaches zero.
+        We intentionally change only that duration: clearing container slots or
+        the object's active flag directly can leave dangling game references.
+        """
+        blocked = self._require_high_risk_world_write("关闭传送门")
+        if blocked:
+            return {"ok": False, "error": blocked}
+        try:
+            entry = self._portal_by_object(object_addr)
+            if not entry:
+                return {"ok": False, "error": "传送门已消失，请刷新"}
+            object_addr = int(entry["object"])
+            # A frozen portal would otherwise be restored by its background
+            # loop.  Remove the lock first, then make the final write zero.
+            hnd = self._suspend(pm.process_id)
+            if hnd is None:
+                return {"ok": False, "error": "无法暂停游戏以安全关闭传送门"}
+            try:
+                with self._portal_lock_guard:
+                    self._portal_locks.pop(object_addr, None)
+                    latest = self._portal_by_object(object_addr)
+                    if not latest:
+                        return {"ok": True, "message": "传送门已关闭"}
+                    pm.write_float(object_addr + self.PORTAL_TIMER_OFF, 0.0)
+            finally:
+                self._resume(hnd)
+            return {"ok": True, "message": "已请求关闭传送门（游戏下一帧会自行清理）"}
+        except Exception as e:
+            return {"ok": False, "error": "关闭传送门失败：%s" % e}
+
+    def toggle_portal_lock(self, object_addr):
+        blocked = self._require_high_risk_world_write("锁定传送门")
+        if blocked:
+            return {"ok": False, "error": blocked}
+        try:
+            object_addr = int(object_addr)
+            with self._portal_lock_guard:
+                if object_addr in self._portal_locks:
+                    del self._portal_locks[object_addr]
+                    return {"ok": True, "locked": False}
+                entry = self._portal_by_object(object_addr)
+                if not entry or entry["timer"] <= 0.01:
+                    return {"ok": False, "error": "没有可冻结的有效传送门"}
+                session_generation, pm_obj = self._runtime_lock_worker_context()
+                if not self._runtime_session_current(session_generation, pm_obj):
+                    return {"ok": False, "error": "游戏会话已改变"}
+                self._portal_locks[object_addr] = entry["timer"]
+            self._spawn_runtime_worker(self._portal_lock_loop,
+                                       args=(object_addr, session_generation, pm_obj),
+                                       name="ctw-portal-lock")
+            return {"ok": True, "locked": True, "timer": entry["timer"]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _portal_lock_loop(self, object_addr, session_generation, pm_obj):
+        while (object_addr in self._portal_locks and
+               self._runtime_session_current(session_generation, pm_obj)):
+            try:
+                hnd = self._suspend(pm_obj.process_id)
+                if hnd is None:
+                    return
+                try:
+                    if not self._runtime_session_current(session_generation, pm_obj):
+                        return
+                    with self._portal_lock_guard:
+                        if object_addr not in self._portal_locks:
+                            break
+                        entry = self._portal_by_object(object_addr)
+                        if not entry:
+                            self._portal_locks.pop(object_addr, None)
+                            break
+                        pm_obj.write_float(object_addr + self.PORTAL_TIMER_OFF,
+                                           self._portal_locks[object_addr])
+                finally:
+                    self._resume(hnd)
+                time.sleep(0.35)
+            except Exception:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self._portal_locks.pop(object_addr, None)
+                break
+
+    _v2_cache = None
+    def _detect_v2(self):
+        """_detect_v2"""
+        if self._v2_cache is not None:
+            return self._v2_cache
+        try:
+            import psutil as _psutil
+            exe = _psutil.Process(pm.process_id).exe().lower()
+            if "dragon" in exe or "\u5de8\u9f99" in exe:
+                self._v2_cache = True
+                return True
+            if "crafttheworld" in exe or "steam" in exe:
+                self._v2_cache = False
+                return False
+        except Exception:
+            pass
+        try:
+            mgr = pm.read_int(get_base() + V2_RESOURCE_MGR)
+            if mgr:
+                ab = pm.read_int(mgr + V2_RES_ARR_BASE)
+                ae = pm.read_int(mgr + V2_RES_ARR_END)
+                if ab and ae and ab < ae:
+                    self._v2_cache = True
+                    return True
+        except:
+            pass
+        self._v2_cache = False
+        return False
+
+    def _v2_gold_ptr(self):
+        """_v2_gold_ptr"""
+        try:
+            mgr = pm.read_int(get_base() + V2_RESOURCE_MGR)
+            if mgr:
+                ab = pm.read_int(mgr + V2_RES_ARR_BASE)
+                if ab:
+                    return ab + V2_GOLD_INDEX * V2_RES_ELEM_SIZE
+        except:
+            pass
+        return None
+
+    def _v2_mana_ptr(self):
+        """_v2_mana_ptr"""
+        try:
+            return get_base() + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX * 4
+        except:
+            return None
+
+    def gp(self):
+        """gp"""
+        try:
+            mgr=pm.read_int(get_base()+0xDE3BB0)
+            return pm.read_int(mgr+0x1C) if mgr else None
+        except: return None
+
+    def read_gold(self):
+        """读取当前金币数量；失败必须显式返回 ``None``。
+
+        This legacy helper is still used by a few lock/diagnostic paths.  Do
+        not use ``0`` as a sentinel here: zero is a real, valid gold value.
+        The UI-facing ``get_basic_state`` turns this into an explicit status.
+        """
+        try:
+            if self._detect_v2():
+                pp=self._v2_gold_ptr()
+                if pp:
+                    key=pm.read_int(pp+V2_GOLD_KEY);enc=pm.read_int(pp+V2_GOLD_ENC)
+                    if key is not None and enc is not None:
+                        return str((key^enc)&0xFFFFFFFF)
+            p=self.gp()
+            if not p:
+                return None
+            enc=pm.read_int(p+0x4C34);key=pm.read_int(p+0x4ADC)
+            if enc is None or key is None:
+                return None
+            return str((enc^key)&0xFFFFFFFF)
+        except Exception:
+            return None
+
+    def write_gold(self,amt):
+        """写入金币数量"""
+        try:
+            amt = int(amt)
+            if self._detect_v2():
+                pp=self._v2_gold_ptr()
+                if pp:
+                    k1=pm.read_int(pp+0x94);k2=pm.read_int(pp+0x208)
+                    pm.write_int(pp+0x204,amt^k1);pm.write_int(pp+0x20C,amt^k2)
+                    pm.write_int(pp+V2_GOLD_VAL_OFF,amt)
+                    return True
+            p=self.gp()
+            if not p: return False
+            k1=pm.read_int(p+0x4ADC);k2=pm.read_int(p+0x4C3C)
+            pm.write_int(p+0x4C34,amt^k1);pm.write_int(p+0x4C38,amt^k2)
+            return True
+        except: return False
+
+    # ==================== 金币经济控制（V1.0） ====================
+
+    @classmethod
+    def _clean_gold_amount(cls, value, allow_empty=True):
+        if value is None or value == "":
+            return None if allow_empty else None
+        if isinstance(value, bool):
+            return None
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if number < 0 or number > cls.GOLD_ECONOMY_MAX:
+            return None
+        return number
+
+    @classmethod
+    def _clean_gold_economy_rule(cls, value):
+        value = value if isinstance(value, dict) else {}
+        mode = str(value.get("mode") or "floor").strip().lower()
+        if mode not in ("floor", "fixed"):
+            mode = "floor"
+        floor = cls._clean_gold_amount(value.get("floor"))
+        ceiling = cls._clean_gold_amount(value.get("ceiling"))
+        fixed = cls._clean_gold_amount(value.get("fixed"))
+        if ceiling is not None and floor is not None and floor > ceiling:
+            return None, "金币保底不能高于金币上限"
+        if mode == "floor" and floor is None:
+            return None, "请设置非负的金币保底"
+        if mode == "fixed" and fixed is None:
+            return None, "请设置非负的固定金币目标"
+        if ceiling is not None and mode == "floor" and floor > ceiling:
+            return None, "金币保底不能高于金币上限"
+        if ceiling is not None and mode == "fixed" and fixed > ceiling:
+            return None, "固定金币目标不能高于金币上限"
+        return {"mode": mode, "floor": floor, "ceiling": ceiling, "fixed": fixed}, ""
+
+    def _gold_economy_add_event(self, source, before, after, message=""):
+        event = {"at": time.strftime("%H:%M:%S"), "source": str(source or "金币操作"),
+                 "before": int(before), "after": int(after), "message": str(message or "")}
+        with self._gold_economy_guard:
+            self._gold_economy_events.append(event)
+            self._gold_economy_events = self._gold_economy_events[-40:]
+        return event
+
+    def _gold_economy_runtime_snapshot(self):
+        with self._gold_economy_guard:
+            state = dict(self._gold_economy_state)
+            state.pop("generation", None)
+            state["last_before"] = self._gold_economy_last_before
+            state["last_after"] = self._gold_economy_last_after
+            state["interval"] = self.GOLD_ECONOMY_INTERVAL
+            state["events"] = list(self._gold_economy_events)
+        return state
+
+    def _stop_gold_economy_runtime(self):
+        with self._gold_economy_guard:
+            self._gold_economy_state["enabled"] = False
+            self._gold_economy_state["generation"] = int(self._gold_economy_state.get("generation", 0)) + 1
+
+    def _gold_transaction(self, operation, value=None, source="手动金币操作", remember_before=True):
+        """Pause once, resolve from the live amount, write, and immediately read back."""
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        try:
+            requested = None if value is None else float(value)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "金币参数无效"}
+        if requested is not None and (not math.isfinite(requested) or abs(requested) > self.GOLD_ECONOMY_MAX):
+            return {"ok": False, "error": "金币参数超出允许范围"}
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "error": "游戏连接已失效，请重新连接"}
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                return {"ok": False, "error": "无法暂停游戏以安全写入金币"}
+            try:
+                raw_before = self.read_gold()
+                if raw_before is None:
+                    return {"ok": False, "error": "金币对象未读取到，未写入"}
+                before = int(raw_before)
+                op = str(operation or "").lower()
+                if op == "set":
+                    target = int(requested)
+                elif op == "add":
+                    target = before + int(requested)
+                elif op == "multiply":
+                    target = int(round(before * float(requested)))
+                elif op == "percent":
+                    target = int(round(before * float(requested) / 100.0))
+                elif op == "restore":
+                    with self._gold_economy_guard:
+                        target = self._gold_economy_last_before
+                    if target is None:
+                        return {"ok": False, "error": "本次启动后还没有可恢复的金币操作"}
+                    target = int(target)
+                else:
+                    return {"ok": False, "error": "未知金币操作"}
+                if target < 0 or target > self.GOLD_ECONOMY_MAX:
+                    return {"ok": False, "error": "计算后的金币数量超出 0 到 %d 的范围" % self.GOLD_ECONOMY_MAX}
+                if target == before:
+                    return {"ok": True, "changed": False, "before": before, "after": before,
+                            "message": "金币无需变化"}
+                if not self.write_gold(target):
+                    return {"ok": False, "error": "金币写入失败"}
+                raw_after = self.read_gold()
+                after = int(raw_after) if raw_after is not None else None
+                if after != target:
+                    self.write_gold(before)
+                    return {"ok": False, "error": "金币写后读回不一致，已恢复写前数值"}
+            finally:
+                self._resume(hnd)
+        if remember_before:
+            with self._gold_economy_guard:
+                self._gold_economy_last_before = before
+                self._gold_economy_last_after = after
+        event = self._gold_economy_add_event(source, before, after, op)
+        return {"ok": True, "changed": True, "before": before, "after": after,
+                "event": event, "readback_ok": True}
+
+    def gold_apply_operation(self, operation, value=None):
+        """Immediate set/add/ratio/restore actions used by the economy panel."""
+        labels = {"set": "设置金币", "add": "增减金币", "multiply": "金币倍率",
+                  "percent": "金币百分比", "restore": "恢复本次操作前金币"}
+        return self._gold_transaction(operation, value, labels.get(str(operation or "").lower(), "金币操作"), True)
+
+    def _gold_economy_enforce_once(self, source="低频保底检查"):
+        with self._gold_economy_guard:
+            state = dict(self._gold_economy_state)
+        if not state.get("enabled"):
+            return {"ok": True, "changed": False, "message": "规则未启用"}
+        current_raw = self.read_gold()
+        if current_raw is None:
+            return {"ok": False, "error": "金币读取失败"}
+        current = int(current_raw)
+        if state.get("mode") == "fixed":
+            target = int(state.get("fixed"))
+        elif current < int(state.get("floor")):
+            target = int(state.get("floor"))
+        else:
+            return {"ok": True, "changed": False, "before": current, "after": current,
+                    "message": "金币仍在保底范围内"}
+        ceiling = state.get("ceiling")
+        if ceiling is not None and target > int(ceiling):
+            return {"ok": False, "error": "规则目标高于当前设置的金币上限"}
+        if target == current:
+            return {"ok": True, "changed": False, "before": current, "after": current}
+        return self._gold_transaction("set", target, source, False)
+
+    def _gold_economy_loop(self, generation, session_generation, pm_obj):
+        while self._runtime_session_current(session_generation, pm_obj):
+            with self._gold_economy_guard:
+                active = bool(self._gold_economy_state.get("enabled"))
+                same_generation = int(self._gold_economy_state.get("generation", 0)) == int(generation)
+            if not active or not same_generation:
+                return
+            result = self._gold_economy_enforce_once()
+            if not result.get("ok"):
+                self._stop_gold_economy_runtime()
+                return
+            time.sleep(self.GOLD_ECONOMY_INTERVAL)
+
+    def set_gold_economy_rule(self, enabled, mode="floor", floor=None, ceiling=None, fixed=None):
+        enabled = bool(enabled)
+        if not enabled:
+            self._stop_gold_economy_runtime()
+            return {"ok": True, "enabled": False}
+        rule, error = self._clean_gold_economy_rule({"mode": mode, "floor": floor,
+                                                     "ceiling": ceiling, "fixed": fixed})
+        if not rule:
+            return {"ok": False, "error": error}
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        with self._gold_economy_guard:
+            generation = int(self._gold_economy_state.get("generation", 0)) + 1
+            self._gold_economy_state = {"enabled": True, **rule, "generation": generation}
+        session_generation, pm_obj = self._runtime_lock_worker_context()
+        if not self._runtime_session_current(session_generation, pm_obj):
+            self._stop_gold_economy_runtime()
+            return {"ok": False, "error": "游戏会话已改变，未启动金币规则"}
+        first = self._gold_economy_enforce_once("启用金币规则")
+        if not first.get("ok"):
+            self._stop_gold_economy_runtime()
+            return first
+        self._spawn_runtime_worker(self._gold_economy_loop,
+                                   args=(generation, session_generation, pm_obj),
+                                   name="ctw-gold-economy")
+        return {"ok": True, "enabled": True, **rule, "first": first,
+                "message": "本局金币规则已启用；关闭修改器或断开连接后会自动停止"}
+
+    def _gold_economy_presets(self):
+        raw = self._read_config().get("gold_economy_presets", {})
+        result = {}
+        if not isinstance(raw, dict):
+            return result
+        for name, value in raw.items():
+            clean, _ = self._clean_gold_economy_rule(value)
+            if clean:
+                result[str(name)] = clean
+        return result
+
+    def get_gold_economy_state(self):
+        current = self.read_gold() if connected and pm else None
+        state = self._gold_economy_runtime_snapshot()
+        if connected and pm and current is None:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "金币读取失败，未以 0 代替", "data": None}
+        return {"ok": True, "state": self.STATUS_VERIFIED if connected and pm else self.STATUS_DISCONNECTED,
+                "current": int(current) if current is not None else None,
+                "rule": state, "presets": self._gold_economy_presets(),
+                "builtins": {
+                    "生存档": {"mode": "floor", "floor": 5000, "ceiling": None, "fixed": None},
+                    "建造档": {"mode": "floor", "floor": 100000, "ceiling": None, "fixed": None},
+                    "测试档": {"mode": "fixed", "floor": None, "ceiling": None, "fixed": 999999},
+                }}
+
+    def save_gold_economy_preset(self, name, mode, floor=None, ceiling=None, fixed=None):
+        title = str(name or "").strip()
+        if not title or len(title) > 40:
+            return {"ok": False, "error": "预设名称需为 1 到 40 个字符"}
+        rule, error = self._clean_gold_economy_rule({"mode": mode, "floor": floor,
+                                                     "ceiling": ceiling, "fixed": fixed})
+        if not rule:
+            return {"ok": False, "error": error}
+        def update(cfg):
+            presets = cfg.get("gold_economy_presets")
+            if not isinstance(presets, dict):
+                presets = {}
+            presets[title] = rule
+            cfg["gold_economy_presets"] = presets
+        if not self._update_config(update):
+            return {"ok": False, "error": "无法保存金币预设"}
+        return {"ok": True, "name": title, "rule": rule}
+
+    def rename_gold_economy_preset(self, old_name, new_name):
+        old_name, new_name = str(old_name or "").strip(), str(new_name or "").strip()
+        if not old_name or not new_name or len(new_name) > 40:
+            return {"ok": False, "error": "请输入有效的新预设名称"}
+        result = {"ok": False, "error": "未找到金币预设"}
+        def update(cfg):
+            nonlocal result
+            presets = cfg.get("gold_economy_presets")
+            if not isinstance(presets, dict) or old_name not in presets:
+                return
+            if new_name != old_name and new_name in presets:
+                result = {"ok": False, "error": "已有同名金币预设"}
+                return
+            presets[new_name] = presets.pop(old_name)
+            cfg["gold_economy_presets"] = presets
+            result = {"ok": True, "name": new_name}
+        self._update_config(update)
+        return result
+
+    def copy_gold_economy_preset(self, source_name, new_name):
+        presets = self._gold_economy_presets()
+        rule = presets.get(str(source_name or "").strip())
+        if not rule:
+            return {"ok": False, "error": "未找到要复制的金币预设"}
+        return self.save_gold_economy_preset(new_name, **rule)
+
+    def read_mana(self):
+        """读取当前法力值；失败必须显式返回 ``None``。"""
+        try:
+            if self._detect_v2():
+                try:
+                    mana_obj = pm.read_int(get_base() + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX)
+                    if mana_obj and mana_obj > 0x10000:
+                        ca = mana_obj + V2_MANA_CUR_OFF
+                        ma = mana_obj + V2_MANA_MAX_OFF
+                        ce = pm.read_int(ca+0); ck = pm.read_int(ca+8)
+                        me = pm.read_int(ma+0); mk = pm.read_int(ma+8)
+                        if ce is not None and ck is not None:
+                            cv = struct.unpack("f", struct.pack("I", (ce ^ ck) & 0xFFFFFFFF))[0]
+                            mv = 100.0
+                            if me is not None and mk is not None:
+                                mv = struct.unpack("f", struct.pack("I", (me ^ mk) & 0xFFFFFFFF))[0]
+                            if math.isfinite(cv) and math.isfinite(mv):
+                                return "%.1f|%.1f" % (cv, mv)
+                except:
+                    pass
+            ui=pm.read_int(get_base()+0xDC3628)
+            if not ui:
+                return None
+            a=ui+0x64;e1=pm.read_int(a);k1=pm.read_int(a+8)
+            mm=ui+V1_MANA_MAX_OFF;me=pm.read_int(mm+V1_MANA_ENC1);mk=pm.read_int(mm+V1_MANA_KEY1)
+            if None in (e1, k1, me, mk):
+                return None
+            c=struct.unpack("f",struct.pack("I",(e1^k1)&0xFFFFFFFF))[0]
+            m=struct.unpack("f",struct.pack("I",(me^mk)&0xFFFFFFFF))[0]
+            if not math.isfinite(c) or not math.isfinite(m):
+                return None
+            return "%.1f|%.1f"%(c,m)
+        except Exception:
+            return None
+
+    def write_mana(self,val):
+        """写入法力值"""
+        try:
+            if self._detect_v2():
+                try:
+                    mana_obj = pm.read_int(get_base() + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX)
+                    if mana_obj and mana_obj > 0x10000:
+                        ca = mana_obj + V2_MANA_CUR_OFF
+                        k1 = pm.read_int(ca+8); k2 = pm.read_int(ca+12)
+                        fi = struct.unpack("<I", struct.pack("<f", float(val)))[0]
+                        pm.write_int(ca+0, fi ^ k1); pm.write_int(ca+4, fi ^ k2)
+                        pm.write_float(get_base() + 0xC96560, float(val))
+                        return True
+                except:
+                    pass
+            ui=pm.read_int(get_base()+0xDC3628)
+            if not ui: return False
+            a=ui+0x64;k1=pm.read_int(a+8);k2=pm.read_int(a+12)
+            fi=struct.unpack("<I",struct.pack("<f",float(val)))[0]
+            pm.write_int(a,fi^k1);pm.write_int(a+4,fi^k2)
+            return True
+        except: return False
+
+    def write_mana_max(self,val):
+        """写入最大法力值"""
+        try:
+            amount = float(val)
+            fi = struct.unpack("<I", struct.pack("<f", amount))[0]
+            if self._detect_v2():
+                try:
+                    mana_obj = pm.read_int(get_base() + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX)
+                    if mana_obj and mana_obj > 0x10000:
+                        ma = mana_obj + V2_MANA_MAX_OFF
+                        k1 = pm.read_int(ma + 8)
+                        k2 = pm.read_int(ma + 12)
+                        pm.write_int(ma + 0, fi ^ k1)
+                        if k2 is not None:
+                            pm.write_int(ma + 4, fi ^ k2)
+                        # 同步显示地址
+                        try:
+                            pm.write_float(get_base() + V2_MANA_DISPLAY, amount)
+                        except:
+                            pass
+                        return True
+                except:
+                    pass
+            # V1 路径
+            ui = pm.read_int(get_base() + V1_MANA_BASE)
+            if not ui: return False
+            addr = ui + V1_MANA_MAX_OFF
+            k1 = pm.read_int(addr + V1_MANA_KEY1)
+            k2 = pm.read_int(addr + V1_MANA_KEY2)
+            pm.write_int(addr + V1_MANA_ENC1, fi ^ k1)
+            if k2 is not None:
+                pm.write_int(addr + V1_MANA_ENC2, fi ^ k2)
+            return True
+        except: return False
+
+    # ==================== 法力资源控制（V1.0） ====================
+
+    def _read_mana_pair(self):
+        raw = self.read_mana()
+        if not raw or "|" not in str(raw):
+            return None
+        try:
+            current, maximum = (float(part) for part in str(raw).split("|", 1))
+        except (TypeError, ValueError):
+            return None
+        if (not math.isfinite(current) or not math.isfinite(maximum) or current < 0 or
+                maximum <= 0 or current > self.MANA_CONTROL_MAX or maximum > self.MANA_CONTROL_MAX):
+            return None
+        return current, maximum
+
+    @staticmethod
+    def _mana_close(left, right):
+        return abs(float(left) - float(right)) <= 0.11
+
+    def _mana_control_transaction(self, kind, operation, value=None, sync_current=False, source="法力操作"):
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        try:
+            requested = None if value is None else float(value)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "法力参数无效"}
+        if requested is not None and (not math.isfinite(requested) or abs(requested) > self.MANA_CONTROL_MAX):
+            return {"ok": False, "error": "法力参数超出允许范围"}
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "error": "游戏连接已失效，请重新连接"}
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                return {"ok": False, "error": "无法暂停游戏以安全写入法力"}
+            try:
+                before_pair = self._read_mana_pair()
+                if not before_pair:
+                    return {"ok": False, "error": "法力对象未读取到，未写入"}
+                before_current, before_max = before_pair
+                op = str(operation or "").lower()
+                if kind == "current":
+                    if op == "set": target = requested
+                    elif op == "add": target = before_current + requested
+                    elif op == "percent": target = before_max * requested / 100.0
+                    elif op == "fill": target = before_max
+                    elif op == "zero": target = 0.0
+                    else: return {"ok": False, "error": "未知当前法力操作"}
+                    target = max(0.0, min(float(target), before_max))
+                    if self._mana_close(target, before_current):
+                        return {"ok": True, "changed": False, "current": before_current, "maximum": before_max,
+                                "message": "当前法力无需变化"}
+                    if not self.write_mana(target):
+                        return {"ok": False, "error": "当前法力写入失败"}
+                    after_pair = self._read_mana_pair()
+                    if not after_pair or not self._mana_close(after_pair[0], target):
+                        self.write_mana(before_current)
+                        return {"ok": False, "error": "当前法力写后读回不一致，已恢复写前数值"}
+                elif kind == "maximum":
+                    if op == "set": target_max = requested
+                    elif op == "add": target_max = before_max + requested
+                    elif op == "multiply": target_max = before_max * requested
+                    else: return {"ok": False, "error": "未知法力上限操作"}
+                    if target_max is None or target_max <= 0 or target_max > self.MANA_CONTROL_MAX:
+                        return {"ok": False, "error": "法力上限需在 0 到 %d 之间" % self.MANA_CONTROL_MAX}
+                    if not self.write_mana_max(target_max):
+                        return {"ok": False, "error": "法力上限写入失败"}
+                    target_current = float(target_max) if sync_current else min(before_current, float(target_max))
+                    if not self._mana_close(target_current, before_current) and not self.write_mana(target_current):
+                        self.write_mana_max(before_max)
+                        return {"ok": False, "error": "同步当前法力失败，已恢复法力上限"}
+                    after_pair = self._read_mana_pair()
+                    if (not after_pair or not self._mana_close(after_pair[1], target_max) or
+                            not self._mana_close(after_pair[0], target_current)):
+                        self.write_mana_max(before_max)
+                        self.write_mana(before_current)
+                        return {"ok": False, "error": "法力上限写后读回不一致，已恢复写前数值"}
+                else:
+                    return {"ok": False, "error": "未知法力控制类型"}
+            finally:
+                self._resume(hnd)
+        return {"ok": True, "changed": True, "before_current": before_current, "before_max": before_max,
+                "current": after_pair[0], "maximum": after_pair[1], "readback_ok": True,
+                "source": source}
+
+    def mana_apply_operation(self, operation, value=None):
+        labels = {"set": "设置当前法力", "add": "增减当前法力", "percent": "按上限百分比设置法力",
+                  "fill": "一键满蓝", "zero": "当前法力归零"}
+        return self._mana_control_transaction("current", operation, value, False,
+                                              labels.get(str(operation or "").lower(), "当前法力操作"))
+
+    def mana_apply_max_operation(self, operation, value=None, sync_current=False):
+        labels = {"set": "设置法力上限", "add": "增减法力上限", "multiply": "法力上限倍率"}
+        return self._mana_control_transaction("maximum", operation, value, bool(sync_current),
+                                              labels.get(str(operation or "").lower(), "法力上限操作"))
+
+    def _stop_mana_reserve_runtime(self):
+        with self._mana_reserve_guard:
+            self._mana_reserve_state["enabled"] = False
+            self._mana_reserve_state["generation"] = int(self._mana_reserve_state.get("generation", 0)) + 1
+
+    def _mana_reserve_once(self, source="法力保留检查"):
+        with self._mana_reserve_guard:
+            state = dict(self._mana_reserve_state)
+        if not state.get("enabled"):
+            return {"ok": True, "changed": False}
+        pair = self._read_mana_pair()
+        if not pair:
+            return {"ok": False, "error": "法力读取失败"}
+        current, maximum = pair
+        low = maximum * float(state["low_percent"]) / 100.0
+        if current >= low:
+            return {"ok": True, "changed": False, "current": current, "maximum": maximum}
+        target = maximum * float(state["restore_percent"]) / 100.0
+        return self._mana_control_transaction("current", "set", target, False, source)
+
+    def _mana_reserve_loop(self, generation, session_generation, pm_obj):
+        while self._runtime_session_current(session_generation, pm_obj):
+            with self._mana_reserve_guard:
+                active = bool(self._mana_reserve_state.get("enabled"))
+                same_generation = int(self._mana_reserve_state.get("generation", 0)) == int(generation)
+            if not active or not same_generation:
+                return
+            result = self._mana_reserve_once()
+            if not result.get("ok"):
+                self._stop_mana_reserve_runtime()
+                return
+            time.sleep(self.MANA_RESERVE_INTERVAL)
+
+    def set_mana_reserve_rule(self, enabled, low_percent=30, restore_percent=80):
+        enabled = bool(enabled)
+        if not enabled:
+            self._stop_mana_reserve_runtime()
+            return {"ok": True, "enabled": False}
+        try:
+            low, restore = float(low_percent), float(restore_percent)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "法力保留百分比无效"}
+        if (not math.isfinite(low) or not math.isfinite(restore) or low < 0 or low > 100 or
+                restore < 0 or restore > 100 or restore < low):
+            return {"ok": False, "error": "保留阈值需在 0% 到 100%，且补回比例不能低于阈值"}
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        with self._mana_reserve_guard:
+            generation = int(self._mana_reserve_state.get("generation", 0)) + 1
+            self._mana_reserve_state = {"enabled": True, "low_percent": low,
+                                        "restore_percent": restore, "generation": generation}
+        session_generation, pm_obj = self._runtime_lock_worker_context()
+        if not self._runtime_session_current(session_generation, pm_obj):
+            self._stop_mana_reserve_runtime()
+            return {"ok": False, "error": "游戏会话已改变，未启动法力保留规则"}
+        first = self._mana_reserve_once("启用法力保留规则")
+        if not first.get("ok"):
+            self._stop_mana_reserve_runtime()
+            return first
+        self._spawn_runtime_worker(self._mana_reserve_loop,
+                                   args=(generation, session_generation, pm_obj),
+                                   name="ctw-mana-reserve")
+        return {"ok": True, "enabled": True, "low_percent": low, "restore_percent": restore,
+                "first": first, "message": "本局法力保留已启用；关闭修改器或断开连接后自动停止"}
+
+    def get_mana_control_state(self):
+        pair = self._read_mana_pair() if connected and pm else None
+        with self._mana_reserve_guard:
+            reserve = dict(self._mana_reserve_state)
+            reserve.pop("generation", None)
+            reserve["interval"] = self.MANA_RESERVE_INTERVAL
+        if connected and pm and not pair:
+            return {"ok": False, "state": self.STATUS_STALE, "data": None,
+                    "error": "法力读取失败，未以 0 或旧值代替"}
+        return {"ok": True, "state": self.STATUS_VERIFIED if pair else self.STATUS_DISCONNECTED,
+                "current": pair[0] if pair else None, "maximum": pair[1] if pair else None,
+                "reserve": reserve,
+                "max_presets": {"普通": 100.0, "法师": 1000.0, "高法力测试": 9999.0},
+                "spell_lab": {"state": self.STATUS_UNVERIFIED,
+                               "message": "尚未重新定位施法扣蓝与回复调用链；不会显示不可用的倍率或免耗蓝开关。"}}
+
+    def _clean_mana_max_lock(self, state):
+        if not isinstance(state, dict) or not state.get("enabled"):
+            return {"enabled": False, "target": None}
+        try:
+            target = float(state.get("target"))
+        except (TypeError, ValueError):
+            return {"enabled": False, "target": None}
+        if not math.isfinite(target) or target <= 0 or target > self.MANA_MAX_LOCK_LIMIT:
+            return {"enabled": False, "target": None}
+        return {"enabled": True, "target": target}
+
+    def _set_mana_max_lock_runtime(self, enabled, target):
+        with self._mana_max_lock_guard:
+            self._mana_max_lock_generation += 1
+            generation = self._mana_max_lock_generation
+            self._mana_max_lock_enabled = bool(enabled)
+            self._mana_max_lock_target = float(target) if enabled else None
+        if enabled:
+            session_generation, pm_obj = self._runtime_lock_worker_context()
+            self._spawn_runtime_worker(self._mana_max_lock_loop,
+                                       args=(generation, session_generation, pm_obj),
+                                       name="ctw-mana-max-lock")
+
+    def _mana_max_lock_loop(self, generation, session_generation, pm_obj):
+        while self._runtime_session_current(session_generation, pm_obj):
+            with self._mana_max_lock_guard:
+                if generation != self._mana_max_lock_generation or not self._mana_max_lock_enabled:
+                    return
+                target = self._mana_max_lock_target
+            try:
+                with self._memory_write_lock:
+                    if not self._runtime_session_current(session_generation, pm_obj):
+                        return
+                    if not self.write_mana_max(target):
+                        return
+            except Exception:
+                return
+            time.sleep(self.MANA_MAX_LOCK_INTERVAL)
+
+    def _restore_mana_max_lock(self):
+        state = self._clean_mana_max_lock(self._read_config().get("mana_max_lock"))
+        self._set_mana_max_lock_runtime(state["enabled"], state["target"])
+
+    def get_mana_max_lock(self):
+        with self._mana_max_lock_guard:
+            return {"ok": True, "enabled": self._mana_max_lock_enabled,
+                    "target": self._mana_max_lock_target}
+
+    def set_mana_max_lock(self, enabled, target=None):
+        enabled = bool(enabled)
+        state = self._clean_mana_max_lock({"enabled": enabled, "target": target})
+        if enabled and not state["enabled"]:
+            return {"ok": False, "error": "法力上限必须是大于 0 的有效数值"}
+        if state["enabled"] and not self.write_mana_max(state["target"]):
+            return {"ok": False, "error": "无法写入法力上限"}
+        if not self._update_config(lambda cfg: cfg.update({"mana_max_lock": state})):
+            return {"ok": False, "error": "无法保存法力上限锁定"}
+        self._set_mana_max_lock_runtime(state["enabled"], state["target"])
+        return {"ok": True, **state}
+
+    def read_xp(self):
+        """读取经验值、等级和下一级所需经验；失败返回 ``None``。"""
+        try:
+            if self._detect_v2():
+                p = pm.read_int(get_base() + V2_XP_OFFSET)
+                if p:
+                    xv = pm.read_int(p + 0x10)
+                    lv = pm.read_int(p + 0x0C)
+                    ss = pm.read_int(p + 0x14)
+                    if xv is None or lv is None or not (0 < int(lv) <= 9999):
+                        return None
+                    nv = 0
+                    if ss:
+                        nv = pm.read_int(ss + 0x1C)
+                        if nv is None:
+                            return None
+                    if int(xv) < 0 or int(nv) < 0:
+                        return None
+                    return "%d|%d|%d" % (int(xv), int(lv), int(nv))
+            p=pm.read_int(get_base()+0xDC3618)
+            if not p:
+                return None
+            xv=pm.read_int(p+0x10);lv=pm.read_int(p+0x0C)
+            if xv is None or lv is None or not (0 < int(lv) <= 9999):
+                return None
+            lt=pm.read_int(p+0x14);nv=0
+            if lt and lt>0x100000:
+                nv=pm.read_int(lt+int(lv)*12+4)
+                if nv is None:
+                    return None
+            if int(xv) < 0 or int(nv) < 0:
+                return None
+            return "%d|%d|%d"%(int(xv),int(lv),int(nv))
+        except Exception:
+            return None
+
+    def write_xp(self,val):
+        """写入经验值"""
+        try:
+            if self._detect_v2():
+                p = pm.read_int(get_base() + V2_XP_OFFSET)
+                if p:
+                    pm.write_int(p + 0x10, int(val))
+                    return True
+            p=pm.read_int(get_base()+0xDC3618)
+            if not p: return False
+            pm.write_int(p+0x10,int(val));return True
+        except: return False
+
+    def xp_to_next(self):
+        """通过游戏原生 AddExp 补足到下一等级。"""
+        return self.xp_apply_progress("next")
+
+    # ==================== 等级 / 经验进度控制（V1.0） ====================
+
+    def _read_xp_control_state(self):
+        raw = self.read_xp()
+        if not raw:
+            return None, "经验对象未读取到"
+        try:
+            xp, level, next_xp = (int(part) for part in str(raw).split("|", 2))
+        except (TypeError, ValueError):
+            return None, "经验结构解析失败"
+        if xp < 0 or level < 1 or next_xp <= 0:
+            return None, "经验数值校验失败"
+        state = {"xp": xp, "level": level, "next_xp": next_xp,
+                 "level_start_xp": 0, "progress_percent": None,
+                 "remaining": max(0, next_xp - xp), "target_supported": False,
+                 "max_level": None, "thresholds": {}}
+        if self._detect_v2():
+            # The V2 build currently exposes the next threshold but its whole
+            # level table is not confirmed. It can safely use next-level and
+            # current-XP controls, not arbitrary target-level lookup yet.
+            state["progress_percent"] = max(0.0, min(100.0, xp * 100.0 / next_xp))
+            return state, ""
+        try:
+            pointer = pm.read_int(get_base() + 0xDC3618)
+            table = pm.read_int(pointer + 0x14) if pointer else 0
+            if not table or int(table) < 0x10000:
+                return state, "等级表尚未读取到"
+            thresholds = {0: 0}
+            previous = 0
+            # Each 12-byte row stores the cumulative XP threshold at +4.
+            # Stop on a zero/decreasing entry instead of inventing a maximum.
+            for index in range(1, 1000):
+                value = pm.read_int(int(table) + index * 12 + 4)
+                if value is None:
+                    break
+                value = int(value)
+                if value <= previous:
+                    break
+                thresholds[index] = value
+                previous = value
+            if not thresholds.get(level):
+                return state, "当前等级超出已识别经验表"
+            start = thresholds.get(level - 1, 0)
+            next_threshold = thresholds.get(level, next_xp)
+            if next_threshold <= start:
+                return state, "当前等级经验区间无效"
+            state.update({"next_xp": next_threshold, "level_start_xp": start,
+                          "remaining": max(0, next_threshold - xp),
+                          "progress_percent": max(0.0, min(100.0, (xp - start) * 100.0 / (next_threshold - start))),
+                          "target_supported": True,
+                          "max_level": max(thresholds), "thresholds": thresholds})
+            return state, ""
+        except Exception as exc:
+            return state, "等级表读取失败：%s" % exc
+
+    def _xp_progress_transaction(self, target_xp, source):
+        try:
+            target_xp = int(target_xp)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "目标经验无效"}
+        if target_xp < 0 or target_xp > 0x7FFFFFFF:
+            return {"ok": False, "error": "目标经验超出允许范围"}
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "error": "游戏连接已失效，请重新连接"}
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                return {"ok": False, "error": "无法暂停游戏以安全写入经验"}
+            try:
+                before, error = self._read_xp_control_state()
+                if not before:
+                    return {"ok": False, "error": error}
+                if int(before["xp"]) == target_xp:
+                    return {"ok": True, "changed": False, "before": before, "after": before,
+                            "message": "经验无需变化"}
+                if not self.write_xp(target_xp):
+                    return {"ok": False, "error": "经验写入失败"}
+                after, after_error = self._read_xp_control_state()
+                if not after or int(after["xp"]) != target_xp:
+                    self.write_xp(int(before["xp"]))
+                    return {"ok": False, "error": "经验写后读回不一致，已恢复写前数值：%s" % after_error}
+            finally:
+                self._resume(hnd)
+        return {"ok": True, "changed": True, "before": before, "after": after,
+                "readback_ok": True, "source": str(source or "经验进度操作")}
+
+    def _native_xp_to_target_transaction(self, target_xp, source):
+        """Reach an XP target by queuing the game's own CharLevels::AddExp.
+
+        This deliberately supports only upward moves.  Lowering XP or changing
+        an in-level percentage remains a direct, paused transaction because
+        the game has no corresponding negative-AddExp path.  A native request
+        checks the live object, module code signature and snapshot immediately
+        before it reaches the real game update thread.
+        """
+        try:
+            target_xp = int(target_xp)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "目标经验无效"}
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "当前原生等级结算仅已定位 Steam 原版；巨龙版不会回退为直接写阈值"}
+        if target_xp < 1 or target_xp > 0x7FFFFFFF:
+            return {"ok": False, "error": "目标经验超出允许范围"}
+        with self._wave_portal_lock, self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "error": "游戏连接已失效，请重新连接"}
+            before, error = self._read_xp_control_state()
+            if not before:
+                return {"ok": False, "error": error}
+            old_xp = int(before["xp"])
+            if target_xp <= old_xp:
+                return {"ok": False, "error": "原生经验结算只支持增加经验"}
+            raw_amount = target_xp - old_xp
+            try:
+                base = int(get_base())
+                levels = int(pm_obj.read_int(base + 0xDC3618) or 0)
+                expected_vtable = base + self.V1_CHAR_LEVELS_VTABLE_RVA
+                add_exp_addr = base + self.V1_CHAR_LEVELS_ADD_EXP_RVA
+                if levels < 0x10000 or int(pm_obj.read_int(levels) or 0) != expected_vtable:
+                    return {"ok": False, "error": "等级对象校验失败，请重新连接游戏"}
+                if pm_obj.read_bytes(add_exp_addr, len(self.V1_CHAR_LEVELS_ADD_EXP_PREFIX)) != self.V1_CHAR_LEVELS_ADD_EXP_PREFIX:
+                    return {"ok": False, "error": "原生经验结算函数签名不匹配，当前版本不会执行"}
+                controller, controller_error = self._ensure_wave_portal_controller()
+                if not controller:
+                    return {"ok": False, "error": controller_error}
+                data = int(controller["data"])
+                request = data + self.XP_NATIVE_QUEUE_REQUEST_OFF
+                if int(pm_obj.read_int(request) or 0):
+                    return {"ok": False, "error": "已有原生经验结算请求正在等待游戏处理"}
+                # Fill the complete immutable request first.  request=1 is the
+                # final publication step observed by the update-thread hook.
+                pm_obj.write_int(data + self.XP_NATIVE_QUEUE_THIS_OFF, levels)
+                pm_obj.write_int(data + self.XP_NATIVE_QUEUE_RAW_AMOUNT_OFF, raw_amount)
+                pm_obj.write_int(data + self.XP_NATIVE_QUEUE_BEFORE_OFF, old_xp)
+                pm_obj.write_int(data + self.XP_NATIVE_QUEUE_AFTER_OFF, 0)
+                pm_obj.write_int(data + self.XP_NATIVE_QUEUE_RESULT_OFF, 0)
+                pm_obj.write_int(request, 1)
+            except Exception as exc:
+                return {"ok": False, "error": "提交原生经验结算请求失败：%s" % exc}
+
+        # The hook normally consumes the request in the next update.  A paused
+        # game is reported as queued instead of being misreported as a failed
+        # write; after the game resumes the next normal refresh reads the truth.
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline:
+            try:
+                result = int(pm_obj.read_int(data + self.XP_NATIVE_QUEUE_RESULT_OFF) or 0)
+                if result == 1:
+                    after, after_error = self._read_xp_control_state()
+                    if not after:
+                        return {"ok": False, "error": "原生经验处理已返回，但读回失败：%s" % after_error}
+                    if int(after["xp"]) <= old_xp:
+                        return {"ok": False, "error": "游戏已执行原生经验处理，但经验没有增加"}
+                    return {"ok": True, "changed": True, "native": True,
+                            "readback_ok": True, "source": str(source or "原生经验结算"),
+                            "before": before, "after": after,
+                            "requested_xp": target_xp, "raw_amount": raw_amount,
+                            "message": "已通过游戏原生经验结算处理；等级动画、奖励与相关刷新由游戏自身触发。"}
+            except Exception as exc:
+                return {"ok": False, "error": "等待原生经验结算结果失败：%s" % exc}
+            time.sleep(0.025)
+        return {"ok": True, "changed": True, "queued": True, "native": True,
+                "source": str(source or "原生经验结算"), "before": before,
+                "requested_xp": target_xp, "raw_amount": raw_amount,
+                "message": "原生经验结算已排入游戏线程；恢复游戏后会按正常流程升级。"}
+
+    def xp_apply_progress(self, action, value=None):
+        state, error = self._read_xp_control_state()
+        if not state:
+            return {"ok": False, "error": error}
+        action = str(action or "").lower()
+        xp, level, start, next_xp = (int(state["xp"]), int(state["level"]),
+                                     int(state["level_start_xp"]), int(state["next_xp"]))
+        if action == "next":
+            target, label = next_xp, "设置为下一等级阈值"
+        elif action == "next_minus_one":
+            target, label = max(start, next_xp - 1), "设置为差 1 点经验升级"
+        elif action == "level_start":
+            target, label = start, "设置为本级 0% 进度"
+        elif action == "progress":
+            try: percent = float(value)
+            except (TypeError, ValueError, OverflowError): return {"ok": False, "error": "经验进度百分比无效"}
+            if not math.isfinite(percent) or percent < 0 or percent > 99:
+                return {"ok": False, "error": "经验进度需在 0% 到 99% 之间"}
+            target, label = int(round(start + (next_xp - start) * percent / 100.0)), "设置当前等级进度"
+            target = min(target, next_xp - 1)
+        elif action in ("level", "add_levels", "max_level"):
+            if not state.get("target_supported"):
+                return {"ok": False, "error": "当前版本尚未定位完整等级表，只支持本级进度与下一等级操作"}
+            if action == "level":
+                try: desired = int(value)
+                except (TypeError, ValueError, OverflowError): return {"ok": False, "error": "目标等级无效"}
+            elif action == "add_levels":
+                try: desired = level + int(value)
+                except (TypeError, ValueError, OverflowError): return {"ok": False, "error": "等级增量无效"}
+            else:
+                desired = int(state["max_level"])
+            maximum = int(state["max_level"])
+            if desired < 1 or desired > maximum:
+                return {"ok": False, "error": "目标等级需在 1 到 %d 之间" % maximum}
+            target = 0 if desired <= 1 else int(state["thresholds"].get(desired - 1, -1))
+            if target < 0:
+                return {"ok": False, "error": "未读取到目标等级的经验阈值"}
+            label = "设置目标等级 %d（0%% 进度）" % desired
+        else:
+            return {"ok": False, "error": "未知经验进度操作"}
+        # An upward level operation must go through CharLevels::AddExp rather
+        # than direct XP storage.  This is the only path that immediately
+        # runs the game's level-up animation and event/reward refresh.
+        native_actions = ("next", "level", "add_levels", "max_level")
+        if action in native_actions and target > xp:
+            result = self._native_xp_to_target_transaction(target, label)
+        else:
+            result = self._xp_progress_transaction(target, label)
+        if result.get("ok"):
+            result["preview"] = {"target_xp": target, "requested_action": action,
+                                  "expected_level": level if action not in ("level", "add_levels", "max_level") else desired}
+            result["native_level_refresh"] = bool(result.get("native"))
+            if result.get("native"):
+                result["note"] = result.get("message") or "已走游戏原生经验结算流程。"
+            else:
+                result["note"] = "当前等级内的进度/降级操作按安全事务写入经验存储值；它不会伪装成原生升级。"
+        return result
+
+    def get_xp_control_state(self):
+        state, error = self._read_xp_control_state() if connected and pm else (None, "未连接游戏")
+        if connected and pm and not state:
+            return {"ok": False, "state": self.STATUS_STALE, "data": None,
+                    "error": "经验读取失败，未以 0 或旧值代替：%s" % error}
+        return {"ok": True, "state": self.STATUS_VERIFIED if state else self.STATUS_DISCONNECTED,
+                "data": state, "error": error or "",
+                "advanced": {"state": self.STATUS_UNVERIFIED,
+                             "message": "经验获得函数、来源区分与原生等级刷新尚未抓取；不会提供无效倍率/暂停开关。"}}
+
+    def _read_wave_countdown_seconds(self, attempts=3):
+        """Read the wave countdown across brief map/object initialization gaps.
+
+        The wave controller pointer can be unavailable for a few frames while a
+        save is entering the map. A transient failure must not be reported as a
+        zero countdown or overwrite the UI's last verified value.
+        """
+        last_error = "怪物波次尚未初始化"
+        tries = max(1, int(attempts or 1))
+        for attempt in range(tries):
+            try:
+                is_v2 = bool(self._detect_v2())
+                base = int(get_base())
+                pointer = pm.read_int(base + (V2_TIMER_OFFSET if is_v2 else 0xDC8858))
+                if not pointer or int(pointer) <= 0x10000:
+                    raise RuntimeError("怪物波次对象尚未加载")
+                seconds = float(pm.read_float(int(pointer) + (V2_TIMER_PTR if is_v2 else 0x24)))
+                if not math.isfinite(seconds) or seconds < 0:
+                    raise RuntimeError("倒计时数值校验失败")
+                return seconds, ""
+            except Exception as exc:
+                last_error = str(exc) or last_error
+                if attempt + 1 < tries:
+                    time.sleep(0.03)
+        return None, last_error
+
+    def read_timer(self):
+        """读取当前倒计时；失败必须显式返回 ``None``。"""
+        seconds, _ = self._read_wave_countdown_seconds()
+        if seconds is None:
+            return None
+        whole = int(seconds)
+        return "%d:%02d" % (whole // 60, whole % 60)
+
+    def get_basic_state(self):
+        """Read the four basic values without using zero as a failure sentinel."""
+        values = {'gold': None, 'mana': None, 'xp': None, 'timer': None}
+        errors = {}
+        if not pm or not connected:
+            for field in values:
+                errors[field] = '未连接游戏'
+            return {'ok': False, 'state': self.STATUS_DISCONNECTED, 'values': values, 'errors': errors}
+        try:
+            is_v2 = bool(self._detect_v2())
+            base = int(get_base())
+            if base <= 0x10000:
+                raise RuntimeError('游戏模块基址无效')
+        except Exception as exc:
+            for field in values:
+                errors[field] = '无法确认游戏版本：%s' % exc
+            return {'ok': False, 'state': self.STATUS_UNSUPPORTED, 'values': values, 'errors': errors}
+        try:
+            pointer = self._v2_gold_ptr() if is_v2 else self.gp()
+            if not pointer or int(pointer) <= 0x10000:
+                raise RuntimeError('金币对象未加载')
+            gold = int(self.read_gold())
+            if gold < 0 or gold > 0xFFFFFFFF:
+                raise RuntimeError('金币数值校验失败')
+            values['gold'] = str(gold)
+        except Exception as exc:
+            errors['gold'] = '金币未识别：%s' % exc
+        try:
+            pointer = (pm.read_int(base + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX)
+                       if is_v2 else pm.read_int(base + 0xDC3628))
+            if not pointer or int(pointer) <= 0x10000:
+                raise RuntimeError('法力对象未加载')
+            current, maximum = (float(part) for part in self.read_mana().split('|', 1))
+            if (not math.isfinite(current) or not math.isfinite(maximum)
+                    or current < 0 or maximum <= 0 or current > 100000000 or maximum > 100000000):
+                raise RuntimeError('法力数值校验失败')
+            values['mana'] = '%.1f|%.1f' % (current, maximum)
+        except Exception as exc:
+            errors['mana'] = '法力未识别：%s' % exc
+        try:
+            pointer = pm.read_int(base + (V2_XP_OFFSET if is_v2 else 0xDC3618))
+            if not pointer or int(pointer) <= 0x10000:
+                raise RuntimeError('经验对象未加载')
+            xp, level, next_xp = (int(part) for part in self.read_xp().split('|', 2))
+            if xp < 0 or level < 0 or level > 9999 or next_xp < 0:
+                raise RuntimeError('经验数值校验失败')
+            values['xp'] = '%d|%d|%d' % (xp, level, next_xp)
+        except Exception as exc:
+            errors['xp'] = '经验未识别：%s' % exc
+        try:
+            seconds, timer_error = self._read_wave_countdown_seconds()
+            if seconds is None:
+                raise RuntimeError(timer_error)
+            # A save may contain a countdown much larger than one in-game week.
+            # It is still safe to display as long as it is finite and non-negative.
+            whole = int(seconds)
+            values['timer'] = '%d:%02d' % (whole // 60, whole % 60)
+        except Exception as exc:
+            errors['timer'] = '倒计时未识别：%s' % exc
+        return {'ok': not errors,
+                'state': self.STATUS_VERIFIED if not errors else self.STATUS_STALE,
+                'values': values, 'errors': errors}
+    def write_timer(self,ts):
+        """写入倒计时"""
+        try:
+            if self._detect_v2():
+                p = pm.read_int(get_base() + V2_TIMER_OFFSET)
+                if p:
+                    pm.write_float(p + V2_TIMER_PTR, float(ts))
+                    return True
+            tp=pm.read_int(get_base()+0xDC8858)
+            if not tp: return False
+            pm.write_float(tp+0x24,float(ts));return True
+        except: return False
+
+    # ==================== 倒计时 / 时间 / 速度运行时锁定 ====================
+    def _clear_timer_locks(self):
+        """Stop all non-persistent timer lock loops for this process."""
+        with self._timer_lock_guard:
+            for state in self._timer_locks.values():
+                state["enabled"] = False
+                state["target"] = None
+                state["generation"] = int(state.get("generation", 0)) + 1
+
+    def _timer_lock_snapshot(self, kind=None):
+        with self._timer_lock_guard:
+            if kind is not None:
+                state = self._timer_locks.get(str(kind))
+                if not state:
+                    return None
+                return {"enabled": bool(state.get("enabled")), "target": state.get("target"),
+                        "generation": int(state.get("generation", 0))}
+            return {key: {"enabled": bool(value.get("enabled")), "target": value.get("target")}
+                    for key, value in self._timer_locks.items()}
+
+    def get_timer_locks(self):
+        """Return current session-only locks for the four time controls."""
+        return {"ok": True, "locks": self._timer_lock_snapshot()}
+
+    def _write_countdown_lock_target(self, seconds):
+        hnd = self._suspend(pm.process_id) if pm and connected else None
+        if hnd is None:
+            return {"ok": False, "error": "无法暂停游戏以锁定倒计时"}
+        try:
+            if not self.write_timer(seconds):
+                return {"ok": False, "error": "倒计时对象已失效"}
+            return {"ok": True}
+        finally:
+            self._resume(hnd)
+
+    def _write_pandora_timer_cached(self, seconds):
+        """Write a previously-validated live spawner without a full rescan."""
+        status, error = self._pandora_runtime_state(False)
+        if not status or not status.get("spawner"):
+            return {"ok": False, "error": error or "未定位潘多拉生成器"}
+        hnd = self._suspend(pm.process_id)
+        if hnd is None:
+            return {"ok": False, "error": "无法暂停游戏以锁定潘多拉倒计时"}
+        try:
+            runtime, current_error = self._pandora_runtime_state(False)
+            if not runtime or int(runtime.get("spawner") or 0) != int(status["spawner"]):
+                return {"ok": False, "error": current_error or "潘多拉生成器已变化"}
+            address = int(status["timer_address"])
+            pm.write_float(address, float(seconds))
+            actual = float(pm.read_float(address))
+        finally:
+            self._resume(hnd)
+        if abs(actual - float(seconds)) > 0.05:
+            return {"ok": False, "error": "潘多拉倒计时写入未确认"}
+        return {"ok": True, "timer": actual}
+
+    def _apply_timer_lock_target(self, kind, target):
+        if kind == "countdown":
+            return self._write_countdown_lock_target(target)
+        if kind == "game_time":
+            return self.set_game_time(target)
+        if kind == "game_speed":
+            return self.set_game_speed(target)
+        if kind == "pandora":
+            return self._write_pandora_timer_cached(target)
+        return {"ok": False, "error": "未知的计时锁定类型"}
+
+    def _timer_lock_loop(self, kind, generation, session_generation, pm_obj):
+        failures = 0
+        while self._runtime_session_current(session_generation, pm_obj):
+            snapshot = self._timer_lock_snapshot(kind)
+            if not snapshot or not snapshot["enabled"] or snapshot["generation"] != generation:
+                return
+            try:
+                # Serialise with reconnect/disconnect, then verify again while
+                # holding the gate before any helper reads or writes global pm.
+                with self._memory_write_lock:
+                    if not self._runtime_session_current(session_generation, pm_obj):
+                        return
+                    result = self._apply_timer_lock_target(kind, snapshot["target"])
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            if result.get("ok"):
+                failures = 0
+            else:
+                failures += 1
+                if failures >= 3:
+                    with self._timer_lock_guard:
+                        state = self._timer_locks.get(kind)
+                        if (self._runtime_session_current(session_generation, pm_obj) and state and
+                                int(state.get("generation", 0)) == generation):
+                            state["enabled"] = False
+                            state["target"] = None
+                            state["generation"] = generation + 1
+                    return
+            time.sleep(self.TIMER_LOCK_INTERVAL)
+
+    def set_timer_lock(self, kind, enabled, target=None):
+        """Lock one UI time control to the supplied value for this session."""
+        kind = str(kind or "")
+        if kind not in self._timer_locks:
+            return {"ok": False, "error": "未知的计时锁定类型"}
+        if kind == "pandora":
+            blocked = self._require_high_risk_world_write("潘多拉倒计时锁定")
+            if blocked:
+                return {"ok": False, "error": blocked}
+        enabled = bool(enabled)
+        if enabled:
+            try:
+                target = float(target)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "锁定值必须是有效数字"}
+            limits = {
+                "countdown": (0.0, 604800.0), "game_time": (0.0, 36000.0),
+                "game_speed": (GAME_SPEED_MIN, GAME_SPEED_MAX), "pandora": (0.1, 604800.0),
+            }
+            minimum, maximum = limits[kind]
+            if not math.isfinite(target) or target < minimum or target > maximum:
+                return {"ok": False, "error": "锁定值超出允许范围"}
+            # Pandora's spawner may not have been scanned before the first
+            # lock request.  Do one normal, validated write first; recurring
+            # updates then use the cached address only while it stays valid.
+            result = (self.set_pandora_spawn_timer(target)
+                      if kind == "pandora" else self._apply_timer_lock_target(kind, target))
+            if not result.get("ok"):
+                return result
+        with self._timer_lock_guard:
+            state = self._timer_locks[kind]
+            state["generation"] = int(state.get("generation", 0)) + 1
+            generation = state["generation"]
+            state["enabled"] = enabled
+            state["target"] = float(target) if enabled else None
+        if enabled:
+            session_generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(session_generation, pm_obj):
+                with self._timer_lock_guard:
+                    state = self._timer_locks.get(kind)
+                    if state and int(state.get("generation", 0)) == generation:
+                        state["enabled"] = False
+                        state["target"] = None
+                        state["generation"] = generation + 1
+                return {"ok": False, "error": "游戏会话已改变，未启动计时锁定"}
+            self._spawn_runtime_worker(self._timer_lock_loop,
+                                       args=(kind, generation, session_generation, pm_obj),
+                                       name="ctw-%s-lock" % kind)
+        return {"ok": True, "kind": kind, "enabled": enabled,
+                "target": float(target) if enabled else None}
+
+
+    # ==================== 游戏时间与全局速度（当前 Steam 原版） ====================
+    def _clear_time_controls_cache(self):
+        """Forget dynamic time-object addresses when the process changes."""
+        self._time_controls_cache = None
+        self._time_controls_last_failed_scan = 0.0
+        self._time_controls_scan_error = ""
+
+    def _invalidate_time_controls_cache(self, error=""):
+        """Drop a stale map object without treating its old address as reusable."""
+        self._time_controls_cache = None
+        self._time_controls_last_failed_scan = time.time()
+        if error:
+            self._time_controls_scan_error = str(error)
+
+    def _read_time_region_chunks(self, pm_obj, region_base, region_size):
+        """Read one suitable region with small fallbacks and a 3-byte overlap."""
+        pos = int(region_base)
+        end = pos + int(region_size)
+        while pos < end:
+            chunk = None
+            for wanted in (0x200000, 0x10000, 0x1000):
+                try:
+                    size = min(wanted, end - pos)
+                    if size <= 0:
+                        break
+                    chunk = pm_obj.read_bytes(pos, size)
+                    if chunk:
+                        break
+                except Exception:
+                    chunk = None
+            if chunk:
+                yield pos, chunk
+                # Both signatures are four bytes.  The overlap preserves a
+                # match that straddles two readable chunks.
+                pos += max(len(chunk) - 3, 1)
+            else:
+                pos += 0x1000
+
+    def _read_time_control_state(self, pm_obj, cache):
+        """Read and validate the two already-located runtime objects."""
+        try:
+            game = int(cache["game"])
+            daytime = int(cache["daytime"])
+            if pm_obj.read_int(game) != int(cache["game_vtable"]):
+                return None
+            if pm_obj.read_int(daytime) != int(cache["daytime_vtable"]):
+                return None
+
+            # One bulk read per object makes the frame-to-frame snapshot much
+            # less likely to mix values from two game updates.
+            game_raw = pm_obj.read_bytes(game + int(cache.get("active_off", GAME_SPEED_ACTIVE_OFF)), 0x14)
+            active_speed, _unused1, _unused2, _unused3, speed = struct.unpack("<5f", game_raw)
+            day_raw = pm_obj.read_bytes(daytime + DAYTIME_CURRENT_OFF, 0x1C)
+            current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle = struct.unpack("<7f", day_raw)
+            values = (active_speed, speed, current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle)
+            if not all(math.isfinite(value) for value in values):
+                return None
+            # A paused game can expose zero active speed.  The source field is
+            # the player-controlled multiplier and must remain a sensible
+            # positive float; no write is ever made to the active cache.
+            if active_speed < 0.0 or active_speed > GAME_SPEED_MAX or speed < 0.01 or speed > GAME_SPEED_MAX:
+                return None
+            bounds = (day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle)
+            if cycle <= 1.0 or cycle > 36000.0 or current < -0.5 or current > cycle + 0.5:
+                return None
+            if any(value <= 0.0 for value in bounds) or any(bounds[index] > bounds[index + 1] for index in range(len(bounds) - 1)):
+                return None
+
+            if current < day_end:
+                phase = "白天"
+            elif current < night_begin:
+                phase = "黄昏"
+            elif current < night_end:
+                phase = "夜晚"
+            else:
+                phase = "黎明"
+            return {
+                "current": float(current), "cycle": float(cycle), "phase": phase,
+                "speed": float(speed), "active_speed": float(active_speed),
+                "bounds": {
+                    "day_end": float(day_end), "sunset_mid": float(sunset_mid),
+                    "night_begin": float(night_begin), "night_end": float(night_end),
+                    "sunrise_mid": float(sunrise_mid), "cycle": float(cycle),
+                },
+            }
+        except Exception:
+            return None
+
+    def _is_time_game_candidate(self, pm_obj, address, vtable, active_off=GAME_SPEED_ACTIVE_OFF):
+        try:
+            if pm_obj.read_int(address) != vtable:
+                return False
+            raw = pm_obj.read_bytes(address + active_off, 0x14)
+            active_speed, _unused1, _unused2, _unused3, speed = struct.unpack("<5f", raw)
+            return math.isfinite(active_speed) and math.isfinite(speed) and 0.0 <= active_speed <= GAME_SPEED_MAX and 0.01 <= speed <= GAME_SPEED_MAX
+        except Exception:
+            return False
+
+    def _is_time_day_candidate(self, pm_obj, address, vtable, active_off=None):
+        try:
+            if pm_obj.read_int(address) != vtable:
+                return False
+            raw = pm_obj.read_bytes(address + DAYTIME_CURRENT_OFF, 0x1C)
+            current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle = struct.unpack("<7f", raw)
+            values = (current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle)
+            if not all(math.isfinite(value) for value in values):
+                return False
+            bounds = values[1:]
+            return (1.0 < cycle <= 36000.0 and -0.5 <= current <= cycle + 0.5
+                    and all(value > 0.0 for value in bounds)
+                    and all(bounds[index] <= bounds[index + 1] for index in range(len(bounds) - 1)))
+        except Exception:
+            return False
+
+    def _scan_time_controls(self, pm_obj, process_id, module_base):
+        """Locate the Game and DayTime heap objects once, without breakpoints."""
+        started = time.time()
+        is_v2 = self._detect_v2()
+        game_vtable = int(module_base) + (V2_GAME_VTABLE_RVA if is_v2 else V1_GAME_VTABLE_RVA)
+        daytime_vtable = int(module_base) + (V2_DAYTIME_VTABLE_RVA if is_v2 else V1_DAYTIME_VTABLE_RVA)
+        active_off = V2_GAME_SPEED_ACTIVE_OFF if is_v2 else GAME_SPEED_ACTIVE_OFF
+        source_off = V2_GAME_SPEED_SOURCE_OFF if is_v2 else GAME_SPEED_SOURCE_OFF
+        game_signature = struct.pack("<I", game_vtable)
+        daytime_signature = struct.pack("<I", daytime_vtable)
+        game_candidates = set()
+        daytime_candidates = set()
+        writable_protect = {0x04, 0x08, 0x40, 0x80}
+
+        class _MBI(ctypes.Structure):
+            _fields_ = [
+                ("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
+                ("AllocationProtect", ctypes.c_uint32), ("RegionSize", ctypes.c_size_t),
+                ("State", ctypes.c_uint32), ("Protect", ctypes.c_uint32), ("Type", ctypes.c_uint32),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        mbi = _MBI()
+        address = 0x10000
+        limit = 0x80000000
+        while address < limit:
+            try:
+                queried = kernel32.VirtualQueryEx(pm_obj.process_handle, address, ctypes.byref(mbi), ctypes.sizeof(mbi))
+            except Exception:
+                queried = 0
+            if not queried:
+                address += 0x10000
+                continue
+            region_base = int(mbi.BaseAddress or 0)
+            region_size = int(mbi.RegionSize or 0)
+            next_address = region_base + region_size
+            if next_address <= address:
+                address += 0x1000
+                continue
+            protect = int(mbi.Protect)
+            if (mbi.State != 0x1000 or mbi.Type != 0x20000 or protect & 0x100
+                    or (protect & 0xFF) not in writable_protect or region_size < 4):
+                address = next_address
+                continue
+            for chunk_address, chunk in self._read_time_region_chunks(pm_obj, region_base, region_size):
+                for signature, candidates, validator, vtable in (
+                    (game_signature, game_candidates, self._is_time_game_candidate, game_vtable),
+                    (daytime_signature, daytime_candidates, self._is_time_day_candidate, daytime_vtable),
+                ):
+                    pos = 0
+                    while True:
+                        found = chunk.find(signature, pos)
+                        if found < 0:
+                            break
+                        pos = found + 4
+                        candidate = chunk_address + found
+                        if candidate in candidates:
+                            continue
+                        if validator(pm_obj, candidate, vtable, active_off):
+                            candidates.add(candidate)
+            address = next_address
+
+        if len(game_candidates) != 1 or len(daytime_candidates) != 1:
+            return None, "未能唯一定位游戏时间对象（请先进入已载入的地图）"
+        cache = {
+            "pid": int(process_id), "base": int(module_base),
+            "game": next(iter(game_candidates)), "daytime": next(iter(daytime_candidates)),
+            "game_vtable": game_vtable, "daytime_vtable": daytime_vtable,
+            "active_off": active_off, "source_off": source_off,
+            "scan_ms": int((time.time() - started) * 1000),
+        }
+        first = self._read_time_control_state(pm_obj, cache)
+        if not first:
+            return None, "游戏时间对象验证失败"
+        # Confirm that this is a live object rather than a stale heap remnant.
+        time.sleep(0.04)
+        second = self._read_time_control_state(pm_obj, cache)
+        if not second or any(abs(first["bounds"][key] - second["bounds"][key]) > 0.01 for key in first["bounds"]):
+            return None, "地图正在切换，请稍后重试"
+        return cache, ""
+
+    def _ensure_time_controls(self):
+        if not connected or not pm:
+            return None, "请先连接游戏"
+        pm_obj = pm
+        try:
+            process_id = int(pm_obj.process_id)
+            module_base = int(get_base(pm_obj))
+        except Exception:
+            return None, "读取游戏进程信息失败"
+        cache = self._time_controls_cache
+        if cache and cache.get("pid") == process_id and cache.get("base") == module_base:
+            if self._read_time_control_state(pm_obj, cache):
+                return cache, ""
+            self._invalidate_time_controls_cache("游戏时间对象已失效")
+        # The magic parameter worker already performs a broad heap pass after
+        # connection.  Waiting for it prevents two expensive scans from making
+        # the game/UI feel sluggish at the same time.
+        if self._magic_scan_running:
+            return None, "正在定位魔法参数，完成后会自动读取游戏时间"
+        with self._time_controls_scan_lock:
+            if not connected or pm is not pm_obj or int(pm_obj.process_id) != process_id:
+                return None, "游戏连接已变化，请重新读取"
+            cache = self._time_controls_cache
+            if cache and cache.get("pid") == process_id and cache.get("base") == module_base:
+                if self._read_time_control_state(pm_obj, cache):
+                    return cache, ""
+            now = time.time()
+            if now - self._time_controls_last_failed_scan < 3.0:
+                return None, self._time_controls_scan_error or "正在等待地图时间对象"
+            cache, error = self._scan_time_controls(pm_obj, process_id, module_base)
+            if cache and connected and pm is pm_obj and int(pm_obj.process_id) == process_id:
+                self._time_controls_cache = cache
+                self._time_controls_scan_error = ""
+                return cache, ""
+            self._time_controls_last_failed_scan = now
+            self._time_controls_scan_error = error or "定位游戏时间对象失败"
+            return None, self._time_controls_scan_error
+
+    def get_game_time_state(self):
+        """Read current day/night time and the global simulation multiplier."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏并进入已载入的地图"}
+        cache, error = self._ensure_time_controls()
+        if not cache:
+            # A connection starts the magic cache scan first.  Time control
+            # deliberately waits for that single heap pass instead of starting
+            # a competing broad scan; this is an in-progress read, not a stale
+            # time object and must not be rendered as a failed/zero value.
+            pending_magic_scan = bool(self._magic_scan_running)
+            return {"ok": False, "state": self.STATUS_UNVERIFIED if pending_magic_scan else self.STATUS_STALE,
+                    "scanning": pending_magic_scan,
+                    "error": error or "游戏时间对象定位失效"}
+        state = self._read_time_control_state(pm, cache)
+        if not state:
+            self._invalidate_time_controls_cache("游戏时间对象已失效")
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "游戏时间对象已失效，请重新读取"}
+        state.update({"ok": True, "state": self.STATUS_VERIFIED,
+                      "scan_ms": cache.get("scan_ms", 0)})
+        return state
+
+    def set_game_time(self, seconds):
+        """Safely jump inside the current runtime day/night cycle."""
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "请输入有效的时间秒数"}
+        if not math.isfinite(seconds):
+            return {"ok": False, "error": "请输入有限的时间秒数"}
+        cache, error = self._ensure_time_controls()
+        if not cache:
+            return {"ok": False, "error": error}
+        before = self._read_time_control_state(pm, cache)
+        if not before:
+            self._invalidate_time_controls_cache("游戏时间对象已失效")
+            return {"ok": False, "error": "游戏时间对象已失效，请重新读取"}
+        cycle = before["cycle"]
+        if seconds < 0.0 or seconds > cycle:
+            return {"ok": False, "error": "当前地图的时间范围为 0 ～ %.1f 秒" % cycle}
+        target = min(seconds, max(0.0, cycle - 0.001))
+        try:
+            pm.write_float(int(cache["daytime"]) + DAYTIME_CURRENT_OFF, target)
+            time.sleep(0.08)
+        except Exception as e:
+            self._invalidate_time_controls_cache(str(e))
+            return {"ok": False, "error": "写入游戏时间失败"}
+        after = self._read_time_control_state(pm, cache)
+        if not after:
+            self._invalidate_time_controls_cache("写入后对象失效")
+            return {"ok": False, "error": "写入后游戏时间对象失效"}
+        difference = abs(after["current"] - target)
+        difference = min(difference, abs(difference - cycle))
+        tolerance = max(1.0, after["active_speed"] * 0.5 + 0.5)
+        if difference > tolerance:
+            return {"ok": False, "error": "游戏没有接受新的时间，请在地图内重试"}
+        return {"ok": True, "state": after}
+
+    def set_game_speed(self, speed):
+        """Set the source multiplier; the game refreshes its active cache itself."""
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "请输入有效的速度倍率"}
+        if not math.isfinite(speed) or speed < GAME_SPEED_MIN or speed > GAME_SPEED_MAX:
+            return {"ok": False, "error": "全局速度范围为 %.2f ～ %.0f 倍" % (GAME_SPEED_MIN, GAME_SPEED_MAX)}
+        cache, error = self._ensure_time_controls()
+        if not cache:
+            return {"ok": False, "error": error}
+        if not self._read_time_control_state(pm, cache):
+            self._invalidate_time_controls_cache("游戏时间对象已失效")
+            return {"ok": False, "error": "游戏时间对象已失效，请重新读取"}
+        try:
+            # The lower offset is a frame cache.  Only the source offset is the
+            # native control value, so the game refreshes the cache itself.
+            pm.write_float(int(cache["game"]) + int(cache.get("source_off", GAME_SPEED_SOURCE_OFF)), speed)
+            time.sleep(0.08)
+        except Exception as e:
+            self._invalidate_time_controls_cache(str(e))
+            return {"ok": False, "error": "写入全局速度失败"}
+        after = self._read_time_control_state(pm, cache)
+        if not after:
+            self._invalidate_time_controls_cache("写入后对象失效")
+            return {"ok": False, "error": "写入后游戏时间对象失效"}
+        if abs(after["speed"] - speed) > 0.02:
+            return {"ok": False, "error": "游戏没有接受新的速度，请在地图内重试"}
+        return {"ok": True, "state": after}
+
+
+    # ==================== 怪物传送门 ====================
+    # These RVAs were verified against the current 32-bit Steam build.  They
+    # are deliberately kept module-relative: CraftWorld.exe is ASLR-enabled.
+    WAVE_PORTAL_MANAGER_RVA = 0xDC8858
+    # MonstersWaves::Update(float).  ``_RVA`` is the installed-detour site;
+    # ``_ENTRY_RVA`` is its real function entry and is used only from our
+    # always-running main-thread dispatcher with a zero delta-time.
+    WAVE_PORTAL_UPDATE_ENTRY_RVA = 0x5B9890
+    WAVE_PORTAL_UPDATE_RVA = 0x5B98C5
+    # A tiny virtual duration getter called continuously by the live game.
+    # Unlike MonstersWaves::Update, it remains active while no monster wave
+    # is scheduled, so it is used only for personal-skill queue dispatch.
+    PERSONAL_SKILL_TICK_RVA = 0x1FFBC0
+    WAVE_PORTAL_DAY_CLOSE_RVA = 0x5B990B
+    WAVE_PORTAL_CLOSE_POST_RVA = 0x5B6446
+    # HellPortalEntity::SlowUpdate after its first relocated global load.  This
+    # site is invoked by each live portal while the wave is spawning, unlike
+    # MonstersWaves::Update which is not a per-frame dispatcher in this build.
+    WAVE_PORTAL_ENTITY_SLOW_RVA = 0x852BD5
+    # DoAction's local portal-count comparison.  Replacing this lets the
+    # game's own creation loop produce each requested portal in one call.
+    WAVE_PORTAL_COUNT_RVA = 0x5B6AAD
+    # The native loop writes an index-based opening delay to every portal.
+    # Clearing it for our queued wave makes all requested doors open together.
+    WAVE_PORTAL_DELAY_RVA = 0x5B6B3E
+    # This is the authoritative per-frame readiness test.  The update loop
+    # subtracts dt from a queued entry's delay and only then instantiates its
+    # portal, so this hook is needed in addition to the initial delay write.
+    WAVE_PORTAL_READY_RVA = 0x5B9F83
+    WAVE_PORTAL_POSITION_RVA = 0x5B6AE5
+    WAVE_PORTAL_DO_ACTION_RVA = 0x5B67F0
+    # This routine is part of the normal countdown/reset path. It is still
+    # used by the original sunrise hook, but it does not terminate a live red
+    # portal event.
+    WAVE_PORTAL_CLOSE_RVA = 0x5B6190
+    # The lifecycle close request is consumed only by the existing game-thread
+    # controller.  It mirrors only the three writes confirmed in the game's
+    # natural cleanup tail, and never jumps into that stack-frame-dependent
+    # internal code block.
+    WAVE_PORTAL_END_REQUEST_OFF = 0xD0
+    WAVE_PORTAL_END_RESULT_OFF = 0xD4
+    # Set only around the controller's synchronous Update(0.0f) call used to
+    # finish a live portal.  The Update entry is itself detoured, so this
+    # prevents that nested native call from re-entering any controller queue.
+    WAVE_PORTAL_UPDATE_REENTRY_GUARD_OFF = 0xD8
+    # The wave-update cave doubles as the safe main-thread dispatcher for one
+    # LibraryBehaviour upgrade.  These offsets are deliberately outside the
+    # portal request payload (+0x00..+0xCB), but inside its zeroed data page.
+    LIBRARY_QUEUE_REQUEST_OFF = 0xE0
+    LIBRARY_QUEUE_THIS_OFF = 0xE4
+    LIBRARY_QUEUE_NODE_OFF = 0xE8
+    LIBRARY_QUEUE_RESULT_OFF = 0xEC
+    # 魔法快捷调用也使用同一个游戏更新线程。收集魔法必须经由游戏的
+    # ResourceSlot 调度器，不能直接调用 MCollect 的底层实体函数。
+    MAGIC_QUEUE_REQUEST_OFF = 0xF0
+    MAGIC_QUEUE_ITEM_OFF = 0xF4
+    MAGIC_QUEUE_X_OFF = 0xF8
+    MAGIC_QUEUE_Y_OFF = 0xFC
+    MAGIC_QUEUE_RESULT_OFF = 0x100
+    # Optional one-call overrides for the full-map collect shortcut.  They
+    # are applied and restored by the update-thread controller itself, never
+    # left active while Python waits for the request.
+    MAGIC_QUEUE_FLAGS_OFF = 0x104
+    MAGIC_QUEUE_MANA_ADDR_OFF = 0x108
+    MAGIC_QUEUE_MANA_SAVED_OFF = 0x10C
+    MAGIC_QUEUE_RADIUS_ADDR_OFF = 0x110
+    MAGIC_QUEUE_RADIUS_VALUE_OFF = 0x114
+    MAGIC_QUEUE_RADIUS_SAVED_OFF = 0x118
+    MAGIC_COLLECT_FLAG_NO_MANA = 0x01
+    MAGIC_COLLECT_FLAG_RADIUS_OVERRIDE = 0x02
+    MAGIC_COLLECT_FULL_MAP_MAX_RADIUS = 512
+
+    # Recipe edits are also consumed by the game update thread.  A payload is
+    # a compact 3×3 grid: every non-empty cell becomes one Recipe::Ingredient
+    # {resource_array_index, position_1_to_9}.  The native vector grow helper
+    # owns any reallocation, so its memory will later be freed by the game.
+    RECIPE_QUEUE_REQUEST_OFF = 0x120
+    RECIPE_QUEUE_ADDRESS_OFF = 0x124
+    RECIPE_QUEUE_COUNT_OFF = 0x128
+    RECIPE_QUEUE_ENTRIES_OFF = 0x130
+    RECIPE_QUEUE_RESULT_OFF = 0x178
+    RECIPE_VECTOR_EMPLACE_RVA = 0x342480
+    RECIPE_VECTOR_EMPLACE_PREFIX = b"\x55\x8B\xEC\x83\xEC\x0C\x8B\x45\x08\x56\x8B\xF1"
+    # Personal dwarf skills live in a 0x2C-record vector at Worker+0x888.
+    # Removal is a bounded POD erase, while additions use Worker's own native
+    # skill API on the game update thread.  Do not call the neighbouring vector
+    # helper: it has a different ABI and was the source of the old crash.
+    PERSONAL_SKILL_QUEUE_REQUEST_OFF = 0x180
+    PERSONAL_SKILL_QUEUE_WORKER_OFF = 0x184
+    PERSONAL_SKILL_QUEUE_NODE_OFF = 0x188
+    PERSONAL_SKILL_QUEUE_OPERATION_OFF = 0x18C
+    PERSONAL_SKILL_QUEUE_INDEX_OFF = 0x190
+    PERSONAL_SKILL_QUEUE_RESULT_OFF = 0x194
+    # ``INDEX`` carries an array index for removal.  For native additions it
+    # carries the raw IEEE754 bits of the requested skill value, so no Python-
+    # fabricated PersonalSkillRecord is ever inserted into a game vector.
+    PERSONAL_SKILL_QUEUE_ADD = 1
+    PERSONAL_SKILL_QUEUE_REMOVE = 2
+    PERSONAL_SKILL_NATIVE_ADD_RVA = 0x68F8B0
+    PERSONAL_SKILL_NATIVE_ADD_PREFIX = b"\x55\x8B\xEC\x83\xEC\x10\x8B\x51\x0C"
+    PERSONAL_SKILL_MAX_PER_DWARF = 3
+    # A raw write to CharLevels+0x10 bypasses the game-owned level-up event.
+    # This request invokes CharLevels::AddExp on the real game update thread.
+    XP_NATIVE_QUEUE_REQUEST_OFF = 0x1D0
+    XP_NATIVE_QUEUE_THIS_OFF = 0x1D4
+    XP_NATIVE_QUEUE_RAW_AMOUNT_OFF = 0x1D8
+    XP_NATIVE_QUEUE_RESULT_OFF = 0x1DC
+    XP_NATIVE_QUEUE_BEFORE_OFF = 0x1E0
+    XP_NATIVE_QUEUE_AFTER_OFF = 0x1E4
+    V1_CHAR_LEVELS_VTABLE_RVA = 0xBA2DA0
+    V1_CHAR_LEVELS_ADD_EXP_RVA = 0x31CEE0
+    V1_CHAR_LEVELS_ADD_EXP_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # Direct pet generation is queued into the same verified game-update
+    # dispatcher as recipes, skills and magic. The request carries only a
+    # validated ASCII species name (max 15 bytes, matching the game's SSO
+    # std::string layout); the dispatcher supplies the global dwarf-gate
+    # spawn anchor and invokes the native factory on the game thread.
+    PET_DIRECT_QUEUE_REQUEST_OFF = 0x220
+    PET_DIRECT_QUEUE_NAME_OFF = 0x224
+    PET_DIRECT_QUEUE_LENGTH_OFF = 0x234
+    PET_DIRECT_QUEUE_RESULT_OFF = 0x238
+    # Pet removal intentionally carries only one already-scanned live pet
+    # address.  The injected dispatcher rechecks its two vtables immediately
+    # before entering the game's own Pet death callback on the update thread.
+    # It never frees memory, edits entity vectors, or changes PetHouse state.
+    PET_REMOVE_QUEUE_REQUEST_OFF = 0x240
+    PET_REMOVE_QUEUE_TARGET_OFF = 0x244
+    PET_REMOVE_QUEUE_RESULT_OFF = 0x248
+    PET_LIMIT_QUERY_REQUEST_OFF = 0x250
+    PET_LIMIT_QUERY_TARGET_OFF = 0x254
+    PET_LIMIT_QUERY_RESULT_OFF = 0x258
+    PET_LIMIT_QUERY_STATUS_OFF = 0x25C
+    # EnemyManager keeps entities during several death/despawn transitions.
+    # Its own Counter() invokes IEnemyBase::Battle::IsAvailable before
+    # counting.  Mirror that read-only predicate on the game update thread so
+    # a still-linked but unavailable Pet is never rendered as a live pet.
+    PET_AVAILABLE_QUERY_REQUEST_OFF = 0x260
+    PET_AVAILABLE_QUERY_TARGET_OFF = 0x264
+    PET_AVAILABLE_QUERY_RESULT_OFF = 0x268
+    PET_AVAILABLE_QUERY_STATUS_OFF = 0x26C
+    # A native shop purchase is deliberately limited to one currently-selected
+    # product.  The queue runs on the game update thread and invokes the same
+    # ShopDialog::OnEvent("buy") route as the visible button; it never changes
+    # gold or inventory directly.
+    SHOP_NATIVE_QUEUE_REQUEST_OFF = 0x280
+    SHOP_NATIVE_QUEUE_DIALOG_OFF = 0x284
+    SHOP_NATIVE_QUEUE_SOURCE_OFF = 0x288
+    SHOP_NATIVE_QUEUE_RESULT_OFF = 0x28C
+    SHOP_NATIVE_QUEUE_DONE_OFF = 0x290
+    SHOP_NATIVE_QUEUE_SOURCE_STATE_OFF = 0x294
+    SHOP_NATIVE_EVENT_OFF = 0x2A0
+    SHOP_NATIVE_EVENT_AUX_OFF = 0x330
+    V1_SHOP_DIALOG_ON_EVENT_RVA = 0x6821C0
+    V1_SHOP_BUTTON_VTABLE_RVA = 0xBE1DB0
+    V1_SHOP_ITEM_BUTTON_VTABLE_RVA = 0xBE1DB0
+    # Native Worker creation is owned by MainWarehouseEntity.  The request is
+    # consumed only from the existing always-running game-thread dispatcher;
+    # Python never manufactures a Worker or inserts it into an AI vector.
+    NATIVE_DWARF_SPAWN_QUEUE_REQUEST_OFF = 0x380
+    NATIVE_DWARF_SPAWN_QUEUE_WAREHOUSE_OFF = 0x384
+    NATIVE_DWARF_SPAWN_QUEUE_GENDER_OFF = 0x388
+    NATIVE_DWARF_SPAWN_QUEUE_RESULT_OFF = 0x38C
+    NATIVE_DWARF_SPAWN_QUEUE_RETURN_OFF = 0x390
+    NATIVE_DWARF_SPAWN_QUEUE_STRING_BACKUP_OFF = 0x3A0
+    NATIVE_DWARF_SPAWN_GENDER_RANDOM = 0
+    NATIVE_DWARF_SPAWN_GENDER_MALE = 1
+    NATIVE_DWARF_SPAWN_GENDER_FEMALE = 2
+    # These runtime addresses were captured from a normal “level-up creates a
+    # dwarf” event on the current Steam V1 process, then converted to RVAs.
+    V1_MAIN_WAREHOUSE_VTABLE_RVA = 0xBBD258
+    V1_NATIVE_DWARF_SPAWN_RVA = 0x55A490
+    V1_NATIVE_DWARF_SPAWN_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    PET_DIRECT_QUEUE_TYPES = (
+        "basilisk_pet", "catowl_pet", "crip_catowl_pet", "imp_pet",
+    )
+    PET_DIRECT_FACTORY_RVA = 0x5AC950
+    PET_DIRECT_FACTORY_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    PET_DIRECT_MANAGER_PTR_RVA = 0xDC3D00
+    PET_DIRECT_SPAWN_ANCHOR_PTR_RVA = 0xDE3BB0
+    PET_DIRECT_VTABLE_RVA = 0xBC5230
+    PET_DIRECT_TYPE_OFF = 0x5C
+    PET_COMPONENT_OFF = 0x568
+    V1_PET_COMPONENT_VTABLE_RVA = 0xBC5440
+    PET_AVAILABLE_RVA = 0x2A5A00
+    PET_AVAILABLE_PREFIX = b"\x8B\x81\xB0\xFB\xFF\xFF"
+    # PDB: EnemyManager singleton and its active EnemyBase* vector. Heap
+    # scans alone can retain a dead Pet allocation briefly (or until its ref
+    # count drops); the manager vector is the authoritative active-world set.
+    V1_ENEMY_MANAGER_INSTANCE_RVA = 0xDC3604
+    ENEMY_MANAGER_BEGIN_OFF = 0x24
+    ENEMY_MANAGER_END_OFF = 0x28
+    ENEMY_MANAGER_MAX_ENTRIES = 20000
+    # Every mapping below was sampled from a live EnemyManager entry and
+    # verified with CE RTTI on the current Steam build.  ``skip`` entries are
+    # internal/duplicate manager residents, not creatures for the UI.
+    V1_CREATURE_VTABLE_INFO = {
+        0xBD6B80: {"name": "吸血鬼守卫", "id": "vampire_guard", "category": "monster"},
+        0xBCCAE4: {"name": "骷髅", "id": "skeleton", "category": "monster"},
+        0xBBDAC0: {"name": "熊", "id": "medved", "category": "other"},
+        0xBB6D9C: {"name": "幼虫", "id": "larva", "category": "other"},
+        0xBA32AC: {"name": "鸡", "id": "chicken", "category": "other"},
+        0xBE0270: {"name": "僵尸", "id": "zombie", "category": "monster"},
+        0xBB1794: {"name": "幽灵", "id": "ghost", "category": "monster"},
+        0xBCD1A4: {"name": "蛞蝓", "id": "slug", "category": "monster"},
+        0xBAB338: {"name": "树人", "id": "ent", "category": "other"},
+        0xBDF9D8: {"name": "牦牛", "id": "yak", "category": "other"},
+        0xBCBE08: {"name": "绵羊", "id": "sheep", "category": "other"},
+        0xBB8A78: {"name": "小龙", "id": "little_dragon", "category": "other"},
+        0xB9E71C: {"name": "眼魔", "id": "beholder", "category": "monster"},
+        0xBC9C1C: {"name": "老鼠", "id": "rat", "category": "monster"},
+        0xBBD338: {"name": "主仓库（内部对象）", "category": "skip"},
+        0xBDA1B8: {"name": "矮人（Worker，已由矮人数组读取）", "category": "skip"},
+    }
+    # EnemyBase 子类中已在当前 Steam 版实机对照过的世界位置字段。
+    # 它只能在坐标同时落入当前地图世界边界时使用；EnemyManager 会暂留
+    # 已死亡、尚未落地或正在回收的对象，这些对象常在该字段留下 0、-2.98
+    # 或无意义浮点，绝不能把它们显示成地图坐标。
+    CREATURE_WORLD_X_OFF = 0x424
+    CREATURE_WORLD_Y_OFF = 0x428
+    # Some Creature derivatives keep the authoritative transform inside a
+    # type-specific render/state block rather than EnemyBase's common pair.
+    # Each entry is only added after its X/Y values have been checked against
+    # the loaded map dimensions in a live save.
+    V1_CREATURE_COORDINATE_OVERRIDES = {
+        # EnemyManager stores Yak's embedded IEnemyBase subobject, rather
+        # than the beginning of the complete Yak allocation.  In two live
+        # sessions the object start is exactly -0x454 from that entry:
+        # 0x27DA7388 -> 0x27DA6F34, where +0x1C/+0x20 is 9870/2677.5
+        # (the player-confirmed map cell: column 164, row 44).
+        0xBDF9D8: {"base_delta": -0x454, "x_off": 0x1C, "y_off": 0x20,
+                    "label": "牦牛完整对象（EnemyManager 子对象-0x454，+0x1C/+0x20）"},
+        # The following classes likewise expose their live Transform at the
+        # complete Creature object's +0x1C/+0x20.  Each pair was range-checked
+        # against the current 13800x6000 world before being enabled.
+        0xBA32AC: {"base_delta": -0x454, "x_off": 0x1C, "y_off": 0x20,
+                    "label": "鸡完整对象坐标（-0x454，+0x1C/+0x20）"},
+        0xBCBE08: {"base_delta": -0x454, "x_off": 0x1C, "y_off": 0x20,
+                    "label": "绵羊完整对象坐标（-0x454，+0x1C/+0x20）"},
+        0xBB8A78: {"base_delta": -0x454, "x_off": 0x1C, "y_off": 0x20,
+                    "label": "小龙完整对象坐标（-0x454，+0x1C/+0x20）"},
+        0xBE0270: {"base_delta": -0x454, "x_off": 0x1C, "y_off": 0x20,
+                    "label": "僵尸完整对象坐标（-0x454，+0x1C/+0x20）"},
+        0xBB1794: {"base_delta": -0x454, "x_off": 0x708, "y_off": 0x70C,
+                    "label": "幽灵运行时坐标块（-0x454，+0x708/+0x70C）"},
+        0xBBDAC0: {"base_delta": -0x454, "x_off": 0x364, "y_off": 0x368,
+                    "label": "熊运行时坐标块（-0x454，+0x364/+0x368）"},
+        0xBD6B80: {"base_delta": -0x454, "x_off": 0x820, "y_off": 0x824,
+                    "label": "吸血鬼守卫运行时坐标块（-0x454，+0x820/+0x824）"},
+    }
+    # Verified only after a live Yak damage comparison:
+    # current SecureFloat +0x7C changed 7.8 -> 6.6 after one hit, while
+    # +0xAC remained 9.0.  This is read-only until more species are mapped.
+    V1_CREATURE_HEALTH_OVERRIDES = {
+        0xBDF9D8: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "牦牛 SecureFloat 生命值（+0x7C / +0xAC，已受伤读回验证）"},
+        # These Creature derivatives were sampled from the same live save.
+        # Their complete object lives at EnemyManager entry -0x454 and has a
+        # valid duplicated SecureFloat pair at +0x7C/+0xAC.  Values are only
+        # returned when both copies agree and current <= maximum.
+        0xBD6B80: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "吸血鬼守卫 SecureFloat 生命值"},
+        0xBCCAE4: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "骷髅 SecureFloat 生命值"},
+        0xBB6D9C: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "幼虫 SecureFloat 生命值"},
+        0xBA32AC: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "鸡 SecureFloat 生命值"},
+        0xBE0270: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "僵尸 SecureFloat 生命值"},
+        0xBCBE08: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "绵羊 SecureFloat 生命值"},
+        0xBB8A78: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "小龙 SecureFloat 生命值"},
+        0xB9E71C: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "眼魔 SecureFloat 生命值"},
+        0xBC9C1C: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "老鼠 SecureFloat 生命值"},
+    }
+    PET_DEATH_CALLBACK_RVA = 0x5FF000
+    PET_DEATH_CALLBACK_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # PDB-verified native virtual method: Pet::Kill(), which clears the
+    # PetHouse relation and then enters Creature::Kill().
+    PET_KILL_RVA = 0x5FE6A0
+    PET_KILL_PREFIX = b"\x56\x57\x8B\xF9"
+    PET_REMOVE_EXPERIMENTAL_ENABLED = True
+    # PDB: PetHouseEntity::GetMaxPetCount(). A session override replaces this
+    # zero-argument thiscall with ``mov eax, target; ret``. The original six
+    # bytes are restored on disconnect, so saves are never modified.
+    PET_MAX_COUNT_RVA = 0x6020C0
+    PET_MAX_COUNT_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    PET_MAX_OVERRIDE_MIN = 1
+    PET_MAX_OVERRIDE_MAX = 999
+    MAGIC_COLLECT_ITEM_NAME = "mcollect"
+    MAGIC_COLLECT_DISPATCH_RVA = 0x41E090
+    MAGIC_COLLECT_DISPATCH_PREFIX = b"\x55\x8B\xEC\x6A\xFF"
+    # Stored in the otherwise-unused tail of the controller data page.  It
+    # lets a later modifier run distinguish our own abandoned controller from
+    # an unrelated code cave before it ever restores executable bytes.
+    WAVE_PORTAL_CONTROLLER_TAG_OFF = 0x1F0
+    # Bump the tag whenever the generated controller's instruction layout
+    # changes. A prior controller may be recovered while idle, but it must
+    # never be adopted mid-event as if it contained the new end routine.
+    # V11 keeps V10's nested-Update re-entry guard and also relocates the
+    # HellPortalEntity::SlowUpdate conditional branch to its original target.
+    # The old copied short branch jumped into the following controller helper
+    # when taken, rather than to the matching native SlowUpdate instruction.
+    # It consumes the
+    # request from the continuously-called main-thread getter as well.  The
+    # manager's own Update(float) is then invoked with dt=0; that function
+    # reaches its original ClosePortal call site and remains the sole owner of
+    # door/vector destruction.  This matters because a natural active wave
+    # does not necessarily call Update again on its own before it finishes.
+    # V24 fixes the native Worker factory post-call restore path.  The factory
+    # is free to overwrite volatile ECX, so the warehouse pointer must be
+    # reloaded before the temporary class-string backup is restored.
+    WAVE_PORTAL_CONTROLLER_TAG = b"CWVPCTL24\x00"
+    WAVE_PORTAL_CONTROLLER_V23_TAG = b"CWVPCTL23\x00"
+    WAVE_PORTAL_CONTROLLER_V22_TAG = b"CWVPCTL22\x00"
+    WAVE_PORTAL_CONTROLLER_V21_TAG = b"CWVPCTL21\x00"
+    WAVE_PORTAL_CONTROLLER_V20_TAG = b"CWVPCTL20\x00"
+    WAVE_PORTAL_CONTROLLER_V19_TAG = b"CWVPCTL19\x00"
+    WAVE_PORTAL_CONTROLLER_V18_TAG = b"CWVPCTL18\x00"
+    WAVE_PORTAL_CONTROLLER_V17_TAG = b"CWVPCTL17\x00"
+    WAVE_PORTAL_CONTROLLER_V16_TAG = b"CWVPCTL16\x00"
+    WAVE_PORTAL_CONTROLLER_V15_TAG = b"CWVPCTL15\x00"
+    WAVE_PORTAL_CONTROLLER_V14_TAG = b"CWVPCTL14\x00"
+    WAVE_PORTAL_CONTROLLER_V13_TAG = b"CWVPCTL13\x00"
+    WAVE_PORTAL_CONTROLLER_V12_TAG = b"CWVPCTL12\x00"
+    WAVE_PORTAL_CONTROLLER_V11_TAG = b"CWVPCTL11\x00"
+    WAVE_PORTAL_CONTROLLER_V10_TAG = b"CWVPCTL10\x00"
+    WAVE_PORTAL_CONTROLLER_V9_TAG = b"CWVPCTL9\x00"
+    WAVE_PORTAL_CONTROLLER_V8_TAG = b"CWVPCTL8\x00"
+    WAVE_PORTAL_CONTROLLER_V7_TAG = b"CWVPCTL7\x00"
+    WAVE_PORTAL_CONTROLLER_V6_TAG = b"CWVPCTL6\x00"
+    WAVE_PORTAL_CONTROLLER_OLD_TAG = b"CWVPCTL5\x00"
+    WAVE_PORTAL_CONTROLLER_LEGACY_TAG = b"CWVPCTL4\x00"
+    WAVE_PORTAL_HOOKS = (
+        (WAVE_PORTAL_UPDATE_RVA, b"\x33\xC0\x89\x85\x70\xFF\xFF\xFF", "update"),
+        (PERSONAL_SKILL_TICK_RVA, b"\xD9\x41\x18\xC3\xCC", "personal_tick"),
+        (WAVE_PORTAL_DAY_CLOSE_RVA, b"\x8B\xCF\xE8\x7E\xC8\xFF\xFF", "day_close"),
+        (WAVE_PORTAL_CLOSE_POST_RVA, b"\x8B\x4E\x3C\x8D\x7E\x38", "close_post"),
+        (WAVE_PORTAL_ENTITY_SLOW_RVA, b"\x83\x78\x64\x00\x75\x07", "portal_slow"),
+        (WAVE_PORTAL_COUNT_RVA, b"\x39\x5D\xF0\x0F\x8E\xEC\x00\x00\x00", "portal_count"),
+        (WAVE_PORTAL_DELAY_RVA, b"\xF3\x0F\x11\x09\x89\x71\x0C\x89\x41\x10\xC6\x41\x14\x00", "portal_delay"),
+        (WAVE_PORTAL_READY_RVA, b"\xF3\x0F\x10\x04\x31\xF3\x0F\x5C\xC2", "portal_ready"),
+        (WAVE_PORTAL_POSITION_RVA, b"\x8B\x08\x8B\x40\x04", "position"),
+    )
+
+    @staticmethod
+    def _wave_portal_jump(source, target, size):
+        """Encode a five-byte near JMP followed by the necessary NOPs."""
+        if size < 5:
+            raise ValueError("hook is too short for a near jump")
+        displacement = int(target) - (int(source) + 5)
+        return b"\xE9" + struct.pack("<i", displacement) + b"\x90" * (size - 5)
+
+    def _build_wave_portal_code(self, module_base, cave_base):
+        """Build the small x86 controller used by the monster-wave portal UI.
+
+        The game must create and destroy the portal itself; the controller only
+        queues the native creation function on its update thread, substitutes
+        the requested position and restores the previous wave countdown after
+        the native close routine has run.  This avoids writing the portal
+        vector/object memory from Python.
+        """
+        class Writer:
+            def __init__(self, origin):
+                self.origin = int(origin)
+                self.code = bytearray()
+                self.labels = {}
+                self.fixups = []
+
+            def at(self):
+                return self.origin + len(self.code)
+
+            def b(self, *parts):
+                for part in parts:
+                    if isinstance(part, int):
+                        self.code.append(part & 0xFF)
+                    else:
+                        self.code.extend(part)
+
+            def u32(self, value):
+                self.code.extend(struct.pack("<I", int(value) & 0xFFFFFFFF))
+
+            def i32(self, value):
+                self.code.extend(struct.pack("<i", int(value)))
+
+            def mark(self, name):
+                self.labels[name] = self.at()
+
+            def branch(self, opcode, label):
+                self.b(opcode)
+                pos = len(self.code)
+                self.i32(0)
+                self.fixups.append((pos, label))
+
+            def relative(self, opcode, target):
+                self.b(opcode)
+                self.i32(int(target) - (self.at() + 4))
+
+            def finish(self):
+                for pos, label in self.fixups:
+                    if label not in self.labels:
+                        raise ValueError("unknown x86 label: %s" % label)
+                    displacement = self.labels[label] - (self.origin + pos + 4)
+                    struct.pack_into("<i", self.code, pos, displacement)
+                return bytes(self.code)
+
+        module_base = int(module_base)
+        cave_base = int(cave_base)
+        data = cave_base + 0x1000
+        request = data + 0x00
+        active = data + 0x04
+        duration = data + 0x08
+        remaining = data + 0x0C
+        saved_timer = data + 0x10
+        saved_wave = data + 0x14
+        pos_x = data + 0x18
+        pos_y = data + 0x1C
+        count = data + 0x20
+        positions = data + 0x2C
+        library_request = data + self.LIBRARY_QUEUE_REQUEST_OFF
+        library_this = data + self.LIBRARY_QUEUE_THIS_OFF
+        library_node = data + self.LIBRARY_QUEUE_NODE_OFF
+        library_result = data + self.LIBRARY_QUEUE_RESULT_OFF
+        magic_request = data + self.MAGIC_QUEUE_REQUEST_OFF
+        magic_item = data + self.MAGIC_QUEUE_ITEM_OFF
+        magic_x = data + self.MAGIC_QUEUE_X_OFF
+        magic_y = data + self.MAGIC_QUEUE_Y_OFF
+        magic_result = data + self.MAGIC_QUEUE_RESULT_OFF
+        magic_flags = data + self.MAGIC_QUEUE_FLAGS_OFF
+        magic_mana_addr = data + self.MAGIC_QUEUE_MANA_ADDR_OFF
+        magic_mana_saved = data + self.MAGIC_QUEUE_MANA_SAVED_OFF
+        magic_radius_addr = data + self.MAGIC_QUEUE_RADIUS_ADDR_OFF
+        magic_radius_value = data + self.MAGIC_QUEUE_RADIUS_VALUE_OFF
+        magic_radius_saved = data + self.MAGIC_QUEUE_RADIUS_SAVED_OFF
+        recipe_request = data + self.RECIPE_QUEUE_REQUEST_OFF
+        recipe_address = data + self.RECIPE_QUEUE_ADDRESS_OFF
+        recipe_count = data + self.RECIPE_QUEUE_COUNT_OFF
+        recipe_entries = data + self.RECIPE_QUEUE_ENTRIES_OFF
+        recipe_result = data + self.RECIPE_QUEUE_RESULT_OFF
+        personal_skill_request = data + self.PERSONAL_SKILL_QUEUE_REQUEST_OFF
+        personal_skill_worker = data + self.PERSONAL_SKILL_QUEUE_WORKER_OFF
+        personal_skill_node = data + self.PERSONAL_SKILL_QUEUE_NODE_OFF
+        personal_skill_operation = data + self.PERSONAL_SKILL_QUEUE_OPERATION_OFF
+        personal_skill_index = data + self.PERSONAL_SKILL_QUEUE_INDEX_OFF
+        personal_skill_result = data + self.PERSONAL_SKILL_QUEUE_RESULT_OFF
+        xp_native_request = data + self.XP_NATIVE_QUEUE_REQUEST_OFF
+        xp_native_this = data + self.XP_NATIVE_QUEUE_THIS_OFF
+        xp_native_raw_amount = data + self.XP_NATIVE_QUEUE_RAW_AMOUNT_OFF
+        xp_native_result = data + self.XP_NATIVE_QUEUE_RESULT_OFF
+        xp_native_before = data + self.XP_NATIVE_QUEUE_BEFORE_OFF
+        xp_native_after = data + self.XP_NATIVE_QUEUE_AFTER_OFF
+        pet_direct_request = data + self.PET_DIRECT_QUEUE_REQUEST_OFF
+        pet_direct_name = data + self.PET_DIRECT_QUEUE_NAME_OFF
+        pet_direct_length = data + self.PET_DIRECT_QUEUE_LENGTH_OFF
+        pet_direct_result = data + self.PET_DIRECT_QUEUE_RESULT_OFF
+        pet_remove_request = data + self.PET_REMOVE_QUEUE_REQUEST_OFF
+        pet_remove_target = data + self.PET_REMOVE_QUEUE_TARGET_OFF
+        pet_remove_result = data + self.PET_REMOVE_QUEUE_RESULT_OFF
+        pet_limit_request = data + self.PET_LIMIT_QUERY_REQUEST_OFF
+        pet_limit_target = data + self.PET_LIMIT_QUERY_TARGET_OFF
+        pet_limit_result = data + self.PET_LIMIT_QUERY_RESULT_OFF
+        pet_limit_status = data + self.PET_LIMIT_QUERY_STATUS_OFF
+        pet_available_request = data + self.PET_AVAILABLE_QUERY_REQUEST_OFF
+        pet_available_target = data + self.PET_AVAILABLE_QUERY_TARGET_OFF
+        pet_available_result = data + self.PET_AVAILABLE_QUERY_RESULT_OFF
+        pet_available_status = data + self.PET_AVAILABLE_QUERY_STATUS_OFF
+        shop_request = data + self.SHOP_NATIVE_QUEUE_REQUEST_OFF
+        shop_dialog = data + self.SHOP_NATIVE_QUEUE_DIALOG_OFF
+        shop_source = data + self.SHOP_NATIVE_QUEUE_SOURCE_OFF
+        shop_result = data + self.SHOP_NATIVE_QUEUE_RESULT_OFF
+        shop_done = data + self.SHOP_NATIVE_QUEUE_DONE_OFF
+        shop_source_state = data + self.SHOP_NATIVE_QUEUE_SOURCE_STATE_OFF
+        shop_event = data + self.SHOP_NATIVE_EVENT_OFF
+        shop_event_aux = data + self.SHOP_NATIVE_EVENT_AUX_OFF
+        dwarf_spawn_request = data + self.NATIVE_DWARF_SPAWN_QUEUE_REQUEST_OFF
+        dwarf_spawn_warehouse = data + self.NATIVE_DWARF_SPAWN_QUEUE_WAREHOUSE_OFF
+        dwarf_spawn_gender = data + self.NATIVE_DWARF_SPAWN_QUEUE_GENDER_OFF
+        dwarf_spawn_result = data + self.NATIVE_DWARF_SPAWN_QUEUE_RESULT_OFF
+        dwarf_spawn_return = data + self.NATIVE_DWARF_SPAWN_QUEUE_RETURN_OFF
+        dwarf_spawn_string_backup = data + self.NATIVE_DWARF_SPAWN_QUEUE_STRING_BACKUP_OFF
+        pet_direct_manager = module_base + self.PET_DIRECT_MANAGER_PTR_RVA
+        pet_direct_anchor = module_base + self.PET_DIRECT_SPAWN_ANCHOR_PTR_RVA
+        manager_ptr = module_base + self.WAVE_PORTAL_MANAGER_RVA
+        end_request = data + self.WAVE_PORTAL_END_REQUEST_OFF
+        end_result = data + self.WAVE_PORTAL_END_RESULT_OFF
+        update_reentry_guard = data + self.WAVE_PORTAL_UPDATE_REENTRY_GUARD_OFF
+
+        w = Writer(cave_base)
+
+        # MonstersWaves::Update(float): consume a queued request on the game
+        # thread.  This is the only place Python asks the game to execute its
+        # native wave-creation method.
+        w.mark("update")
+        # wave_end_on_main_tick invokes the public Update(0.0f) method after
+        # submitting the game's native expiry condition.  That method lands
+        # here again because this site is detoured.  In the nested pass, replay
+        # only the displaced instructions and resume the original function;
+        # re-entering this dispatcher is what previously corrupted later wave
+        # creation after a red door had been closed.
+        w.b(0x83, 0x3D); w.u32(update_reentry_guard); w.b(0x01)
+        w.branch(b"\x0F\x85", "update_end_dispatch")
+        w.b(0x33, 0xC0, 0x89, 0x85, 0x70, 0xFF, 0xFF, 0xFF)
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_UPDATE_RVA + 8)
+        w.mark("update_end_dispatch")
+        # Read PetHouseEntity::GetMaxPetCount() on the real update thread.
+        # The helper is also called from the always-running getter hook below,
+        # because a quiet map may not execute MonstersWaves::Update regularly.
+        w.branch(b"\xE8", "update_pet_limit_request")
+        # Priority end dispatcher.  Do not invoke ClosePortal here: calling it
+        # from an injected frame can free portal-owned state still referenced by
+        # the game.  We only submit the native expiry condition, then replay the
+        # displaced Update bytes so the original function performs its own close.
+        w.b(0x83, 0x3D); w.u32(end_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "update_pet_remove_dispatch")
+        w.b(0xC7, 0x05); w.u32(end_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(end_result); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.branch(b"\xE8", "wave_end_cleanup")
+        w.b(0x61, 0x9D)
+        w.branch(b"\xE9", "update_continue")
+        w.mark("update_end_priority_restore")
+        w.b(0x61, 0x9D)
+        w.branch(b"\xE9", "update_continue")
+
+        # Shared read-only PetHouseEntity::GetMaxPetCount() request handler.
+        # It preserves the caller's register frame and returns directly, so
+        # both the wave update hook and the continuously-called getter can
+        # safely wake a Python query.
+        w.mark("update_pet_limit_request")
+        w.b(0x9C, 0x60)
+        w.b(0x83, 0x3D); w.u32(pet_limit_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "pet_limit_no_request")
+        w.b(0xC7, 0x05); w.u32(pet_limit_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(pet_limit_status); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(pet_limit_result); w.u32(0)
+        w.b(0x8B, 0x0D); w.u32(pet_limit_target)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "pet_limit_done")
+        w.relative(b"\xE8", module_base + self.PET_MAX_COUNT_RVA)
+        w.b(0xA3); w.u32(pet_limit_result)
+        w.b(0xC7, 0x05); w.u32(pet_limit_status); w.u32(1)
+        w.mark("pet_limit_done")
+        w.mark("pet_limit_no_request")
+        w.b(0x61, 0x9D, 0xC3)
+
+        # Mirror EnemyManager::Counter's IEnemyBase availability predicate.
+        # Active-vector membership alone includes Pets awaiting deferred death
+        # cleanup; this native, read-only call is what the game itself uses
+        # before counting entities for a given type.
+        w.mark("update_pet_available_request")
+        w.b(0x9C, 0x60)
+        w.b(0x83, 0x3D); w.u32(pet_available_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "pet_available_no_request")
+        w.b(0xC7, 0x05); w.u32(pet_available_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(pet_available_status); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(pet_available_result); w.u32(0)
+        w.b(0x8B, 0x0D); w.u32(pet_available_target)                       # ecx=IEnemyBase*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "pet_available_done")
+        w.b(0x8B, 0x01)                                                       # eax=component vtable
+        w.b(0x3D); w.u32(module_base + self.V1_PET_COMPONENT_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "pet_available_done")
+        w.relative(b"\xE8", module_base + self.PET_AVAILABLE_RVA)
+        w.b(0x0F, 0xB6, 0xC0)                                                 # eax=(unsigned char)AL
+        w.b(0xA3); w.u32(pet_available_result)
+        w.b(0xC7, 0x05); w.u32(pet_available_status); w.u32(1)
+        w.mark("pet_available_done")
+        w.mark("pet_available_no_request")
+        w.b(0x61, 0x9D, 0xC3)
+
+        w.mark("update_pet_remove_dispatch")
+        # A single-pet removal enters the same native death callback used by
+        # the pet state machine.  It is deliberately *not* a heap free or a
+        # vector edit.  We validate both the pet object and its embedded
+        # component immediately before calling it, while already on the real
+        # update thread.  A bad/stale target is simply rejected.
+        w.b(0x83, 0x3D); w.u32(pet_remove_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "update_pet_direct_dispatch")
+        w.b(0xC7, 0x05); w.u32(pet_remove_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(pet_remove_result); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x0D); w.u32(pet_remove_target)                         # ecx=Pet*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "pet_remove_restore")
+        w.b(0x8B, 0x01)                                                     # eax=Pet.vtable
+        w.b(0x3D); w.u32(module_base + self.PET_DIRECT_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "pet_remove_restore")
+        w.b(0x8B, 0x81); w.u32(self.PET_COMPONENT_OFF)                    # eax=embedded component vtable
+        w.b(0x3D); w.u32(module_base + self.V1_PET_COMPONENT_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "pet_remove_restore")
+        # PDB resolves this method as Pet::Kill(). It performs the native
+        # PetHouse cleanup and tail-jumps to Creature::Kill(); unlike the
+        # earlier synthetic damage route, it needs no attacker/effect args.
+        w.relative(b"\xE8", module_base + self.PET_KILL_RVA)
+        w.b(0xC7, 0x05); w.u32(pet_remove_result); w.u32(1)
+        w.mark("pet_remove_restore")
+        w.b(0x61, 0x9D)
+        w.branch(b"\xE9", "update_pet_direct_dispatch")
+
+        w.mark("update_pet_direct_dispatch")
+        # Direct pets use the exact EntityFactory ABI observed in the native
+        # little_dragon spawn loop.  This code runs only in the real game
+        # update thread: no PetHouse fields, timers or object containers are
+        # edited from Python.  The species string is a 24-byte MSVC SSO
+        # std::string passed by value, followed by the native anchor/flags.
+        w.b(0x83, 0x3D); w.u32(pet_direct_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "shop_from_pet")
+        w.b(0xC7, 0x05); w.u32(pet_direct_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(pet_direct_result); w.u32(0)
+        w.b(0x9C, 0x60)                                                    # pushfd / pushad
+        w.b(0xA1); w.u32(pet_direct_length)                                # eax=name length
+        w.b(0x83, 0xF8, 0x01)
+        w.branch(b"\x0F\x82", "pet_direct_restore")
+        w.b(0x83, 0xF8, 0x0F)
+        w.branch(b"\x0F\x87", "pet_direct_restore")
+        w.b(0x8B, 0xF8)                                                    # edi=length
+        w.b(0x8B, 0x15); w.u32(pet_direct_manager)                         # edx=EntityFactory this
+        w.b(0x85, 0xD2)
+        w.branch(b"\x0F\x84", "pet_direct_restore")
+        w.b(0x8B, 0x0D); w.u32(pet_direct_anchor)                          # ecx=global dwarf-gate anchor
+        w.b(0x85, 0xC9)
+        w.branch(b"\x0F\x84", "pet_direct_restore")
+        w.b(0x83, 0xC1, 0x38)                                              # anchor POINT{x,y}
+        w.b(0x6A, 0x00, 0x6A, 0x01, 0x51)                                  # flags=0, 1, &anchor.pos
+        w.b(0x83, 0xEC, 0x18)                                              # by-value std::string
+        w.b(0xBE); w.u32(pet_direct_name)
+        w.b(0x8B, 0x06, 0x89, 0x04, 0x24)
+        w.b(0x8B, 0x46, 0x04, 0x89, 0x44, 0x24, 0x04)
+        w.b(0x8B, 0x46, 0x08, 0x89, 0x44, 0x24, 0x08)
+        w.b(0x8B, 0x46, 0x0C, 0x89, 0x44, 0x24, 0x0C)
+        w.b(0x89, 0x7C, 0x24, 0x10)                                       # string length
+        w.b(0xC7, 0x44, 0x24, 0x14); w.u32(0x0F)                           # SSO capacity
+        w.b(0x8B, 0xCA)                                                    # ecx=EntityFactory this
+        w.relative(b"\xE8", module_base + self.PET_DIRECT_FACTORY_RVA)
+        w.b(0xA3); w.u32(pet_direct_result)                                # result entity pointer
+        w.mark("pet_direct_restore")
+        w.b(0x61, 0x9D)
+        w.branch(b"\xE9", "shop_from_pet")
+
+        # Native dwarf creation is intentionally a small, one-shot request.
+        # MainWarehouseEntity remains the owner of the Worker factory, AI
+        # registration, spawn animation and default random attributes.  The
+        # only temporary override is its class string: ``worker`` for male,
+        # ``worker_female`` for female, or untouched for native random.  Its
+        # complete 24-byte SSO record is restored before returning.
+        w.mark("update_native_dwarf_spawn_request")
+        w.b(0x83, 0x3D); w.u32(dwarf_spawn_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "native_dwarf_spawn_return")
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_return); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x0D); w.u32(dwarf_spawn_warehouse)                       # ecx=MainWarehouseEntity*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "native_dwarf_spawn_restore")
+        w.b(0x8B, 0x01)                                                       # confirm MainWarehouseEntity vtable
+        w.b(0x3D); w.u32(module_base + self.V1_MAIN_WAREHOUSE_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "native_dwarf_spawn_restore")
+        # A normal factory request is only accepted while no other Worker
+        # creation is already pending on this warehouse.
+        w.b(0x80, 0xB9); w.u32(0x32A); w.b(0x00)
+        w.branch(b"\x0F\x85", "native_dwarf_spawn_restore")
+        # Backup the warehouse's embedded std::string {buffer,length,capacity}
+        # so a forced gender never leaks into a later game-owned random spawn.
+        for offset in range(0, 24, 4):
+            w.b(0x8B, 0x81); w.u32(0x334 + offset)
+            w.b(0xA3); w.u32(dwarf_spawn_string_backup + offset)
+        w.b(0xA1); w.u32(dwarf_spawn_gender)
+        w.b(0x83, 0xF8, self.NATIVE_DWARF_SPAWN_GENDER_MALE)
+        w.branch(b"\x0F\x84", "native_dwarf_spawn_male")
+        w.b(0x83, 0xF8, self.NATIVE_DWARF_SPAWN_GENDER_FEMALE)
+        w.branch(b"\x0F\x84", "native_dwarf_spawn_female")
+        w.branch(b"\xE9", "native_dwarf_spawn_call")
+        w.mark("native_dwarf_spawn_male")
+        w.b(0xC7, 0x81); w.u32(0x334); w.u32(0x6B726F77)                     # "work"
+        w.b(0xC7, 0x81); w.u32(0x338); w.u32(0x00007265)                     # "er\\0"
+        w.b(0xC7, 0x81); w.u32(0x33C); w.u32(0)
+        w.b(0xC7, 0x81); w.u32(0x340); w.u32(0)
+        w.b(0xC7, 0x81); w.u32(0x344); w.u32(6)
+        w.b(0xC7, 0x81); w.u32(0x348); w.u32(0x0F)
+        w.branch(b"\xE9", "native_dwarf_spawn_call")
+        w.mark("native_dwarf_spawn_female")
+        w.b(0xC7, 0x81); w.u32(0x334); w.u32(0x6B726F77)                    # "work"
+        w.b(0xC7, 0x81); w.u32(0x338); w.u32(0x6D65665F)                    # "_fem"
+        w.b(0xC7, 0x81); w.u32(0x33C); w.u32(0x00656C61)                    # "ale\\0"
+        w.b(0xC7, 0x81); w.u32(0x340); w.u32(0)
+        w.b(0xC7, 0x81); w.u32(0x344); w.u32(13)
+        w.b(0xC7, 0x81); w.u32(0x348); w.u32(0x0F)
+        w.mark("native_dwarf_spawn_call")
+        w.b(0xC6, 0x81); w.u32(0x32A); w.b(0x01)                             # request=1
+        # Natural Worker creation enters this function with both ECX and EDI
+        # set to MainWarehouseEntity*.  Preserve that native calling context;
+        # the pushad above restores the hook caller's EDI after this request.
+        w.b(0x89, 0xCF)                                                       # mov edi, ecx
+        w.relative(b"\xE8", module_base + self.V1_NATIVE_DWARF_SPAWN_RVA)
+        w.b(0xA3); w.u32(dwarf_spawn_return)
+        # ECX is volatile across MainWarehouseEntity::CreateWorker().  The
+        # previous controller restored the temporary gender string through
+        # whatever value the callee left in ECX, producing the crash seen at
+        # the controller code-cave offset.  Reload the verified warehouse
+        # pointer before writing the 24-byte SSO backup back.
+        w.b(0x8B, 0x0D); w.u32(dwarf_spawn_warehouse)                       # ecx=MainWarehouseEntity*
+        for offset in range(0, 24, 4):
+            w.b(0xA1); w.u32(dwarf_spawn_string_backup + offset)
+            w.b(0x89, 0x81); w.u32(0x334 + offset)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_result); w.u32(1)
+        w.mark("native_dwarf_spawn_restore")
+        w.b(0x61, 0x9D)
+        w.mark("native_dwarf_spawn_return")
+        w.b(0xC3)
+
+        # One native ShopDialog "buy" request.  The UI Event is recreated only
+        # from fields observed in a real shop click; its button source is found
+        # from the currently open dialog by Python and is revalidated here.
+        # This keeps the game's own money check, delivery creation and UI update
+        # path intact instead of imitating a purchase with memory writes.
+        # The portal/update path must continue into the normal magic/recipe
+        # chain after this small handler returns.  The always-running
+        # personal_tick path calls the same handler directly and also expects a
+        # normal RET, so keep the continuation outside the buy handler.
+        w.mark("shop_from_pet")
+        w.branch(b"\xE8", "update_shop_dispatch")
+        w.branch(b"\xE9", "update_magic_dispatch")
+
+        w.mark("update_shop_dispatch")
+        w.b(0x83, 0x3D); w.u32(shop_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "shop_return")
+        w.b(0xC7, 0x05); w.u32(shop_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_done); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x0D); w.u32(shop_dialog)                                  # ecx=ShopDialog*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "shop_restore")
+        w.b(0x8B, 0x01)
+        w.b(0x3D); w.u32(module_base + self.V1_SHOP_DIALOG_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "shop_restore")
+        w.b(0x8B, 0x15); w.u32(shop_source)                                  # edx=buy button source
+        w.b(0x85, 0xD2); w.branch(b"\x0F\x84", "shop_restore")
+        w.b(0x8B, 0x02)
+        w.b(0x3D); w.u32(module_base + self.V1_SHOP_ITEM_BUTTON_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "shop_restore")
+        # The layout engine sets this button flag for the short duration of a
+        # real mouse-down event, then clears it after dispatch.  OnEvent checks
+        # that transient state before accepting "buy". Mirror it only around
+        # this single call and restore the exact previous byte immediately.
+        w.b(0x0F, 0xB6, 0x82); w.u32(0x158)
+        w.b(0xA3); w.u32(shop_source_state)
+        w.b(0xC6, 0x82); w.u32(0x158); w.b(0x01)
+        # ``item_butN`` emits type 1 and only changes the selected product.
+        # The actual bottom-panel Buy button enters ShopDialog's generic event
+        # path, whose event type is 0 and which then compares Event.text with
+        # "buy" before reaching the native money / delivery code.
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x00); w.u32(0)
+        w.b(0x89, 0x15); w.u32(shop_event + 0x04)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x08); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x0C); w.u32(0x00797562)          # "buy"
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x10); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x14); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x18); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x1C); w.u32(3)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x20); w.u32(0x0F)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x24); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x28); w.u32(4)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x2C); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x30); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x34); w.u32(shop_event_aux)
+        # Event +0x34 points at a MSVC small-string carrying "unclick".
+        # The old code copied only the characters and left the string size /
+        # capacity uninitialised.  The layout engine then rejected the event
+        # before ShopDialog reached its native "buy" branch.
+        w.b(0xC7, 0x05); w.u32(shop_event_aux + 0x00); w.u32(0x006E0075)      # un
+        w.b(0xC7, 0x05); w.u32(shop_event_aux + 0x04); w.u32(0x006C0063)      # cl
+        w.b(0xC7, 0x05); w.u32(shop_event_aux + 0x08); w.u32(0x00630069)      # ic
+        w.b(0xC7, 0x05); w.u32(shop_event_aux + 0x0C); w.u32(0x0000006B)      # k
+        w.b(0xC7, 0x05); w.u32(shop_event_aux + 0x10); w.u32(7)               # size
+        w.b(0xC7, 0x05); w.u32(shop_event_aux + 0x14); w.u32(0x0F)            # SSO capacity
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x48); w.u32(7)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x4C); w.u32(7)
+        w.b(0xC7, 0x05); w.u32(shop_event + 0x50); w.u32(0)
+        w.b(0x68); w.u32(shop_event)
+        w.relative(b"\xE8", module_base + self.V1_SHOP_DIALOG_ON_EVENT_RVA)
+        # Keep the actual OnEvent return value.  A completed queue request is
+        # not the same thing as a completed purchase: the UI handler may reject
+        # a disabled button, invalid event, or other game-side condition.
+        w.b(0xA3); w.u32(shop_result)
+        w.b(0x8B, 0x15); w.u32(shop_source)
+        w.b(0xA1); w.u32(shop_source_state)
+        w.b(0x88, 0x82); w.u32(0x158)
+        w.b(0xC7, 0x05); w.u32(shop_done); w.u32(1)
+        w.mark("shop_restore")
+        w.b(0x61, 0x9D)
+        w.mark("shop_return")
+        w.b(0xC3)
+
+        w.mark("update_magic_dispatch")
+        # 收集魔法必须经过 World 的完整 ResourceSlot 调度器。旧版本直接
+        # 调用 MCollect 叶子函数，既跳过了资源解析也把错误的堆对象当作
+        # 参数，最终会在 ItemEntity / Properties 初始化阶段崩溃。
+        w.b(0x83, 0x3D); w.u32(magic_request); w.b(0x01)                    # cmp [magic_request],1
+        # When there is no magic request, still pass through the recipe queue
+        # before the library/portal handling below.  A previous draft jumped
+        # directly to the library queue, leaving recipe requests unprocessed.
+        w.branch(b"\x0F\x85", "update_recipe_request")
+        w.b(0xC7, 0x05); w.u32(magic_request); w.u32(0)                    # consume first
+        w.b(0xC7, 0x05); w.u32(magic_result); w.u32(0)                     # default: native rejected
+        w.b(0x9C, 0x60)                                                     # pushfd / pushad
+        w.b(0x83, 0xEC, 0x08)                                               # local POINT{x,y}
+        w.b(0xA1); w.u32(magic_x)
+        w.b(0x89, 0x04, 0x24)                                               # [esp]=x
+        w.b(0xA1); w.u32(magic_y)
+        w.b(0x89, 0x44, 0x24, 0x04)                                        # [esp+4]=y
+        # UseResourceAt belongs to the fast-panel/controller object, not to
+        # World itself.  Its +0x64 encrypted field is the current mana; its
+        # +0x30 points back to World for the downstream map operations.
+        w.b(0xA1); w.u32(magic_item)                                        # eax=original ResourceSlot*
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "magic_cleanup")
+        # Do not call the fast-panel item's consume gate here.  This helper
+        # intentionally works even when mcollect is not present in the save;
+        # the native dispatcher below still performs the real mana check and
+        # creates the normal in-game effect on the update thread.
+        w.b(0x8B, 0x0D); w.u32(module_base + V1_MANA_BASE)                 # ecx=FastPanel controller*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "magic_cleanup")
+        # A full-map request temporarily overrides just the two runtime
+        # config values the native dispatcher reads.  This all occurs on the
+        # game update thread and both values are restored before returning.
+        w.b(0xA1); w.u32(magic_flags)
+        w.b(0xA9); w.u32(self.MAGIC_COLLECT_FLAG_NO_MANA)
+        w.branch(b"\x0F\x84", "magic_apply_radius")
+        w.b(0xA1); w.u32(magic_mana_addr)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "magic_apply_radius")
+        w.b(0x8B, 0x08)                                                     # ecx=[use_mana]
+        w.b(0x89, 0x0D); w.u32(magic_mana_saved)
+        w.b(0xC7, 0x00); w.u32(0)                                          # use_mana=0
+        w.mark("magic_apply_radius")
+        w.b(0xA1); w.u32(magic_flags)
+        w.b(0xA9); w.u32(self.MAGIC_COLLECT_FLAG_RADIUS_OVERRIDE)
+        w.branch(b"\x0F\x84", "magic_dispatch")
+        w.b(0xA1); w.u32(magic_radius_addr)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "magic_dispatch")
+        w.b(0x8B, 0x08)                                                     # ecx=[radius]
+        w.b(0x89, 0x0D); w.u32(magic_radius_saved)
+        w.b(0x8B, 0x0D); w.u32(magic_radius_value)
+        w.b(0x89, 0x08)                                                     # radius=requested coverage
+        w.mark("magic_dispatch")
+        w.b(0x8B, 0x0D); w.u32(module_base + V1_MANA_BASE)                 # restore dispatcher this
+        w.b(0xA1); w.u32(magic_item)                                        # eax=original ResourceSlot*
+        w.b(0x50)                                                           # arg2: ResourceSlot*
+        w.b(0x8D, 0x44, 0x24, 0x04)                                        # eax=&POINT after push
+        w.b(0x50)                                                           # arg1: POINT*
+        # World::UseResourceAt is __thiscall and ends in ret 8, so it cleans
+        # its two arguments itself.  Only the local POINT remains on stack.
+        w.relative(b"\xE8", module_base + self.MAGIC_COLLECT_DISPATCH_RVA)
+        # This dispatcher does not define AL as a boolean result.  Reaching
+        # here means the native spell dispatcher has run on the game thread.
+        w.b(0xA1); w.u32(magic_flags)
+        w.b(0xA9); w.u32(self.MAGIC_COLLECT_FLAG_RADIUS_OVERRIDE)
+        w.branch(b"\x0F\x84", "magic_restore_mana")
+        w.b(0xA1); w.u32(magic_radius_addr)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "magic_restore_mana")
+        w.b(0x8B, 0x0D); w.u32(magic_radius_saved)
+        w.b(0x89, 0x08)                                                     # restore radius
+        w.mark("magic_restore_mana")
+        w.b(0xA1); w.u32(magic_flags)
+        w.b(0xA9); w.u32(self.MAGIC_COLLECT_FLAG_NO_MANA)
+        w.branch(b"\x0F\x84", "magic_success")
+        w.b(0xA1); w.u32(magic_mana_addr)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "magic_success")
+        w.b(0x8B, 0x0D); w.u32(magic_mana_saved)
+        w.b(0x89, 0x08)                                                     # restore use_mana
+        w.mark("magic_success")
+        w.b(0xC7, 0x05); w.u32(magic_result); w.u32(1)
+        w.mark("magic_cleanup")
+        w.b(0x83, 0xC4, 0x08)                                               # local POINT
+        w.b(0x61, 0x9D)                                                     # popad / popfd
+        # Recipe updates must happen on this same update thread.  Ingredients
+        # are a trivial two-dword type, but their vector may need to grow;
+        # call the game's own std::vector reallocator instead of assigning a
+        # Python/VirtualAlloc buffer that the game could not later free.
+        w.mark("update_recipe_request")
+        w.b(0x83, 0x3D); w.u32(recipe_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "update_personal_skill_call")
+        w.b(0xC7, 0x05); w.u32(recipe_request); w.u32(0)                    # consume first
+        w.b(0xC7, 0x05); w.u32(recipe_result); w.u32(0)
+        w.b(0x9C, 0x60)                                                     # pushfd / pushad
+        w.b(0x8B, 0x35); w.u32(recipe_address)                              # esi=Recipe*
+        w.b(0x85, 0xF6); w.branch(b"\x0F\x84", "recipe_restore")
+        w.b(0x8B, 0x1D); w.u32(recipe_count)                                # ebx=desired entries
+        w.b(0x83, 0xFB, 0x09); w.branch(b"\x0F\x87", "recipe_restore") # <= 9
+        w.mark("recipe_ensure_capacity")
+        w.b(0x8B, 0x46, RECIPE_OFF_MATERIAL_CAP)                            # eax=cap
+        w.b(0x2B, 0x46, RECIPE_OFF_MATERIAL_PTR)                            # - begin
+        w.b(0xC1, 0xF8, 0x03)                                               # / sizeof Ingredient
+        w.b(0x3B, 0xC3); w.branch(b"\x0F\x83", "recipe_write")          # cap >= count
+        w.b(0x8B, 0x46, RECIPE_OFF_MATERIAL_END)                            # append at end
+        w.b(0x8D, 0x15); w.u32(recipe_entries)                              # edx=&first source entry
+        w.b(0x52, 0x50)                                                     # arg2 Ingredient*, arg1 where
+        w.b(0x8D, 0x4E, RECIPE_OFF_MATERIAL_PTR)                            # ecx=&vector
+        w.relative(b"\xE8", module_base + self.RECIPE_VECTOR_EMPLACE_RVA)
+        w.branch(b"\xE9", "recipe_ensure_capacity")
+        w.mark("recipe_write")
+        w.b(0x8B, 0x7E, RECIPE_OFF_MATERIAL_PTR)                            # edi=begin
+        w.b(0x8D, 0x15); w.u32(recipe_entries)                              # edx=payload
+        w.b(0x8B, 0xCB)                                                     # ecx=count
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "recipe_set_end")
+        w.mark("recipe_copy_loop")
+        w.b(0x8B, 0x02, 0x89, 0x07)                                        # resource id
+        w.b(0x8B, 0x42, 0x04, 0x89, 0x47, 0x04)                             # grid position
+        w.b(0x83, 0xC2, 0x08, 0x83, 0xC7, 0x08, 0x49)
+        w.branch(b"\x0F\x85", "recipe_copy_loop")
+        w.mark("recipe_set_end")
+        w.b(0x89, 0x7E, RECIPE_OFF_MATERIAL_END)                            # vector.end=begin+count*8
+        w.b(0xC7, 0x05); w.u32(recipe_result); w.u32(1)
+        w.mark("recipe_restore")
+        w.b(0x61, 0x9D)
+        # Personal-skill requests use a separate helper.  The normal update
+        # path calls it once here, while an always-running tiny game getter
+        # calls the same helper when no monster wave is active.
+        w.mark("update_personal_skill_call")
+        w.branch(b"\xE8", "update_personal_skill_request")
+        w.branch(b"\xE8", "update_native_xp_request")
+        w.branch(b"\xE9", "update_library_request")
+
+        # Per-dwarf personal-skill mutations run on the game thread. Adding
+        # uses the verified Worker skill API; remove is a bounded POD
+        # left-shift followed by end-=sizeof(record), exactly like
+        # vector::erase for this trivially copied record type. This shared
+        # body ends with ret so it is safe to call from both stable paths.
+        w.mark("update_personal_skill_request")
+        w.b(0x83, 0x3D); w.u32(personal_skill_request); w.b(0x01)
+        # No request has not executed pushfd/pushad.  It must return directly
+        # to its caller instead of flowing into the normal wave-update body.
+        w.branch(b"\x0F\x85", "personal_skill_return")
+        w.b(0xC7, 0x05); w.u32(personal_skill_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(personal_skill_result); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x35); w.u32(personal_skill_worker)                    # esi=Worker*
+        w.b(0x85, 0xF6); w.branch(b"\x0F\x84", "personal_skill_restore")
+        w.b(0x8D, 0xBE); w.u32(V1_DWARF_SKILL_VECTOR_OFF)                # edi=&Worker::skills
+        w.b(0x8B, 0x07)                                                    # eax=begin
+        w.b(0x8B, 0x57, 0x04)                                              # edx=end
+        w.b(0x8B, 0x4F, 0x08)                                              # ecx=cap
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x85", "personal_skill_nonempty")
+        # An empty std::vector is permitted only when all three pointers are
+        # null.  The native emplace helper will allocate its first record.
+        w.b(0x85, 0xD2); w.branch(b"\x0F\x85", "personal_skill_restore")
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x85", "personal_skill_restore")
+        w.b(0x33, 0xDB)                                                    # ebx=count=0
+        w.branch(b"\xE9", "personal_skill_dispatch")
+        w.mark("personal_skill_nonempty")
+        w.b(0x85, 0xD2); w.branch(b"\x0F\x84", "personal_skill_restore")
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "personal_skill_restore")
+        w.b(0x3B, 0xC2); w.branch(b"\x0F\x87", "personal_skill_restore") # begin <= end
+        w.b(0x3B, 0xD1); w.branch(b"\x0F\x87", "personal_skill_restore") # end <= cap
+        w.b(0x8B, 0xDA, 0x2B, 0xD8)                                      # ebx=end-begin
+        w.b(0x8B, 0xC3, 0x33, 0xD2, 0xB9); w.u32(V1_DWARF_SKILL_RECORD_SIZE)
+        w.b(0xF7, 0xF1)                                                    # edx:eax / 0x2c
+        w.b(0x85, 0xD2); w.branch(b"\x0F\x85", "personal_skill_restore")
+        w.b(0x83, 0xF8, self.PERSONAL_SKILL_MAX_PER_DWARF)
+        w.branch(b"\x0F\x87", "personal_skill_restore")
+        w.b(0x8B, 0xD8)                                                    # ebx=count
+        w.mark("personal_skill_dispatch")
+        w.b(0xA1); w.u32(personal_skill_operation)
+        w.b(0x83, 0xF8, self.PERSONAL_SKILL_QUEUE_ADD)
+        w.branch(b"\x0F\x84", "personal_skill_add")
+        w.b(0x83, 0xF8, self.PERSONAL_SKILL_QUEUE_REMOVE)
+        w.branch(b"\x0F\x84", "personal_skill_remove")
+        w.branch(b"\xE9", "personal_skill_restore")
+        w.mark("personal_skill_add")
+        w.b(0x83, 0xFB, self.PERSONAL_SKILL_MAX_PER_DWARF)
+        w.branch(b"\x0F\x83", "personal_skill_restore")
+        w.b(0xA1); w.u32(personal_skill_node)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "personal_skill_restore")
+        # Worker::AddPersonalSkill expects ECX=Worker+0x880, then the skill
+        # definition's native std::string (node+0x50) and the float value.
+        # The two stack arguments are cleaned by the real thiscall routine.
+        # This mirrors a normal game-owned skill insertion instead of growing
+        # the vector with an adjacent, incompatible helper.
+        w.b(0x8B, 0xD0)                                                    # edx=node
+        w.b(0x83, 0xC2, 0x50)                                              # edx=&node.name
+        w.b(0xFF, 0x35); w.u32(personal_skill_index)                       # push value bits
+        w.b(0x52)                                                          # push &node.name
+        w.b(0x8D, 0x8E); w.u32(0x880)                                     # ecx=Worker+0x880
+        w.relative(b"\xE8", module_base + self.PERSONAL_SKILL_NATIVE_ADD_RVA)
+        # The native helper preserves EBX/EDI. Verify it appended exactly
+        # one record before acknowledging the request.
+        w.b(0x8B, 0x47, 0x04, 0x2B, 0x07)
+        w.b(0x8D, 0x4B, 0x01, 0x6B, 0xC9, V1_DWARF_SKILL_RECORD_SIZE)
+        w.b(0x3B, 0xC1); w.branch(b"\x0F\x85", "personal_skill_restore")
+        w.branch(b"\xE9", "personal_skill_success")
+        w.mark("personal_skill_remove")
+        w.b(0x85, 0xDB); w.branch(b"\x0F\x84", "personal_skill_restore")
+        w.b(0xA1); w.u32(personal_skill_index)
+        w.b(0x3B, 0xC3); w.branch(b"\x0F\x83", "personal_skill_restore") # index < count
+        w.b(0x6B, 0xC0, V1_DWARF_SKILL_RECORD_SIZE)                       # eax=index*0x2c
+        w.b(0x8B, 0xD7)                                                    # edx=vector
+        w.b(0x8B, 0x3A, 0x03, 0xF8)                                      # edi=begin+index*0x2c
+        w.b(0x8B, 0xF7, 0x83, 0xC6, V1_DWARF_SKILL_RECORD_SIZE)           # esi=source next record
+        w.b(0x8B, 0x4A, 0x04, 0x2B, 0xCE)                                # ecx=end-source bytes
+        w.b(0xFC, 0xF3, 0xA4)                                             # cld; rep movsb
+        w.b(0x83, 0x6A, 0x04, V1_DWARF_SKILL_RECORD_SIZE)                 # vector.end -= 0x2c
+        w.mark("personal_skill_success")
+        w.b(0xC7, 0x05); w.u32(personal_skill_result); w.u32(1)
+        w.mark("personal_skill_restore")
+        w.b(0x61, 0x9D)
+        w.mark("personal_skill_return")
+        w.b(0xC3)                                                          # ret
+
+        # Global levels require the real CharLevels::AddExp path.  A raw XP
+        # write bypasses this handler, which is why a manually-set threshold
+        # does not show the normal upgrade animation until the next natural
+        # experience event.  The request is consumed only on the game's own
+        # update thread and validates object identity plus the pre-write XP.
+        w.mark("update_native_xp_request")
+        w.b(0x83, 0x3D); w.u32(xp_native_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "native_xp_return")
+        w.b(0xC7, 0x05); w.u32(xp_native_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(xp_native_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(xp_native_after); w.u32(0)
+        w.b(0x9C, 0x60)                                                    # pushfd / pushad
+        w.b(0x8B, 0x0D); w.u32(xp_native_this)                              # ecx=CharLevels*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "native_xp_restore")
+        w.b(0x8B, 0x01)                                                      # eax=vtable
+        w.b(0x3D); w.u32(module_base + self.V1_CHAR_LEVELS_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "native_xp_restore")
+        w.b(0x8B, 0x41, 0x10)                                                # eax=current XP
+        w.b(0x3B, 0x05); w.u32(xp_native_before)
+        w.branch(b"\x0F\x85", "native_xp_restore")
+        w.b(0xA1); w.u32(xp_native_raw_amount)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x8E", "native_xp_restore")
+        w.b(0x50)                                                            # AddExp(raw amount)
+        w.relative(b"\xE8", module_base + self.V1_CHAR_LEVELS_ADD_EXP_RVA)
+        w.b(0x8B, 0x0D); w.u32(xp_native_this)
+        w.b(0x8B, 0x41, 0x10)
+        w.b(0xA3); w.u32(xp_native_after)
+        w.b(0xC7, 0x05); w.u32(xp_native_result); w.u32(1)
+        w.mark("native_xp_restore")
+        w.b(0x61, 0x9D)                                                      # popad / popfd
+        w.mark("native_xp_return")
+        w.b(0xC3)
+        w.mark("update_library_request")
+        # A direct call to LibraryBehaviour from a CE/Python-created thread
+        # changes only the visible level.  The game's event listeners run on
+        # the real update thread, so consume one fully validated request here
+        # before continuing with the normal monster-wave update.
+        w.b(0x83, 0x3D); w.u32(library_request); w.b(0x01)                 # cmp [library_request],1
+        w.branch(b"\x0F\x85", "update_portal_request")
+        w.b(0xC7, 0x05); w.u32(library_request); w.u32(0)                  # consume first
+        w.b(0xC7, 0x05); w.u32(library_result); w.u32(0)
+        w.b(0x9C, 0x60)                                                    # pushfd / pushad
+        w.b(0x8B, 0x05); w.u32(library_node)                                # eax=raw tech node
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "update_library_restore")
+        w.b(0x8B, 0x0D); w.u32(library_this)                                # ecx=LibraryBehaviour this
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "update_library_restore")
+        # Normal book completion has already filled this field by this point.
+        # Do the same in the game thread immediately before its handler runs.
+        w.b(0xC7, 0x40, TECH_NODE_PROGRESS_OFF); w.u32(0x3F800000)          # [eax+64]=1.0f
+        w.b(0x50)                                                           # raw node argument
+        # The original caller has both ECX and EAX pointing at the behaviour
+        # object when it issues the call.  Reproduce that non-ABI detail too.
+        w.b(0x89, 0xC8)                                                      # eax=ecx
+        w.relative(b"\xE8", module_base + V1_LIBRARY_UPGRADE_RVA)
+        w.b(0xC7, 0x05); w.u32(library_result); w.u32(1)                    # native handler returned
+        w.mark("update_library_restore")
+        w.b(0x61, 0x9D)                                                    # popad / popfd
+        # This is a fallback for a request queued after the priority check.  It
+        # uses the same native-expiry submission and never closes a portal from
+        # this injected frame.
+        w.mark("update_portal_end_request")
+        w.b(0x83, 0x3D); w.u32(end_request); w.b(0x01)                     # cmp [end_request],1
+        w.branch(b"\x0F\x85", "update_portal_request")
+        w.b(0xC7, 0x05); w.u32(end_request); w.u32(0)                      # consume request
+        w.b(0xC7, 0x05); w.u32(end_result); w.u32(0)                       # default: rejected
+        w.b(0x9C, 0x60)                                                     # pushfd / pushad
+        w.branch(b"\xE8", "wave_end_cleanup")
+        w.b(0x61, 0x9D)                                                     # popad / popfd
+        w.branch(b"\xE9", "update_continue")
+        w.mark("update_end_restore")
+        w.b(0x61, 0x9D)                                                     # popad / popfd
+        w.branch(b"\xE9", "update_continue")
+
+        w.mark("update_portal_request")
+        w.b(0x83, 0x3D); w.u32(request); w.b(0x01)                         # cmp [request],1
+        w.branch(b"\x0F\x85", "update_active")                             # jne active path
+        w.b(0xC7, 0x05); w.u32(request); w.u32(0)                           # request=0
+        w.b(0x9C, 0x60)                                                     # pushfd / pushad
+        w.b(0x8B, 0x0D); w.u32(manager_ptr)                                 # ecx=manager
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "update_restore")            # null -> leave
+        w.b(0x80, 0x79, 0x1C, 0x01); w.branch(b"\x0F\x85", "update_restore") # enabled
+        w.b(0x83, 0x79, 0x20, 0x00); w.branch(b"\x0F\x85", "update_restore") # idle state
+        w.b(b"\xF3\x0F\x10\x41\x24")                                    # xmm0=[ecx+24] timer
+        w.b(b"\xF3\x0F\x11\x05"); w.u32(saved_timer)
+        w.b(b"\xF3\x0F\x10\x41\x28")                                    # xmm0=[ecx+28] wave time
+        w.b(b"\xF3\x0F\x11\x05"); w.u32(saved_wave)
+        w.b(b"\xF3\x0F\x10\x05"); w.u32(duration)
+        w.b(b"\xF3\x0F\x11\x05"); w.u32(remaining)
+        w.b(0xC6, 0x05); w.u32(active); w.b(0x01)                           # active=1
+        w.b(0x8B, 0x1D); w.u32(count)                                       # ebx=requested count
+        w.b(0x85, 0xDB); w.branch(b"\x0F\x84", "update_cancel")
+        w.b(0x8B, 0x0D); w.u32(manager_ptr)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "update_cancel")
+        # DoAction clears its existing portal vector at the beginning, so it
+        # must run exactly once.  portal_count and position below steer its
+        # own per-portal loop instead of calling DoAction repeatedly.
+        w.relative(b"\xE8", module_base + self.WAVE_PORTAL_DO_ACTION_RVA)
+        w.branch(b"\xE9", "update_restore")
+        w.mark("update_cancel")
+        w.b(0xC6, 0x05); w.u32(active); w.b(0x00)
+        w.mark("update_restore")
+        w.b(0x61, 0x9D)                                                     # popad / popfd
+        w.mark("update_active")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x85", "update_continue")
+        w.b(b"\xF3\x0F\x10\x05"); w.u32(remaining)
+        w.b(b"\xF3\x0F\x5C\x45\x08")                                  # -= Update(dt)
+        w.b(b"\xF3\x0F\x11\x05"); w.u32(remaining)
+        w.b(b"\x0F\x57\xC9", b"\x0F\x2F\xC1")                         # xmm1=0; comiss xmm0,xmm1
+        w.branch(b"\x0F\x87", "update_continue")                         # duration still positive
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x0D); w.u32(manager_ptr)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "update_close_bad")
+        w.b(0x8B, 0x41, 0x38)
+        w.b(0x3B, 0x41, 0x3C); w.branch(b"\x0F\x84", "update_close_bad")
+        w.b(0xC6, 0x05); w.u32(active); w.b(0x00)
+        w.branch(b"\xE8", "wave_end_cleanup")
+        w.b(0x61, 0x9D)
+        w.branch(b"\xE9", "update_continue")
+        w.mark("update_close_bad")
+        w.b(0xC6, 0x05); w.u32(active); w.b(0x00)
+        w.mark("update_close_restore")
+        w.b(0x61, 0x9D)
+        w.mark("update_continue")
+        w.b(0x33, 0xC0, 0x89, 0x85, 0x70, 0xFF, 0xFF, 0xFF)                 # displaced Update bytes
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_UPDATE_RVA + 8)
+
+        # Automatic sunrise close is ignored only during a modifier-created
+        # portal.  The custom elapsed timer above remains authoritative.
+        w.mark("day_close")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x84", "day_close_return")               # active: keep the manual portal open
+        w.mark("day_close_original")
+        w.b(0x8B, 0xCF)
+        w.relative(b"\xE8", module_base + self.WAVE_PORTAL_CLOSE_RVA)
+        w.mark("day_close_return")
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_DAY_CLOSE_RVA + 7)
+
+        # ClosePortal normally starts a fresh random countdown.  Restore the
+        # two saved values after Begin() returns, then continue its cleanup.
+        w.mark("close_post")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x85", "close_post_original")
+        w.b(b"\xF3\x0F\x10\x05"); w.u32(saved_timer)
+        w.b(b"\xF3\x0F\x11\x46\x24")
+        w.b(b"\xF3\x0F\x10\x05"); w.u32(saved_wave)
+        w.b(b"\xF3\x0F\x11\x46\x28")
+        w.b(0xC6, 0x05); w.u32(active); w.b(0x00)
+        w.mark("close_post_original")
+        w.b(0x8B, 0x4E, 0x3C, 0x8D, 0x7E, 0x38)                            # displaced ClosePortal bytes
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_CLOSE_POST_RVA + 6)
+
+        # This is the native DoAction loop condition.  It normally derives a
+        # count from world difficulty; use the queued count while active so
+        # that one native DoAction call creates the entire point list.
+        w.mark("portal_count")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x85", "portal_count_original")
+        w.b(0xA1); w.u32(count)                                             # eax=[count]
+        w.b(0x89, 0x45, 0xF0)                                               # [ebp-10]=eax
+        w.mark("portal_count_original")
+        w.b(0x39, 0x5D, 0xF0)                                               # cmp [ebp-10],ebx
+        w.relative(b"\x0F\x8E", module_base + 0x5B6BA2)                   # jng native cleanup
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_COUNT_RVA + 9)
+
+        # The normal game staggers each door by its EBX loop index.  Only while
+        # our queued request is active, replace the calculated delay with zero.
+        # The rest of the native record initialisation is still used unchanged.
+        w.mark("portal_delay")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x85", "portal_delay_original")
+        w.b(0x0F, 0x57, 0xC9)                                               # xorps xmm1,xmm1
+        w.mark("portal_delay_original")
+        w.b(b"\xF3\x0F\x11\x09\x89\x71\x0C\x89\x41\x10\xC6\x41\x14\x00")
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_DELAY_RVA + 14)
+
+        # The update loop performs the final spawn decision from this value.
+        # Force it below zero for manual waves, which makes every unspawned
+        # entry reach the same frame's native creation branch.  Normal waves
+        # retain both original instructions and their intended stagger.
+        w.mark("portal_ready")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x85", "portal_ready_original")
+        w.b(0x0F, 0x57, 0xC0)                                               # xorps xmm0,xmm0
+        w.b(b"\xF3\x0F\x5C\xC2")                                        # xmm0 -= frame dt
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_READY_RVA + 9)
+        w.mark("portal_ready_original")
+        w.b(b"\xF3\x0F\x10\x04\x31\xF3\x0F\x5C\xC2")
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_READY_RVA + 9)
+
+        # DoAction calls GetPlace once per portal.  EBX is its zero-based
+        # loop index here, so select the matching {x,y} pair from our inline
+        # request array rather than supplying the same coordinates each time.
+        w.mark("position")
+        w.b(0x80, 0x3D); w.u32(active); w.b(0x01)
+        w.branch(b"\x0F\x85", "position_original")
+        w.b(0x89, 0xD8, 0xC1, 0xE0, 0x03)                                   # eax=ebx*8
+        w.b(0x52)                                                           # original code leaves EDX intact
+        w.b(0x8D, 0x15); w.u32(positions)                                  # edx=&positions[0]
+        w.b(0x8B, 0x0C, 0x02)                                               # ecx=positions[ebx].x
+        w.b(0x8B, 0x44, 0x02, 0x04)                                         # eax=positions[ebx].y
+        w.b(0x5A)
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_POSITION_RVA + 5)
+        w.mark("position_original")
+        w.b(0x8B, 0x08, 0x8B, 0x40, 0x04)                                   # displaced DoAction reads
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_POSITION_RVA + 5)
+
+        # This tiny virtual getter is called continuously, including when no
+        # monster wave exists.  It has no stack-frame dependency.  Besides the
+        # personal-skill queue it is the safe main-thread wake-up point for an
+        # already queued portal-end request: the request is submitted here,
+        # then MonstersWaves::Update(0.0) performs its own normal cleanup.
+        w.mark("personal_tick")
+        w.branch(b"\xE8", "update_native_dwarf_spawn_request")
+        w.branch(b"\xE8", "update_personal_skill_request")
+        w.branch(b"\xE8", "update_native_xp_request")
+        w.branch(b"\xE8", "update_pet_limit_request")
+        w.branch(b"\xE8", "update_pet_available_request")
+        w.branch(b"\xE8", "update_shop_dispatch")
+        w.b(0x83, 0x3D); w.u32(end_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "personal_tick_original")
+        w.b(0xC7, 0x05); w.u32(end_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(end_result); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.branch(b"\xE8", "wave_end_on_main_tick")
+        w.b(0x61, 0x9D)
+        w.mark("personal_tick_original")
+        w.b(0xD9, 0x41, 0x18, 0xC3)
+
+        # HellPortalEntity::SlowUpdate belongs to the live door object.  It is
+        # deliberately never used to consume an end request: the original
+        # close routine can release this object, so ending from its own callback
+        # is a use-after-free.  Relocate its conditional branch explicitly:
+        # copying its old ``jne +7`` verbatim would make the taken branch land
+        # seven bytes later in this code cave, i.e. in wave_end_cleanup.
+        w.mark("portal_slow")
+        w.b(b"\x83\x78\x64\x00")
+        w.relative(b"\x0F\x85", module_base + self.WAVE_PORTAL_ENTITY_SLOW_RVA + 13)
+        w.relative(b"\xE9", module_base + self.WAVE_PORTAL_ENTITY_SLOW_RVA + 6)
+
+        # Submit the termination condition consumed by the original
+        # MonstersWaves::Update at +0x5B9905.  That original code will call
+        # ClosePortal on its own stack when the manager validates it.  This
+        # helper never calls ClosePortal and never touches door/entity vectors.
+        w.mark("wave_end_cleanup")
+        w.b(0x8B, 0x0D); w.u32(manager_ptr)                                  # ecx=manager
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "wave_end_reject")
+        w.b(0x80, 0x79, 0x1C, 0x01); w.branch(b"\x0F\x85", "wave_end_reject")
+        w.b(0x8B, 0x41, 0x20)                                                 # eax=manager state
+        w.b(0x83, 0xF8, 0x01); w.branch(b"\x0F\x84", "wave_end_valid_state")
+        w.b(0x83, 0xF8, 0x02); w.branch(b"\x0F\x85", "wave_end_reject")
+        w.mark("wave_end_valid_state")
+        w.b(0x8B, 0x41, 0x44)                                                 # eax=Update-owned expiry object
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "wave_end_reject")
+        w.b(0xC7, 0x40, 0x64); w.u32(0)                                      # [expiry+64]=0 -> original Update closes
+        w.b(0xC6, 0x05); w.u32(active); w.b(0x00)
+        w.b(0xC7, 0x05); w.u32(end_result); w.u32(1)
+        w.b(0xC3)
+        w.mark("wave_end_reject")
+        w.b(0xC7, 0x05); w.u32(end_result); w.u32(0)
+        w.b(0xC3)
+
+        # The manager's Update is not guaranteed to run again while an
+        # already-open natural portal is spawning.  Calling its complete
+        # public method from the always-running main game thread with dt=0
+        # avoids advancing time while letting the original body observe the
+        # expiry condition and reach its own ClosePortal call site.  Do not
+        # replace this with a direct ClosePortal call: that is precisely the
+        # lifecycle shortcut that previously left a live wave behind.
+        w.mark("wave_end_on_main_tick")
+        w.branch(b"\xE8", "wave_end_cleanup")
+        w.b(0x83, 0x3D); w.u32(end_result); w.b(0x01)
+        w.branch(b"\x0F\x85", "wave_end_on_main_tick_return")
+        w.b(0x8B, 0x0D); w.u32(manager_ptr)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "wave_end_on_main_tick_return")
+        w.b(0xC7, 0x05); w.u32(update_reentry_guard); w.u32(1)
+        w.b(0x6A, 0x00)                                                    # Update(0.0f); callee is ret 4
+        w.relative(b"\xE8", module_base + self.WAVE_PORTAL_UPDATE_ENTRY_RVA)
+        w.b(0xC7, 0x05); w.u32(update_reentry_guard); w.u32(0)
+        w.mark("wave_end_on_main_tick_return")
+        w.b(0xC3)
+
+        code = w.finish()
+        if len(code) >= 0x1000:
+            raise ValueError("wave portal controller is too large")
+        return code, {name: w.labels[name] for name in ("update", "personal_tick", "day_close", "close_post", "portal_slow", "portal_count", "portal_delay", "portal_ready", "position")}, data
+
+    def _restore_wave_hooks_while_suspended(self, module_base, expected_patches):
+        """Restore a complete verified hook set, or leave the old set intact.
+
+        The process must already be suspended.  A failed write must never
+        leave only part of the seven hooks restored: such a half-controller
+        can redirect normal game code into the wrong cave entry and crash.
+        """
+        changes = []
+        try:
+            for rva, original, name in self.WAVE_PORTAL_HOOKS:
+                address = int(module_base) + int(rva)
+                current = pm.read_bytes(address, len(original))
+                if current == original:
+                    continue
+                expected = expected_patches.get(name)
+                if not expected or current != expected:
+                    return False
+                changes.append((address, original, current))
+
+            written = []
+            try:
+                for address, original, previous in changes:
+                    # Record it before writing, so even an exception raised
+                    # by WriteProcessMemory itself receives a best-effort
+                    # rollback attempt.
+                    written.append((address, previous))
+                    pm.write_bytes(address, original, len(original))
+                    if pm.read_bytes(address, len(original)) != original:
+                        raise RuntimeError("hook restore verification failed")
+                for rva, original, _ in self.WAVE_PORTAL_HOOKS:
+                    if pm.read_bytes(int(module_base) + int(rva), len(original)) != original:
+                        raise RuntimeError("hook restore set verification failed")
+                return True
+            except Exception:
+                for address, previous in reversed(written):
+                    try:
+                        pm.write_bytes(address, previous, len(previous))
+                    except Exception:
+                        pass
+                return False
+        except Exception:
+            return False
+
+    def _install_wave_hooks_while_suspended(self, module_base, entries):
+        """Install all controller jumps as one reversible transaction.
+
+        Returns the verified patch map only after every hook is installed.
+        The caller must already have suspended the target process.
+        """
+        planned = []
+        try:
+            for rva, original, name in self.WAVE_PORTAL_HOOKS:
+                address = int(module_base) + int(rva)
+                if pm.read_bytes(address, len(original)) != original:
+                    return None
+                patch = self._wave_portal_jump(address, entries[name], len(original))
+                planned.append((address, original, name, patch))
+
+            written = []
+            try:
+                for address, original, name, patch in planned:
+                    written.append((address, original))
+                    pm.write_bytes(address, patch, len(patch))
+                    if pm.read_bytes(address, len(patch)) != patch:
+                        raise RuntimeError("hook install verification failed")
+                return {name: patch for _, _, name, patch in planned}
+            except Exception:
+                for address, original in reversed(written):
+                    try:
+                        pm.write_bytes(address, original, len(original))
+                    except Exception:
+                        pass
+                return None
+        except Exception:
+            return None
+
+    def _dispose_wave_portal_controller(self):
+        """Remove our entry hooks without freeing code a running thread may use.
+
+        Windows releases the small per-process allocation when CraftWorld
+        exits.  Keeping an orphaned 8KB page during a manual reconnect is a
+        deliberate safety trade-off: freeing it while a game thread is inside
+        the cave is one of the ways earlier builds could crash the game.
+        """
+        with self._wave_portal_lock:
+            controller = self._wave_portal_controller
+            if not controller:
+                return
+            # Keep the controller record across a disconnected-but-still-live
+            # game.  A later reconnect can then remove the exact same hooks
+            # instead of treating them as an unknown patch.
+            if not pm:
+                return
+            try:
+                if int(pm.process_id) != int(controller["pid"]):
+                    self._wave_portal_controller = None
+                    return
+                data = int(controller.get("data", 0) or 0)
+                # A generated red-door event still needs the update hook to
+                # consume its native close request. Removing the hook merely
+                # because the modifier window disconnects leaves a live door
+                # behind that can no longer be ended safely. Keep the tagged
+                # cave until the event is actually idle; a later modifier
+                # session will verify and adopt it.
+                if data and any(int(pm.read_int(data + off) or 0) for off in (
+                    0x00, 0x04, self.WAVE_PORTAL_END_REQUEST_OFF,
+                    self.LIBRARY_QUEUE_REQUEST_OFF, self.MAGIC_QUEUE_REQUEST_OFF,
+                    self.RECIPE_QUEUE_REQUEST_OFF, self.PERSONAL_SKILL_QUEUE_REQUEST_OFF,
+                    self.PET_DIRECT_QUEUE_REQUEST_OFF,
+                    self.PET_REMOVE_QUEUE_REQUEST_OFF,
+                    self.PET_LIMIT_QUERY_REQUEST_OFF,
+                    self.PET_AVAILABLE_QUERY_REQUEST_OFF,
+                )):
+                    print("wave portal controller retained: active game-thread request/event")
+                    return
+                h = self._suspend(int(pm.process_id))
+                if not h:
+                    return
+                try:
+                    if self._restore_wave_hooks_while_suspended(
+                        int(controller["base"]), controller.get("patches") or {}
+                    ):
+                        self._wave_portal_controller = None
+                    else:
+                        print("wave portal controller cleanup deferred: hook set changed or restore failed")
+                finally:
+                    self._resume(h)
+            except Exception as e:
+                print("wave portal controller cleanup:", e)
+
+    def _wave_portal_status(self, module_base):
+        """Read only the manager fields needed to safely queue a portal."""
+        manager = pm.read_int(int(module_base) + self.WAVE_PORTAL_MANAGER_RVA)
+        if not manager:
+            return None
+        enabled = pm.read_bytes(manager + 0x1C, 1)[0]
+        state = pm.read_int(manager + 0x20)
+        timer = pm.read_float(manager + 0x24)
+        try:
+            begin = pm.read_int(manager + 0x38)
+            end = pm.read_int(manager + 0x3C)
+            portals = (end - begin) // 0x18 if begin and end >= begin and (end - begin) % 0x18 == 0 else 0
+        except Exception:
+            portals = 0
+        # This manager-owned pointer vector is distinct from the visible door
+        # records above.  It lets the close verifier distinguish a real wave
+        # shutdown from merely hiding a HellPortalEntity graphic.
+        try:
+            entity_begin = pm.read_int(manager + 0x48)
+            entity_end = pm.read_int(manager + 0x4C)
+            entity_count = ((entity_end - entity_begin) // 4
+                            if entity_begin and entity_end >= entity_begin
+                            and (entity_end - entity_begin) % 4 == 0 else 0)
+        except Exception:
+            entity_count = 0
+        try:
+            expiry_owner = pm.read_int(manager + 0x44)
+            expiry_value = pm.read_int(expiry_owner + 0x64) if expiry_owner else None
+        except Exception:
+            expiry_owner = 0
+            expiry_value = None
+        return {
+            "manager": manager, "enabled": int(enabled), "state": int(state),
+            "timer": float(timer), "portals": int(portals),
+            "spawn_entities": int(entity_count), "expiry_owner": int(expiry_owner or 0),
+            "expiry_value": expiry_value,
+        }
+
+    def _stale_wave_controller_cave(self, module_base):
+        """Recognise an inactive controller injected by an earlier modifier run.
+
+        A modifier restart can leave its tiny code cave installed in the game.
+        Never restore arbitrary third-party hooks: this accepts only our
+        tagged layout, or the narrowly checked legacy layout used before tags
+        were added, and only when none of its queues is active.
+        """
+        try:
+            update_rva, update_original, _ = self.WAVE_PORTAL_HOOKS[0]
+            update_addr = int(module_base) + int(update_rva)
+            raw = pm.read_bytes(update_addr, len(update_original))
+            if not raw or len(raw) != len(update_original) or raw[0] != 0xE9:
+                return None
+            if raw[5:] != b"\x90" * (len(raw) - 5):
+                return None
+            cave = update_addr + 5 + struct.unpack("<i", raw[1:5])[0]
+            if not (0x10000 <= cave < 0x80000000):
+                return None
+            data = cave + 0x1000
+            controller_tag_raw = pm.read_bytes(
+                data + self.WAVE_PORTAL_CONTROLLER_TAG_OFF,
+                12,
+            )
+            controller_tag = (controller_tag_raw or b"").split(b"\x00", 1)[0]
+            tagged = controller_tag in tuple(
+                tag.rstrip(b"\x00") for tag in (
+                    self.WAVE_PORTAL_CONTROLLER_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V23_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V22_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V21_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V20_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V19_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V18_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V17_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V16_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V15_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V14_TAG,
+                            self.WAVE_PORTAL_CONTROLLER_V13_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V12_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V11_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V10_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V9_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V8_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V7_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V6_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_OLD_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_LEGACY_TAG,
+                )
+            )
+            # CWVPCTL2 predates the personal-skill tick hook.  Both later
+            # tagged layouts carry it, including a stranded controller from
+            # the immediately preceding modifier session.
+            has_personal_tick = controller_tag != self.WAVE_PORTAL_CONTROLLER_LEGACY_TAG.rstrip(b"\x00")
+            # The original tagged controller starts with the magic queue.
+            # The lifecycle-fixed controller starts with the end-request
+            # queue, so accept either verified dispatcher signature here.
+            probe = pm.read_bytes(cave, 8)
+            expected_magic_request = data + self.MAGIC_QUEUE_REQUEST_OFF
+            expected_end_request = data + self.WAVE_PORTAL_END_REQUEST_OFF
+            expected_reentry_guard = data + self.WAVE_PORTAL_UPDATE_REENTRY_GUARD_OFF
+            if not probe or probe[:2] != b"\x83\x3D" or probe[6:8] != b"\x01\x0F":
+                return None
+            probe_request = struct.unpack("<I", probe[2:6])[0]
+            magic_layout = probe_request == expected_magic_request
+            priority_end_layout = probe_request == expected_end_request
+            # V11+ starts with the nested-Update re-entry guard. Older
+            # tagged builds began at either the magic or end queue. Accept
+            # all three known layouts so an idle controller can be restored
+            # and rebuilt instead of being reported as an unknown patch.
+            reentry_guard_layout = probe_request == expected_reentry_guard
+            if not (magic_layout or priority_end_layout or reentry_guard_layout):
+                return None
+            # Untagged historical caves had only the magic-first layout; do
+            # not accept an end-first lookalike without our controller tag.
+            if not tagged and not magic_layout:
+                return None
+            if not tagged:
+                # Compatibility for the controller build used immediately
+                # before the tag was introduced.  Do not accept a merely
+                # similar cave: its first dispatcher block, embedded queue
+                # addresses, Game controller load, call target and following
+                # library queue must all match this exact legacy layout.
+                legacy = pm.read_bytes(cave, 0x128)
+                if not legacy or len(legacy) != 0x128:
+                    return None
+                u32 = lambda off: struct.unpack_from("<I", legacy, off)[0]
+                common_layout = (
+                    legacy[0x0D:0x0F] == b"\xC7\x05" and u32(0x0F) == data + self.MAGIC_QUEUE_REQUEST_OFF and legacy[0x13:0x17] == b"\x00" * 4 and
+                    legacy[0x17:0x19] == b"\xC7\x05" and u32(0x19) == data + self.MAGIC_QUEUE_RESULT_OFF and legacy[0x1D:0x21] == b"\x00" * 4 and
+                    legacy[0x21:0x27] == b"\x9C\x60\x83\xEC\x08\xA1" and u32(0x27) == data + self.MAGIC_QUEUE_X_OFF and
+                    legacy[0x2B:0x2E] == b"\x89\x04\x24" and legacy[0x2E:0x2F] == b"\xA1" and u32(0x2F) == data + self.MAGIC_QUEUE_Y_OFF and
+                    legacy[0x33:0x37] == b"\x89\x44\x24\x04" and legacy[0x37:0x38] == b"\xA1" and u32(0x38) == data + self.MAGIC_QUEUE_ITEM_OFF and
+                    legacy[0x3C:0x40] == b"\x85\xC0\x0F\x84" and legacy[0x44:0x46] == b"\x8B\x0D" and u32(0x46) == int(module_base) + V1_MANA_BASE and
+                    legacy[0x4A:0x4C] == b"\x85\xC9"
+                )
+                short_call_target = cave + 0x6A + struct.unpack_from("<i", legacy, 0x66)[0]
+                short_layout = common_layout and (
+                    legacy[0x4C:0x52] == b"\x0F\x84\x22\x00\x00\x00" and legacy[0x52:0x53] == b"\xA1" and u32(0x53) == data + self.MAGIC_QUEUE_ITEM_OFF and
+                    legacy[0x57:0x5F] == b"\x85\xC0\x0F\x84\x15\x00\x00\x00" and legacy[0x5F:0x66] == b"\x50\x8D\x44\x24\x04\x50\xE8" and short_call_target == int(module_base) + self.MAGIC_COLLECT_DISPATCH_RVA and
+                    legacy[0x6A:0x6C] == b"\xC7\x05" and u32(0x6C) == data + self.MAGIC_QUEUE_RESULT_OFF and legacy[0x70:0x74] == b"\x01\x00\x00\x00" and
+                    legacy[0x74:0x79] == b"\x83\xC4\x08\x61\x9D" and legacy[0x79:0x7B] == b"\x83\x3D" and u32(0x7B) == data + self.LIBRARY_QUEUE_REQUEST_OFF
+                )
+                full_call_target = cave + 0xC0 + struct.unpack_from("<i", legacy, 0xBC)[0]
+                full_layout = common_layout and (
+                    legacy[0x4C:0x52] == b"\x0F\x84\xC2\x00\x00\x00" and legacy[0x52:0x53] == b"\xA1" and u32(0x53) == data + self.MAGIC_QUEUE_FLAGS_OFF and
+                    legacy[0x57:0x5C] == b"\xA9\x01\x00\x00\x00" and legacy[0x62:0x63] == b"\xA1" and u32(0x63) == data + self.MAGIC_QUEUE_MANA_ADDR_OFF and
+                    legacy[0x67:0x69] == b"\x85\xC0" and legacy[0x6F:0x71] == b"\x8B\x08" and legacy[0x71:0x73] == b"\x89\x0D" and u32(0x73) == data + self.MAGIC_QUEUE_MANA_SAVED_OFF and
+                    legacy[0x77:0x7D] == b"\xC7\x00\x00\x00\x00\x00" and legacy[0x7D:0x7E] == b"\xA1" and u32(0x7E) == data + self.MAGIC_QUEUE_FLAGS_OFF and
+                    legacy[0x82:0x87] == b"\xA9\x02\x00\x00\x00" and legacy[0x8D:0x8E] == b"\xA1" and u32(0x8E) == data + self.MAGIC_QUEUE_RADIUS_ADDR_OFF and
+                    legacy[0x92:0x94] == b"\x85\xC0" and legacy[0x9A:0x9C] == b"\x8B\x08" and legacy[0x9C:0x9E] == b"\x89\x0D" and u32(0x9E) == data + self.MAGIC_QUEUE_RADIUS_SAVED_OFF and
+                    legacy[0xA2:0xA4] == b"\x8B\x0D" and u32(0xA4) == data + self.MAGIC_QUEUE_RADIUS_VALUE_OFF and legacy[0xA8:0xAA] == b"\x89\x08" and
+                    legacy[0xAA:0xAC] == b"\x8B\x0D" and u32(0xAC) == int(module_base) + V1_MANA_BASE and legacy[0xB0:0xB1] == b"\xA1" and u32(0xB1) == data + self.MAGIC_QUEUE_ITEM_OFF and
+                    legacy[0xB5:0xBC] == b"\x50\x8D\x44\x24\x04\x50\xE8" and full_call_target == int(module_base) + self.MAGIC_COLLECT_DISPATCH_RVA and legacy[0xC0:0xC1] == b"\xA1" and u32(0xC1) == data + self.MAGIC_QUEUE_FLAGS_OFF and
+                    legacy[0x119:0x11B] == b"\x83\x3D" and u32(0x11B) == data + self.LIBRARY_QUEUE_REQUEST_OFF
+                )
+                if not (short_layout or full_layout):
+                    return None
+            patches = {}
+            for rva, original, name in self.WAVE_PORTAL_HOOKS:
+                address = int(module_base) + int(rva)
+                patch = pm.read_bytes(address, len(original))
+                # The previous tagged controller had no personal-skill tick
+                # hook.  Its original getter must remain untouched while the
+                # seven old hooks are recovered transactionally.
+                if name == "personal_tick" and not has_personal_tick:
+                    if patch != original:
+                        return None
+                    continue
+                if not patch or len(patch) != len(original) or patch[0] != 0xE9:
+                    return None
+                if patch[5:] != b"\x90" * (len(patch) - 5):
+                    return None
+                target = address + 5 + struct.unpack("<i", patch[1:5])[0]
+                if not (cave <= target < cave + 0x1000):
+                    return None
+                patches[name] = patch
+            active = int(pm.read_int(data + 0x04) or 0) == 1
+            pending = any(int(pm.read_int(data + off) or 0) for off in (
+                0x00, 0x04, self.WAVE_PORTAL_END_REQUEST_OFF,
+                self.LIBRARY_QUEUE_REQUEST_OFF,
+                self.MAGIC_QUEUE_REQUEST_OFF, self.RECIPE_QUEUE_REQUEST_OFF,
+                self.PERSONAL_SKILL_QUEUE_REQUEST_OFF,
+                self.XP_NATIVE_QUEUE_REQUEST_OFF,
+                self.NATIVE_DWARF_SPAWN_QUEUE_REQUEST_OFF,
+                self.PET_DIRECT_QUEUE_REQUEST_OFF,
+                    self.PET_REMOVE_QUEUE_REQUEST_OFF,
+                    self.PET_LIMIT_QUERY_REQUEST_OFF,
+                    self.PET_AVAILABLE_QUERY_REQUEST_OFF,
+                    self.SHOP_NATIVE_QUEUE_REQUEST_OFF,
+            ))
+            # A current tagged controller may outlive the modifier process.
+            # Its game-thread hooks are still required for the lifecycle
+            # request, so expose it for verified adoption instead of treating
+            # it as a stale hook that should be restored. CWVPCTL2 predates
+            # the lifecycle protocol and is intentionally never adopted.
+            if active and controller_tag == self.WAVE_PORTAL_CONTROLLER_TAG.rstrip(b"\x00"):
+                return {
+                    "cave": cave, "data": data, "patches": patches,
+                    "tagged": tagged, "active": True,
+                }
+            # Restoring while a queued library/magic request waits would lose
+            # that request partway through the game update cycle.
+            if pending:
+                return None
+            return {"cave": cave, "data": data, "patches": patches, "tagged": tagged, "active": False}
+        except Exception:
+            return None
+
+    def _recover_stale_wave_controller(self, module_base, process_id):
+        """Restore only a verified idle controller from a previous app run."""
+        candidate = self._stale_wave_controller_cave(module_base)
+        if not candidate or candidate.get("active"):
+            return False
+        cave = int(candidate["cave"])
+        h = self._suspend(int(process_id))
+        if not h:
+            return False
+        try:
+            # Revalidate while the process is frozen so a changing hook cannot
+            # be mistaken for our previous controller.
+            current = self._stale_wave_controller_cave(module_base)
+            if not current or int(current["cave"]) != cave:
+                return False
+            return self._restore_wave_hooks_while_suspended(
+                int(module_base), current.get("patches") or {}
+            )
+        except Exception:
+            return False
+        finally:
+            self._resume(h)
+
+    def _ensure_wave_portal_controller(self):
+        """Install the controller once for this process, after byte checks."""
+        if not connected or not pm:
+            return None, "请先连接游戏"
+        if self._detect_v2():
+            return None, "当前传送门功能仅支持 Steam 原版"
+        try:
+            process_id = int(pm.process_id)
+            module_base = int(get_base())
+        except Exception:
+            return None, "无法读取游戏进程信息"
+        with self._wave_portal_lock:
+            current = self._wave_portal_controller
+            if current and current.get("pid") == process_id and current.get("base") == module_base:
+                # A WebView window may be recreated while this Python process
+                # survives.  In that case ``current`` can describe a cave from
+                # an earlier window even though its hooks were already restored
+                # to original game bytes.  Never let that stale bookkeeping
+                # block installation of the current controller.
+                patches = current.get("patches") or {}
+                hooks_live = bool(patches)
+                for rva, original, name in self.WAVE_PORTAL_HOOKS:
+                    expected = patches.get(name)
+                    actual = pm.read_bytes(module_base + rva, len(original))
+                    if not expected or actual != expected:
+                        hooks_live = False
+                        break
+                if hooks_live:
+                    return current, ""
+                self._wave_portal_controller = None
+                current = None
+            if current:
+                self._dispose_wave_portal_controller()
+            try:
+                mismatch = False
+                for rva, original, name in self.WAVE_PORTAL_HOOKS:
+                    actual = pm.read_bytes(module_base + rva, len(original))
+                    if actual != original:
+                        mismatch = True
+                        break
+                if mismatch:
+                    candidate = self._stale_wave_controller_cave(module_base)
+                    if candidate and candidate.get("active"):
+                        controller = {
+                            "pid": process_id,
+                            "base": module_base,
+                            "cave": int(candidate["cave"]),
+                            "data": int(candidate["data"]),
+                            "patches": candidate.get("patches") or {},
+                        }
+                        self._wave_portal_controller = controller
+                        print("wave portal controller adopted from active prior modifier session")
+                        return controller, ""
+                    if not self._recover_stale_wave_controller(module_base, process_id):
+                        return None, "游戏代码与当前版本不一致（%s），请重启游戏后再试" % name
+                for rva, original, name in self.WAVE_PORTAL_HOOKS:
+                    if pm.read_bytes(module_base + rva, len(original)) != original:
+                        return None, "游戏代码与当前版本不一致（%s），请重启游戏后再试" % name
+                cave = pymem.memory.allocate_memory(pm.process_handle, 0x2000)
+                code, entries, data = self._build_wave_portal_code(module_base, cave)
+                pm.write_bytes(cave, code, len(code))
+                pm.write_bytes(data, b"\x00" * 0x3C0, 0x3C0)
+                pm.write_bytes(
+                    data + self.WAVE_PORTAL_CONTROLLER_TAG_OFF,
+                    self.WAVE_PORTAL_CONTROLLER_TAG,
+                    len(self.WAVE_PORTAL_CONTROLLER_TAG),
+                )
+                h = self._suspend(process_id)
+                if not h:
+                    return None, "无法暂停游戏以安全安装传送门控制器"
+                try:
+                    patches = self._install_wave_hooks_while_suspended(module_base, entries)
+                    if not patches:
+                        return None, "安装传送门控制器失败，已安全回滚"
+                finally:
+                    self._resume(h)
+                controller = {"pid": process_id, "base": module_base, "cave": cave, "data": data, "patches": patches}
+                self._wave_portal_controller = controller
+                return controller, ""
+            except Exception as e:
+                print("wave portal controller install:", e)
+                return None, "安装传送门控制器失败：%s" % e
+
+    def spawn_monster_portal(self, points, duration=60):
+        """Queue validated native monster portals at the exact cells listed in points."""
+        if not pm or not connected:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已载入的地图"}
+        try:
+            duration = float(duration)
+            if not isinstance(points, (list, tuple)):
+                raise TypeError
+            clean = []
+            for index, raw in enumerate(points, 1):
+                try:
+                    px, py = int(raw[0]), int(raw[1])
+                except (TypeError, ValueError, IndexError):
+                    return {"ok": False, "error": "第 %d 个传送门坐标无效" % index}
+                if px < 0 or py < 0:
+                    return {"ok": False, "error": "第 %d 个传送门坐标不能为负数" % index}
+                clean.append((px, py))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "坐标列表和存在时间必须是数字"}
+        if not clean:
+            return {"ok": False, "error": "请先添加至少一个传送门坐标"}
+        if len(clean) > 20:
+            return {"ok": False, "error": "一次最多生成 20 个传送门"}
+        if len(set(clean)) != len(clean):
+            return {"ok": False, "error": "列表中存在重复的传送门坐标"}
+        if not math.isfinite(duration) or duration < 1 or duration > 3600:
+            return {"ok": False, "error": "存在时间范围为 1 ～ 3600 游戏秒"}
+        time_state = self.get_game_time_state()
+        if not time_state.get("ok"):
+            return {"ok": False, "error": time_state.get("error", "无法读取昼夜时间")}
+        bounds = time_state.get("bounds", {})
+        current = float(time_state.get("current", -1))
+        if not (float(bounds.get("night_begin", 1)) <= current < float(bounds.get("night_end", 0))):
+            return {"ok": False, "error": "当前是白天，怪物传送门只能在夜晚生成"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "error": "地图未载入，请进入存档后重试"}
+        _, width, height, _, _ = resolved
+        width, height = int(width), int(height)
+        for index, (px, py) in enumerate(clean, 1):
+            if px >= width or py >= height:
+                return {"ok": False, "error": "第 %d 个传送门超出地图范围（列 0～%d，行 0～%d）" % (index, width - 1, height - 1)}
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            try:
+                status = self._wave_portal_status(controller["base"])
+                if not status or status["enabled"] != 1:
+                    return {"ok": False, "error": "怪物波次对象尚未准备好，请稍后重试"}
+                if status["state"] != 0 or status["portals"] > 0:
+                    return {"ok": False, "error": "当前已有怪物传送门或波次正在进行"}
+                data = int(controller["data"])
+                # Request is intentionally written last: Update sees either a
+                # complete parameter set or no request at all.
+                flat = [value for pos in clean for value in pos] + [0] * (40 - len(clean) * 2)
+                pm.write_bytes(data + 0x2C, struct.pack("<40i", *flat), 160)
+                pm.write_int(data + 0x20, len(clean))
+                pm.write_int(data + 0x18, clean[0][0])
+                pm.write_int(data + 0x1C, clean[0][1])
+                pm.write_float(data + 0x08, duration)
+                pm.write_float(data + 0x0C, duration)
+                pm.write_int(data + 0x00, 1)
+                return {"ok": True, "queued": True, "count": len(clean), "points": clean,
+                        "duration": duration, "countdown": status["timer"]}
+            except Exception as e:
+                return {"ok": False, "error": "提交传送门请求失败：%s" % e}
+
+    def get_monster_portal_event_state(self):
+        """Read the current monster-portal event without installing a controller.
+
+        ``portal_count`` is the native vector record count.  It is useful for
+        showing that the event is active, but is intentionally not exposed as a
+        stable per-door identity.  V1 therefore offers only whole-event close.
+        """
+        if not pm or not connected:
+            return {"ok": False, "error": "请先连接并进入已载入的地图"}
+        try:
+            module_base = int(get_base())
+            status = self._wave_portal_status(module_base)
+            if not status or status.get("enabled") != 1:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "怪物波次对象尚未准备好，请进入存档后重试"}
+            controller = self._wave_portal_controller
+            same_session = bool(
+                controller and int(controller.get("pid", 0)) == int(pm.process_id)
+                and int(controller.get("base", 0)) == module_base
+            )
+            modifier_active = False
+            remaining = None
+            pending_end = False
+            end_result = None
+            if same_session:
+                data = int(controller["data"])
+                modifier_active = int(pm.read_int(data + 0x04) or 0) == 1
+                raw_remaining = float(pm.read_float(data + 0x0C))
+                if math.isfinite(raw_remaining) and 0.0 <= raw_remaining <= 3600.0:
+                    remaining = raw_remaining
+                pending_end = int(pm.read_int(data + self.WAVE_PORTAL_END_REQUEST_OFF) or 0) == 1
+                end_result = int(pm.read_int(data + self.WAVE_PORTAL_END_RESULT_OFF) or 0)
+            # The portal vector tracks visible HellPortalEntity records only.
+            # State 1 is the live spawning phase and state 2 is its transition.
+            # Both are eligible now because V8 requests expiry from the original
+            # MonstersWaves::Update path; it never closes from a door callback.
+            portal_count = int(status.get("portals", 0))
+            manager_state = int(status.get("state", 0))
+            spawn_entities = int(status.get("spawn_entities", 0))
+            expiry_owner = int(status.get("expiry_owner", 0) or 0)
+            native_active = (
+                manager_state in (1, 2)
+                and expiry_owner != 0
+                and (portal_count > 0 or spawn_entities > 0)
+            )
+            # Reading state never installs hooks.  A recognised live event may
+            # therefore be ended even when this window has just been opened;
+            # the write endpoint installs V8 transactionally before queuing it.
+            can_end = native_active and not pending_end
+            if native_active:
+                reason = "已识别活动传送门/波次；结束会请求游戏原生 Update 进入正常收尾流程。"
+            elif manager_state in (1, 2):
+                reason = "检测到波次过渡状态，但没有可靠的门、实体或结束计时对象；为避免误结束，已拒绝写入。"
+            elif manager_state != 0:
+                reason = "波次管理器仍在过渡状态；请等待进入活动阶段或自然结束。"
+            else:
+                reason = "当前无进行中的怪物传送门波次。"
+            return {
+                "ok": True, "state": self.STATUS_UNVERIFIED,
+                "active": native_active,
+                "can_end": can_end,
+                "event_source": "modifier" if modifier_active and native_active else ("native" if native_active else "none"),
+                "portal_count": portal_count,
+                "spawn_entities": spawn_entities,
+                "manager_state": manager_state,
+                "expiry_value": status.get("expiry_value"),
+                "countdown": float(status.get("timer", 0.0)),
+                "remaining": remaining,
+                "pending_end": pending_end,
+                "end_result": end_result,
+                "reason": reason,
+            }
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "读取当前传送门事件失败：%s" % e}
+
+    def end_current_monster_portal_event(self):
+        """End one confirmed live monster-portal event on the game update thread.
+
+        This is intentionally *not* a per-door operation.  The game-thread
+        controller consumes a compact request, validates the manager and portal
+        vector, then performs only the writes confirmed in the natural cleanup
+        tail.  Python never touches live portal/vector memory directly.
+        """
+        if not pm or not connected:
+            return {"ok": False, "error": "请先连接并进入已载入的地图"}
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            try:
+                data = int(controller["data"])
+                status = self._wave_portal_status(int(controller["base"]))
+                if not status or status.get("enabled") != 1:
+                    return {"ok": False, "error": "怪物波次对象尚未准备好，请稍后重试"}
+                # The visible portal-record vector is not authoritative by
+                # itself.  A real active wave has either visible doors or a
+                # populated manager-owned entity vector, and the game uses
+                # state 1 while it is spawning and state 2 while transitioning.
+                native_active = (
+                    int(status.get("state", 0)) in (1, 2)
+                    and int(status.get("expiry_owner", 0) or 0) != 0
+                    and (
+                        int(status.get("portals", 0)) > 0
+                        or int(status.get("spawn_entities", 0)) > 0
+                    )
+                )
+                spawn_pending = int(pm.read_int(data + 0x00) or 0) == 1
+                end_pending = int(pm.read_int(data + self.WAVE_PORTAL_END_REQUEST_OFF) or 0) == 1
+                snapshot = {
+                    "portal_count": int(status.get("portals", 0)),
+                    "spawn_entities": int(status.get("spawn_entities", 0)),
+                    "manager_state": int(status.get("state", 0)),
+                    "countdown": float(status.get("timer", 0.0)),
+                }
+                if spawn_pending:
+                    return {"ok": False, "error": "新的红门生成请求仍在等待游戏线程处理，请稍后刷新", "before": snapshot}
+                if end_pending:
+                    return {"ok": False, "pending": True, "error": "结束请求已在等待游戏线程处理，请勿重复提交", "before": snapshot}
+                if not native_active:
+                    return {"ok": False, "error": "游戏未确认存在活跃传送门/波次；未执行结束操作。", "before": snapshot}
+                # Result is reset before the request.  The request flag itself
+                # is written last so the update thread sees a complete state.
+                pm.write_int(data + self.WAVE_PORTAL_END_REQUEST_OFF, 0)
+                pm.write_int(data + self.WAVE_PORTAL_END_RESULT_OFF, -1)
+                pm.write_int(data + self.WAVE_PORTAL_END_REQUEST_OFF, 1)
+                acknowledged = False
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    result = int(pm.read_int(data + self.WAVE_PORTAL_END_RESULT_OFF) or 0)
+                    if result == 1:
+                        acknowledged = True
+                        break
+                    if result == 0:
+                        return {
+                            "ok": False, "pending": False, "before": snapshot,
+                            "error": "游戏线程已读取结束请求，但当前红门已不再满足安全关闭条件；未执行关闭。请刷新状态后再试。",
+                        }
+                    time.sleep(0.04)
+                if not acknowledged:
+                    return {
+                        "ok": False, "pending": True, "before": snapshot,
+                        "error": "结束请求尚未被游戏线程确认；请保持游戏运行并刷新状态，不要重复点击。",
+                    }
+                # ClosePortal may wait for the current frame's entity cleanup
+                # before both manager vectors settle.  Keep observing one
+                # submitted native request instead of issuing a second write.
+                deadline = time.monotonic() + 8.0
+                last = None
+                previous_entities = None
+                stable_samples = 0
+                while time.monotonic() < deadline:
+                    last = self.get_monster_portal_event_state()
+                    if last.get("ok"):
+                        current_entities = int(last.get("spawn_entities", 0))
+                        if previous_entities is not None and current_entities <= previous_entities:
+                            stable_samples += 1
+                        else:
+                            stable_samples = 0
+                        previous_entities = current_entities
+                    still_active = bool(
+                        last.get("ok")
+                        and int(last.get("manager_state", -1)) in (1, 2)
+                        and (
+                            int(last.get("portal_count", 0)) > 0
+                            or int(last.get("spawn_entities", 0)) > 0
+                        )
+                    )
+                    if last.get("ok") and not still_active and stable_samples >= 2:
+                        return {
+                            "ok": True, "before": snapshot, "after": last,
+                            "message": "游戏原生 ClosePortal 已执行：活动波次已退出，管理器实体列表连续读回未再增长。",
+                        }
+                    time.sleep(0.06)
+                return {
+                    "ok": False, "pending": True, "before": snapshot, "after": last,
+                    "error": "游戏线程已接收结束请求，但 8 秒内未验证到波次退出且实体列表停止增长；为避免重复触发，未再次写入。",
+                }
+            except Exception as e:
+                return {"ok": False, "error": "结束当前传送门事件失败：%s" % e}
+
+    # ==================== 红门事件导演器预设（仅保存方案，不自动执行） ====================
+
+    @staticmethod
+    def _clean_portal_director_plan(value):
+        if not isinstance(value, dict):
+            return None, "场景方案无效"
+        try:
+            duration = float(value.get("duration", 60))
+        except (TypeError, ValueError, OverflowError):
+            return None, "存在时间无效"
+        if not math.isfinite(duration) or duration < 1 or duration > 3600:
+            return None, "存在时间范围为 1～3600 秒"
+        raw_points = value.get("points")
+        if not isinstance(raw_points, (list, tuple)) or not raw_points or len(raw_points) > 20:
+            return None, "场景需包含 1～20 个坐标"
+        points = []
+        for index, raw in enumerate(raw_points, 1):
+            try:
+                col, row = int(raw[0]), int(raw[1])
+            except (TypeError, ValueError, IndexError):
+                return None, "第 %d 个坐标无效" % index
+            if col < 0 or row < 0:
+                return None, "第 %d 个坐标不能为负数" % index
+            points.append([col, row])
+        if len({tuple(point) for point in points}) != len(points):
+            return None, "场景中存在重复坐标"
+        return {"strategy": str(value.get("strategy") or "指定坐标")[:40],
+                "duration": duration, "points": points,
+                "options": value.get("options") if isinstance(value.get("options"), dict) else {}}, ""
+
+    def get_portal_director_presets(self):
+        raw = self._read_config().get("portal_director_presets", {})
+        presets = {}
+        if isinstance(raw, dict):
+            for name, value in raw.items():
+                clean, _ = self._clean_portal_director_plan(value)
+                if clean:
+                    presets[str(name)] = clean
+        return {"ok": True, "presets": presets}
+
+    def save_portal_director_preset(self, name, plan):
+        title = str(name or "").strip()
+        if not title or len(title) > 40:
+            return {"ok": False, "error": "预设名称需为 1 到 40 个字符"}
+        clean, error = self._clean_portal_director_plan(plan)
+        if not clean:
+            return {"ok": False, "error": error}
+        def update(cfg):
+            presets = cfg.get("portal_director_presets")
+            if not isinstance(presets, dict):
+                presets = {}
+            presets[title] = clean
+            cfg["portal_director_presets"] = presets
+        if not self._update_config(update):
+            return {"ok": False, "error": "无法保存红门场景预设"}
+        return {"ok": True, "name": title, "plan": clean}
+
+    def rename_portal_director_preset(self, old_name, new_name):
+        old_name, new_name = str(old_name or "").strip(), str(new_name or "").strip()
+        if not old_name or not new_name or len(new_name) > 40:
+            return {"ok": False, "error": "请输入有效的新预设名称"}
+        result = {"ok": False, "error": "未找到红门场景预设"}
+        def update(cfg):
+            nonlocal result
+            presets = cfg.get("portal_director_presets")
+            if not isinstance(presets, dict) or old_name not in presets:
+                return
+            if new_name != old_name and new_name in presets:
+                result = {"ok": False, "error": "已有同名红门场景预设"}
+                return
+            presets[new_name] = presets.pop(old_name)
+            cfg["portal_director_presets"] = presets
+            result = {"ok": True, "name": new_name}
+        self._update_config(update)
+        return result
+
+    def copy_portal_director_preset(self, source_name, new_name):
+        presets = self.get_portal_director_presets().get("presets", {})
+        plan = presets.get(str(source_name or "").strip())
+        if not plan:
+            return {"ok": False, "error": "未找到要复制的红门场景预设"}
+        return self.save_portal_director_preset(new_name, plan)
+
+    def export_portal_director_presets(self):
+        # Export is an optional user exchange file. Runtime state is already
+        # stored in config/user_data.json and never depends on this file.
+        path = os.path.join(_config_dir(), "portal_director_presets.export.json")
+        try:
+            os.makedirs(_config_dir(), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(self.get_portal_director_presets().get("presets", {}), handle,
+                          ensure_ascii=False, indent=2)
+            return {"ok": True, "file": os.path.basename(path)}
+        except Exception as exc:
+            return {"ok": False, "error": "导出红门场景预设失败：%s" % exc}
+
+    def import_portal_director_presets(self):
+        # Prefer the user exchange file. A root-level legacy sidecar is still
+        # accepted once so an older installation can be upgraded safely.
+        path = os.path.join(_config_dir(), "portal_director_presets.export.json")
+        if not os.path.exists(path):
+            legacy = os.path.join(_application_dir(), "portal_director_presets.json")
+            if os.path.exists(legacy):
+                path = legacy
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if not isinstance(raw, dict):
+                return {"ok": False, "error": "导入文件格式无效"}
+            clean = {}
+            for name, plan in raw.items():
+                title = str(name or "").strip()
+                checked, _ = self._clean_portal_director_plan(plan)
+                if title and len(title) <= 40 and checked:
+                    clean[title] = checked
+            if not clean:
+                return {"ok": False, "error": "导入文件中没有有效红门场景预设"}
+            def update(cfg):
+                presets = cfg.get("portal_director_presets")
+                if not isinstance(presets, dict):
+                    presets = {}
+                presets.update(clean)
+                cfg["portal_director_presets"] = presets
+            if not self._update_config(update):
+                return {"ok": False, "error": "无法保存导入的红门场景预设"}
+            return {"ok": True, "count": len(clean), "file": os.path.basename(path)}
+        except FileNotFoundError:
+            return {"ok": False, "error": "未找到红门预设交换文件"}
+        except Exception as exc:
+            return {"ok": False, "error": "导入红门场景预设失败：%s" % exc}
+
+    # ==================== 潘多拉盒子事件 ====================
+    @staticmethod
+    def _pandora_place_label(value):
+        return {"all": "通用", "ground": "地面", "air": "空中"}.get(str(value), str(value or "通用"))
+
+    def _pandora_definitions(self):
+        """Read the installed game's Pandora event manifest, preserving order.
+
+        The order matters for the two separate ``miner_luck`` entries.  No
+        game file is changed; this only supplies expected IDs/weights used to
+        validate the runtime copy before it is ever written.
+        """
+        try:
+            if pm and connected:
+                import psutil
+                exe_path = psutil.Process(pm.process_id).exe()
+                xml_path = os.path.join(os.path.dirname(exe_path), "data", "pandora_events.xml")
+            else:
+                xml_path = os.path.join(GAME_ROOT, "data", "pandora_events.xml")
+            root = ET.parse(xml_path).getroot()
+        except Exception as e:
+            raise RuntimeError("无法读取 pandora_events.xml：%s" % e)
+        result, occurrence = [], {}
+        for node in list(root):
+            event_id = str(node.tag or "").strip()
+            if not event_id:
+                continue
+            try:
+                weight = float(node.attrib.get("weight", "0"))
+            except (TypeError, ValueError):
+                continue
+            occurrence[event_id] = occurrence.get(event_id, 0) + 1
+            number = occurrence[event_id]
+            behaviour = node.find("./gameobject/behaviour")
+            title = PANDORA_EVENT_TITLES.get(event_id, event_id)
+            if event_id == "miner_luck" and behaviour is not None:
+                ratio = behaviour.attrib.get("_ratio", "")
+                if ratio:
+                    title += "（%s 倍）" % ratio
+            conditions = []
+            if node.attrib.get("include"):
+                conditions.append("仅 " + node.attrib["include"])
+            if node.attrib.get("exclude"):
+                conditions.append("排除 " + node.attrib["exclude"])
+            result.append({
+                "id": event_id, "key": "%s#%d" % (event_id, number), "title": title,
+                "weight": weight, "place": str(node.attrib.get("place", "all")),
+                "polarity": str(node.attrib.get("polarity", "+")),
+                "conditions": "；".join(conditions), "occurrence": number,
+            })
+        if not result:
+            raise RuntimeError("pandora_events.xml 中没有事件记录")
+        return result
+
+    @staticmethod
+    def _pandora_record_header_valid(block, event_id):
+        """Validate the compact XML record layout before accepting an address."""
+        raw_id = event_id.encode("ascii")
+        if not block or len(block) < 0x24 or not block.startswith(raw_id + b"\x00"):
+            return False
+        try:
+            length, capacity, place = struct.unpack_from("<III", block, 0x10)
+            polarity = block[0x1C]
+            weight = struct.unpack_from("<f", block, 0x20)[0]
+        except (struct.error, IndexError):
+            return False
+        return (length == len(raw_id) and capacity >= length and place in (0, 1, 2)
+                and polarity in (1, 0xFF) and math.isfinite(weight) and 0.0 <= weight <= 100000.0)
+
+    def _scan_pandora_events(self):
+        """Locate all parsed Pandora event records in one private-heap pass.
+
+        A parsed event stores its ID at +0x00 and its floating-point weight at
+        +0x20.  Raw XML text also exists in memory, hence the strict compact
+        record validation above.  The scan is performed only on first use (or
+        after reconnect) and cached afterwards.
+        """
+        if not pm or not connected:
+            raise RuntimeError("未连接游戏")
+        if self._detect_v2():
+            raise RuntimeError("当前潘多拉事件控制仅验证了 Steam 原版")
+        defs = self._pandora_definitions()
+        by_id, expected_count = {}, {}
+        for item in defs:
+            by_id.setdefault(item["id"], []).append(item)
+            expected_count[item["id"]] = expected_count.get(item["id"], 0) + 1
+        ids = sorted(by_id, key=lambda value: (-len(value), value))
+        id_pattern = re.compile(b"(?:" + b"|".join(re.escape(value.encode("ascii")) for value in ids) + b")\x00")
+        candidates = {event_id: [] for event_id in by_id}
+        seen = set()
+        started = time.time()
+        readable_writable = {0x04, 0x08, 0x40, 0x80}  # RW / WC / ERW / EWC
+        chunk_size, overlap = 0x200000, 0x80
+        address = 0
+        while address < 0x80000000:
+            try:
+                mbi = pymem.memory.virtual_query(pm.process_handle, address)
+            except Exception:
+                break
+            region_base, region_size = int(mbi.BaseAddress), int(mbi.RegionSize)
+            next_address, protect = region_base + region_size, int(mbi.Protect)
+            if (int(mbi.State) == 0x1000 and int(mbi.Type) == 0x20000 and 0x10000 <= region_size <= 0x400000
+                    and (protect & 0x100) == 0 and (protect & 0xFF) in readable_writable):
+                offset = 0
+                while offset < region_size:
+                    read_size = min(chunk_size, region_size - offset)
+                    read_base = region_base + offset
+                    try:
+                        block = pm.read_bytes(read_base, read_size)
+                    except Exception:
+                        block = None
+                    if block:
+                        for match in id_pattern.finditer(block):
+                            record = read_base + match.start()
+                            if record in seen:
+                                continue
+                            seen.add(record)
+                            event_id = match.group()[:-1].decode("ascii")
+                            try:
+                                header = pm.read_bytes(record, 0x28)
+                            except Exception:
+                                continue
+                            if not self._pandora_record_header_valid(header, event_id):
+                                continue
+                            try:
+                                weight = float(struct.unpack_from("<f", header, 0x20)[0])
+                            except struct.error:
+                                continue
+                            candidates[event_id].append({"address": record, "weight": weight})
+                    if offset + read_size >= region_size:
+                        break
+                    offset += max(1, read_size - overlap)
+            if next_address <= address:
+                break
+            address = next_address
+
+        resolved, used = [], set()
+        for definition in defs:
+            options = [item for item in candidates[definition["id"]] if item["address"] not in used]
+            if not options:
+                # include/exclude and place are applied while loading the
+                # active map.  An absent entry is therefore not an error: it
+                # simply cannot be selected by this Pandora chest right now.
+                continue
+            # Before any modifier action, the original XML weight makes the
+            # association exact.  Address order is a safe fallback after a
+            # previous forced-selection request left weights at 0/1.
+            options.sort(key=lambda item: (abs(item["weight"] - definition["weight"]), item["address"]))
+            selected = options[0]
+            used.add(selected["address"])
+            entry = dict(definition)
+            entry.update({"address": int(selected["address"]), "current_weight": float(selected["weight"])})
+            resolved.append(entry)
+        if not resolved:
+            raise RuntimeError("当前地图没有可控制的潘多拉事件，请进入已载入的存档后重试")
+        self._pandora_cache = resolved
+        self._pandora_cache_pid = int(pm.process_id)
+        self._pandora_scan_ms = int((time.time() - started) * 1000)
+        self._pandora_forced_key = ""
+        return resolved
+
+    def _pandora_events(self, refresh=False):
+        if not pm or not connected:
+            raise RuntimeError("未连接游戏")
+        cache = self._pandora_cache
+        if refresh or not cache or self._pandora_cache_pid != int(pm.process_id):
+            cache = self._scan_pandora_events()
+        try:
+            # A lightweight revalidation prevents writing a freed/reused map
+            # allocation after leaving a save without restarting the process.
+            for entry in cache:
+                if pm.read_bytes(int(entry["address"]), len(entry["id"]) + 1) != entry["id"].encode("ascii") + b"\x00":
+                    cache = self._scan_pandora_events()
+                    break
+            for entry in cache:
+                entry["current_weight"] = float(pm.read_float(int(entry["address"]) + 0x20))
+        except Exception:
+            cache = self._scan_pandora_events()
+        return cache
+
+    def _legacy_get_pandora_events(self, refresh=False):
+        """Retained only for reverse-engineering reference; no longer exposed."""
+        try:
+            entries = self._pandora_events(bool(refresh))
+            return {
+                "ok": True, "scan_ms": int(self._pandora_scan_ms), "forced_key": self._pandora_forced_key,
+                "events": [{
+                    "key": entry["key"], "id": entry["id"], "title": entry["title"],
+                    "weight": entry["current_weight"], "original_weight": entry["weight"],
+                    "place": self._pandora_place_label(entry["place"]), "polarity": entry["polarity"],
+                    "conditions": entry["conditions"],
+                } for entry in entries],
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _legacy_force_pandora_event(self, event_key):
+        """Legacy heap-table writer. Kept disabled: it does not affect selection."""
+        """Make one eligible Pandora event the only non-zero weighted choice."""
+        try:
+            entries = self._pandora_events()
+            target = next((entry for entry in entries if entry["key"] == str(event_key)), None)
+            if not target:
+                return {"ok": False, "error": "请选择有效的潘多拉事件"}
+            with self._memory_write_lock:
+                # A normal non-zero weight is sufficient once every other
+                # entry is zero.  Keeping it at 1 avoids huge values or a
+                # permanently distorted random table if the game reloads it.
+                for entry in entries:
+                    pm.write_float(int(entry["address"]) + 0x20, 1.0 if entry is target else 0.0)
+            self._pandora_forced_key = target["key"]
+            return {"ok": True, "title": target.get("title", target["key"]), "place": self._pandora_place_label(target.get("place", "all")),
+                    "conditions": target.get("conditions", ""),
+                    "message": "已指定下一次符合条件的潘多拉盒子触发此事件。"}
+        except Exception as e:
+            return {"ok": False, "error": "设置潘多拉事件失败：%s" % e}
+
+    def _legacy_restore_pandora_events(self):
+        """Legacy heap-table restore. Kept disabled with its matching scanner."""
+        """Restore every runtime event weight from the installed XML file."""
+        try:
+            entries = self._pandora_events()
+            with self._memory_write_lock:
+                for entry in entries:
+                    pm.write_float(int(entry["address"]) + 0x20, float(entry["weight"]))
+            self._pandora_forced_key = ""
+            return {"ok": True, "count": len(entries), "message": "已恢复 Pandora 配置中的原始随机权重。"}
+        except Exception as e:
+            return {"ok": False, "error": "恢复潘多拉随机权重失败：%s" % e}
+
+
+    # The first Pandora implementation wrote a parsed heap copy that exists
+    # only after a chest has spawned.  The game has already consumed that copy
+    # by then, so changing it does not alter the chest result.  The reliable
+    # control point is the source manifest read when a NEW chest is created.
+    # Keep an exact backup in the modifier configuration so a choice persists
+    # across modifier restarts and can always be restored byte-for-byte.
+    def _pandora_override_state(self):
+        try:
+            value = self._read_config().get("pandora_override", {})
+            return dict(value) if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def _set_pandora_override_state(self, value):
+        clean = dict(value) if isinstance(value, dict) else None
+        def update(cfg):
+            if clean:
+                cfg["pandora_override"] = clean
+            else:
+                cfg.pop("pandora_override", None)
+        if not self._update_config(update):
+            raise RuntimeError("无法保存潘多拉事件恢复备份")
+
+    def _pandora_manifest_path(self):
+        if not pm or not connected:
+            raise RuntimeError("未连接游戏")
+        if self._detect_v2():
+            raise RuntimeError("当前潘多拉事件控制仅验证了 Steam 原版")
+        try:
+            import psutil
+            return os.path.join(os.path.dirname(psutil.Process(pm.process_id).exe()), "data", "pandora_events.xml")
+        except Exception as e:
+            raise RuntimeError("无法定位 pandora_events.xml：%s" % e)
+
+    @staticmethod
+    def _pandora_atomic_write(path, data):
+        temp_path = "%s.codex.%s.%s.tmp" % (path, os.getpid(), threading.get_ident())
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, path)
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _pandora_forced_manifest(original_bytes, definitions, target):
+        """Return a manifest that deterministically selects ``target``.
+
+        A ground/air-only target keeps the opposite-place entries intact.  It
+        therefore cannot leave a differently placed chest with an empty event
+        list, while every compatible new chest receives the chosen result.
+        """
+        by_key = {entry["key"]: entry for entry in definitions}
+        ids = sorted({entry["id"] for entry in definitions}, key=lambda value: (-len(value), value))
+        if not ids:
+            raise RuntimeError("潘多拉事件列表为空")
+        pattern = re.compile(
+            rb"(?P<prefix><(?P<event>" + b"|".join(re.escape(value.encode("ascii")) for value in ids)
+            + rb")\b[^>]*?\bweight\s*=\s*)(?P<quote>[\"'])(?P<weight>[^\"']*)(?P=quote)", re.DOTALL)
+        occurrence, replaced = {}, set()
+        target_place = str(target.get("place", "all"))
+
+        def replace(match):
+            event_id = match.group("event").decode("ascii")
+            occurrence[event_id] = occurrence.get(event_id, 0) + 1
+            entry = by_key.get("%s#%d" % (event_id, occurrence[event_id]))
+            if not entry:
+                return match.group(0)
+            replaced.add(entry["key"])
+            place = str(entry.get("place", "all"))
+            if target_place == "all" or place in ("all", target_place):
+                weight = b"1" if entry["key"] == target["key"] else b"0"
+            else:
+                # This event cannot be selected at the target's placement.
+                # Retain it as a safe fallback for a different-type chest.
+                weight = match.group("weight")
+            return match.group("prefix") + match.group("quote") + weight + match.group("quote")
+
+        rewritten = pattern.sub(replace, original_bytes)
+        if target["key"] not in replaced or len(replaced) != len(definitions):
+            raise RuntimeError("pandora_events.xml 格式与当前版本不匹配，未写入游戏文件")
+        return rewritten
+
+    def _pandora_file_events(self):
+        # Definitions are read straight from disk and deliberately do not scan
+        # game memory.  They are available whether or not a chest exists.
+        entries = self._pandora_definitions()
+        state = self._pandora_override_state()
+        forced_key = str(state.get("target_key", ""))
+        return entries, forced_key
+
+    @staticmethod
+    def _pandora_event_catalog_meta(event_id, place, polarity, node=None):
+        key = str(event_id or "").lower()
+        tags = " ".join(str(item.tag or "").lower() for item in list(node or []))
+        text = key + " " + tags
+        if any(token in text for token in ("evil", "fire", "trap", "dragon", "dead", "rat", "enemy", "assault", "explosion")):
+            category, risk, long_lived = "敌对与挑战", "高", False
+        elif any(token in text for token in ("camp", "nest", "lighthouse", "beacon", "building", "landmark", "hole")):
+            category, risk, long_lived = "世界建筑与地标", "中", True
+        elif any(token in text for token in ("warming", "frost", "season", "water", "weather", "glacial", "thaw", "rain")):
+            category, risk, long_lived = "环境与世界状态", "中", False
+        elif any(token in text for token in ("treasure", "deposit", "stock", "gift", "reward", "map_", "luck")):
+            category, risk, long_lived = "宝藏与资源", "低", False
+        elif any(token in text for token in ("reinforcement", "prodigal", "neighbor", "npc", "son")):
+            category, risk, long_lived = "NPC 与援助", "低", False
+        else:
+            category, risk, long_lived = "其它潘多拉事件", "中" if str(polarity) == "-" else "低", False
+        if str(polarity) == "-" and risk == "低":
+            risk = "中"
+        placement = {"all": "游戏自动选址", "ground": "游戏自动地面选址", "air": "游戏自动空中选址"}.get(str(place), "游戏自动选址")
+        return {"category": category, "risk": risk, "long_lived": long_lived,
+                "placement": placement}
+
+    def _pandora_mod_catalog_events(self):
+        """Read mod manifests for the catalog only; no mod XML is written here."""
+        base_manifest = (self._pandora_manifest_path()
+                         if pm and connected else os.path.join(GAME_ROOT, "data", "pandora_events.xml"))
+        base_path = os.path.normcase(os.path.abspath(base_manifest))
+        mods_root = os.path.join(os.path.dirname(base_path), "..", "mods")
+        rows = []
+        if not os.path.isdir(mods_root):
+            return rows
+        for root_dir, _dirs, names in os.walk(mods_root):
+            if "pandora_events.xml" not in names:
+                continue
+            path = os.path.join(root_dir, "pandora_events.xml")
+            if os.path.normcase(os.path.abspath(path)) == base_path:
+                continue
+            try:
+                root = ET.parse(path).getroot()
+                relative = os.path.relpath(root_dir, mods_root).replace("\\", "/")
+                occurrence = {}
+                for node in list(root):
+                    event_id = str(node.tag or "").strip()
+                    if not event_id:
+                        continue
+                    try:
+                        weight = float(node.attrib.get("weight", "0"))
+                    except (TypeError, ValueError):
+                        continue
+                    occurrence[event_id] = occurrence.get(event_id, 0) + 1
+                    place = str(node.attrib.get("place", "all"))
+                    polarity = str(node.attrib.get("polarity", "+"))
+                    meta = self._pandora_event_catalog_meta(event_id, place, polarity, node)
+                    rows.append({"key": "mod:%s:%s#%d" % (relative, event_id, occurrence[event_id]),
+                                 "id": event_id, "title": PANDORA_EVENT_TITLES.get(event_id, event_id),
+                                 "weight": weight, "original_weight": weight,
+                                 "place": self._pandora_place_label(place), "polarity": polarity,
+                                 "conditions": "", "source": "模组：" + relative,
+                                 "controllable": False, "allow_reason": "模组事件已加入目录；尚未验证对应模组的原生预设与恢复链。",
+                                 **meta})
+            except Exception:
+                continue
+        return rows
+
+    def get_pandora_events(self, refresh=False):
+        try:
+            entries, forced_key = self._pandora_file_events()
+            catalog = []
+            for entry in entries:
+                meta = self._pandora_event_catalog_meta(entry["id"], entry.get("place", "all"), entry.get("polarity", "+"))
+                catalog.append({
+                    "key": entry["key"], "id": entry["id"], "title": entry["title"],
+                    "weight": entry["weight"], "original_weight": entry["weight"],
+                    "place": self._pandora_place_label(entry["place"]), "polarity": entry["polarity"],
+                    "conditions": entry["conditions"], "source": "本体", "controllable": True,
+                    "allow_reason": "通过游戏原生潘多拉派发链预设下一次事件。",
+                    **meta,
+                })
+            catalog.extend(self._pandora_mod_catalog_events())
+            return {
+                "ok": True, "state": self.STATUS_UNVERIFIED, "scan_ms": 0, "forced_key": forced_key,
+                "events": catalog,
+            }
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "潘多拉事件定义读取失败：%s" % e}
+
+    def force_pandora_event(self, event_key):
+        """Temporarily preset the event used when the next chest is created."""
+        try:
+            runtime, runtime_error = self._pandora_runtime_state(True)
+            if not runtime:
+                return {"ok": False, "error": runtime_error or "无法确认潘多拉盒子状态"}
+            if runtime.get("exists"):
+                return {"ok": False, "error": "地图中已有潘多拉盒子；它的事件已在生成时确定，请等它被打开或消失后再预设下一只"}
+            entries, _ = self._pandora_file_events()
+            target = next((entry for entry in entries if entry["key"] == str(event_key)), None)
+            if not target:
+                return {"ok": False, "error": "请选择有效的潘多拉事件"}
+            manifest_path = self._pandora_manifest_path()
+            state = self._pandora_override_state()
+            expected_path = os.path.normcase(os.path.abspath(manifest_path))
+            stored_path = os.path.normcase(os.path.abspath(str(state.get("xml_path", manifest_path))))
+            if state and stored_path != expected_path:
+                return {"ok": False, "error": "另一份游戏的潘多拉预设仍待恢复，请先连接原游戏并恢复随机"}
+            try:
+                original = bytes.fromhex(str(state["original_hex"])) if state else open(manifest_path, "rb").read()
+            except (KeyError, TypeError, ValueError, OSError) as e:
+                return {"ok": False, "error": "读取潘多拉原始配置失败：%s" % e}
+            rewritten = self._pandora_forced_manifest(original, entries, target)
+            next_state = {
+                "xml_path": manifest_path, "original_hex": original.hex(),
+                "target_key": target["key"], "target_title": target["title"],
+            }
+            self._set_pandora_override_state(next_state)
+            try:
+                self._pandora_atomic_write(manifest_path, rewritten)
+            except Exception as e:
+                self._set_pandora_override_state(state or None)
+                return {"ok": False, "error": "写入潘多拉临时预设失败：%s" % e}
+            self._pandora_forced_key = target["key"]
+            self._pandora_chest_seen_for_override = False
+            self._pandora_empty_confirmations = 0
+            return {"ok": True, "title": target["title"], "place": self._pandora_place_label(target["place"]),
+                    "conditions": target["conditions"],
+                    "message": "已预设下一次新生成的潘多拉盒子。现有盒子的结果不会改变。"}
+        except Exception as e:
+            return {"ok": False, "error": "设置潘多拉事件失败：%s" % e}
+
+    def restore_pandora_events(self):
+        """Restore the exact manifest saved before the temporary preset."""
+        try:
+            state = self._pandora_override_state()
+            if not state:
+                self._pandora_forced_key = ""
+                return {"ok": True, "count": 0, "message": "潘多拉事件当前已是正常随机"}
+            path = str(state.get("xml_path", ""))
+            original = bytes.fromhex(str(state.get("original_hex", "")))
+            if not path or not original:
+                return {"ok": False, "error": "潘多拉恢复备份不完整，未覆盖游戏文件"}
+            self._pandora_atomic_write(path, original)
+            self._set_pandora_override_state(None)
+            self._pandora_forced_key = ""
+            return {"ok": True, "count": 1, "message": "已恢复 pandora_events.xml 的原始随机权重"}
+        except Exception as e:
+            return {"ok": False, "error": "恢复潘多拉随机权重失败：%s" % e}
+
+    # ==================== 潘多拉盒子状态 / 生成倒计时 ====================
+    #
+    # Event weights are read only when a chest is constructed, therefore a
+    # preset must be armed *before* the chest exists.  The runtime scan below
+    # lets the UI lock a preset while that chest is alive, then restore the
+    # original XML automatically after the chest has been opened or removed.
+
+    def _clear_pandora_runtime_cache(self):
+        self._pandora_runtime_cache = {}
+        self._pandora_chest_seen_for_override = False
+        self._pandora_empty_confirmations = 0
+
+    @staticmethod
+    def _pandora_pointer_ok(value):
+        try:
+            return 0x10000 <= int(value or 0) < 0x80000000
+        except Exception:
+            return False
+
+    def _pandora_valid_spawner(self, pm_obj, obj, vtable):
+        """Validate the persistent PandoraChestSpawner before reading/writing it."""
+        try:
+            if not self._pandora_pointer_ok(obj) or pm_obj.read_int(int(obj)) != int(vtable):
+                return False
+            timer = float(pm_obj.read_float(int(obj) + self.PANDORA_SPAWNER_TIMER_OFF))
+            # The game's normal reset is about 1800 seconds.  The broad upper
+            # bound accepts longer user timers without accepting random data.
+            return math.isfinite(timer) and -1.0 <= timer <= 604800.0
+        except Exception:
+            return False
+
+    def _pandora_valid_chest(self, pm_obj, obj, vtable):
+        """Validate a live PandoraChestBehaviour using its owned talk prefix.
+
+        A vtable-only heap scan could match stale allocator data.  The
+        behaviour keeps a std::string at +148 with this exact prefix, which is
+        both map-specific and present only while the chest behaviour is live.
+        """
+        try:
+            if not self._pandora_pointer_ok(obj) or pm_obj.read_int(int(obj)) != int(vtable):
+                return False
+            length = int(pm_obj.read_int(int(obj) + self.PANDORA_CHEST_TALK_LEN_OFF))
+            capacity = int(pm_obj.read_int(int(obj) + self.PANDORA_CHEST_TALK_CAP_OFF))
+            expected = b"pandora_chest_talk_"
+            if length != len(expected) or capacity < length or capacity > 4096:
+                return False
+            text_ptr = int(pm_obj.read_int(int(obj) + self.PANDORA_CHEST_TALK_PTR_OFF) or 0)
+            if not self._pandora_pointer_ok(text_ptr):
+                return False
+            return pm_obj.read_bytes(text_ptr, length) == expected
+        except Exception:
+            return False
+
+    def _scan_pandora_runtime(self, force=False):
+        """Find the current chest and its persistent spawner without debugger hooks."""
+        global pm, connected
+        if not pm or not connected:
+            return None, "未连接游戏"
+        if self._detect_v2():
+            return None, "当前潘多拉盒子状态仅验证了 Steam 原版"
+        try:
+            process_id = int(pm.process_id)
+            module_base = int(get_base())
+        except Exception:
+            return None, "无法读取游戏进程信息"
+
+        spawner_vtable = module_base + self.PANDORA_SPAWNER_VTABLE_RVA
+        chest_vtable = module_base + self.PANDORA_CHEST_BEHAVIOUR_VTABLE_RVA
+        now = time.time()
+        cache = self._pandora_runtime_cache
+        if cache and cache.get("pid") == process_id and cache.get("base") == module_base:
+            spawner = int(cache.get("spawner") or 0)
+            chests = [int(obj) for obj in cache.get("chests", [])
+                      if self._pandora_valid_chest(pm, obj, chest_vtable)]
+            # The cached spawner is a permanent map object.  A missing chest
+            # requires a complete re-scan only every few seconds; a present
+            # chest is checked cheaply on every UI poll.
+            cached_ok = self._pandora_valid_spawner(pm, spawner, spawner_vtable)
+            if cached_ok and chests:
+                cache["chests"] = chests
+                return cache, ""
+            if cached_ok and not force and now - float(cache.get("last_full_scan", 0.0)) < 5.0:
+                cache["chests"] = []
+                return cache, ""
+
+        with self._pandora_runtime_scan_lock:
+            # A second browser call may have completed its scan while this one
+            # was waiting for the lock.
+            cache = self._pandora_runtime_cache
+            if (not force and cache and cache.get("pid") == process_id and cache.get("base") == module_base
+                    and self._pandora_valid_spawner(pm, cache.get("spawner"), spawner_vtable)
+                    and now - float(cache.get("last_full_scan", 0.0)) < 5.0):
+                cache["chests"] = [int(obj) for obj in cache.get("chests", [])
+                                   if self._pandora_valid_chest(pm, obj, chest_vtable)]
+                return cache, ""
+
+            signatures = ((struct.pack("<I", spawner_vtable), "spawner"),
+                          (struct.pack("<I", chest_vtable), "chest"))
+            spawners, chests, seen = [], [], set()
+            k32 = ctypes.windll.kernel32
+            class _MBI(ctypes.Structure):
+                _fields_ = [("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
+                           ("AllocationProtect", ctypes.c_uint32), ("RegionSize", ctypes.c_size_t),
+                           ("State", ctypes.c_uint32), ("Protect", ctypes.c_uint32), ("Type", ctypes.c_uint32)]
+            mbi = _MBI()
+            address = 0x10000
+            started = time.time()
+            while address < 0x80000000:
+                try:
+                    queried = k32.VirtualQueryEx(pm.process_handle, ctypes.c_void_p(address),
+                                                  ctypes.byref(mbi), ctypes.sizeof(mbi))
+                except Exception:
+                    queried = 0
+                if not queried:
+                    address += 0x10000
+                    continue
+                region_base = int(mbi.BaseAddress or 0)
+                region_size = int(mbi.RegionSize or 0)
+                next_address = region_base + region_size
+                if next_address <= address:
+                    address += 0x1000
+                    continue
+                protect = int(mbi.Protect)
+                # Game objects are private writable heap allocations.  Skip
+                # image/code pages and guarded regions entirely.
+                if (mbi.State == 0x1000 and mbi.Type == 0x20000 and not (protect & 0x100)
+                        and (protect & 0xFF) in (0x04, 0x08, 0x40, 0x80) and region_size >= 4):
+                    for chunk_addr, chunk in self._read_region_chunks(region_base, region_size):
+                        for signature, kind in signatures:
+                            pos = 0
+                            while True:
+                                idx = chunk.find(signature, pos)
+                                if idx < 0:
+                                    break
+                                obj = int(chunk_addr + idx)
+                                pos = idx + 4
+                                if obj in seen:
+                                    continue
+                                seen.add(obj)
+                                if kind == "spawner":
+                                    if self._pandora_valid_spawner(pm, obj, spawner_vtable):
+                                        spawners.append(obj)
+                                elif self._pandora_valid_chest(pm, obj, chest_vtable):
+                                    chests.append(obj)
+                address = next_address
+
+            # The spawner is unique.  Refuse to write a timer if a game update
+            # ever changes the structure enough to yield ambiguous matches.
+            runtime = {
+                "pid": process_id, "base": module_base,
+                "spawner": spawners[0] if len(spawners) == 1 else 0,
+                "spawner_count": len(spawners), "chests": chests,
+                "last_full_scan": time.time(), "scan_ms": int((time.time() - started) * 1000),
+            }
+            self._pandora_runtime_cache = runtime
+            if len(spawners) != 1:
+                return runtime, "未能唯一定位潘多拉生成器（请进入已载入的地图后重试）"
+            return runtime, ""
+
+    def _pandora_runtime_state(self, force_scan=False):
+        runtime, error = self._scan_pandora_runtime(bool(force_scan))
+        if not runtime:
+            return None, error
+        try:
+            spawner = int(runtime.get("spawner") or 0)
+            timer = float(pm.read_float(spawner + self.PANDORA_SPAWNER_TIMER_OFF)) if spawner else None
+            if timer is not None and (not math.isfinite(timer) or timer < -1.0 or timer > 604800.0):
+                return None, "潘多拉生成倒计时校验失败"
+            return {
+                "exists": bool(runtime.get("chests")), "chest_count": len(runtime.get("chests", [])),
+                "spawner": spawner, "timer": timer,
+                "timer_address": spawner + self.PANDORA_SPAWNER_TIMER_OFF if spawner else 0,
+                "scan_ms": int(runtime.get("scan_ms", 0)),
+            }, error
+        except Exception as e:
+            return None, "读取潘多拉状态失败：%s" % e
+
+    def get_pandora_status(self, refresh=False):
+        """Return chest presence and auto-restore a spent one-shot preset."""
+        try:
+            status, error = self._pandora_runtime_state(bool(refresh))
+            if not status:
+                state = self.STATUS_DISCONNECTED if not connected or pm is None else self.STATUS_STALE
+                return {"ok": False, "state": state,
+                        "error": error or "潘多拉运行时对象定位失败"}
+            override = self._pandora_override_state()
+            armed = bool(override.get("target_key"))
+            auto_restored = False
+            if armed and status["exists"]:
+                self._pandora_chest_seen_for_override = True
+                self._pandora_empty_confirmations = 0
+            elif armed and self._pandora_chest_seen_for_override:
+                # Two observations avoid restoring because a chest object is
+                # between update phases for one frame.
+                self._pandora_empty_confirmations += 1
+                if self._pandora_empty_confirmations >= 2:
+                    restored = self.restore_pandora_events()
+                    if restored.get("ok"):
+                        armed = False
+                        auto_restored = True
+                        self._pandora_chest_seen_for_override = False
+                        self._pandora_empty_confirmations = 0
+            return {
+                "ok": True, "state": self.STATUS_VERIFIED,
+                "exists": status["exists"], "chest_count": status["chest_count"],
+                "timer": status["timer"], "timer_address": status["timer_address"],
+                "scan_ms": status["scan_ms"], "armed": armed,
+                "can_preset": not status["exists"], "auto_restored": auto_restored,
+                "error": error or "",
+            }
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "读取潘多拉状态失败：%s" % e}
+
+    def _world_diagnostic_task_definitions(self):
+        """Read task *definitions* from local files, never their live state.
+
+        Quest activation/progress is stored in a separate runtime/save structure
+        which has not yet been verified. Keeping definitions and state apart
+        prevents a local XML entry from being misreported as an active task.
+        """
+        paths = [os.path.join(GAME_DATA_DIR, "quests.xml")]
+        mods_dir = os.path.join(GAME_ROOT, "mods")
+        if os.path.isdir(mods_dir):
+            try:
+                for root, _dirs, names in os.walk(mods_dir):
+                    if "quests.xml" in names:
+                        paths.append(os.path.join(root, "quests.xml"))
+            except OSError:
+                pass
+        rows, errors, seen = [], [], set()
+        for path in paths:
+            if not os.path.isfile(path):
+                continue
+            try:
+                tree = ET.parse(path)
+                source = "本体" if os.path.normcase(path) == os.path.normcase(paths[0]) else "模组"
+                for node in tree.findall(".//quest"):
+                    key = str(node.get("name") or "").strip()
+                    if not key or key.lower() in seen:
+                        continue
+                    seen.add(key.lower())
+                    rewards = []
+                    for award in node.findall(".//awards"):
+                        rewards.append({k: str(v) for k, v in award.attrib.items()})
+                    rows.append({"id": key, "title_key": str(node.get("title") or ""),
+                                 "tech": str(node.get("tech") or ""), "source": source,
+                                 "rewards": rewards})
+            except Exception as exc:
+                errors.append(os.path.basename(path) + "：" + str(exc))
+        return {
+            "verification": self.STATUS_UNVERIFIED,
+            "state": "当前任务阶段、完成状态和进行中任务尚未读取",
+            "definition_count": len(rows), "definitions": rows[:80], "errors": errors[:8],
+            "reason": "这些是本地任务定义，不代表当前存档中的任务状态；不会以定义存在推断任务已激活或已完成。",
+        }
+
+    def _world_diagnostic_task_runtime(self, definitions, refresh=False):
+        """Locate runtime *definition copies* without guessing task state.
+
+        A task id can be present in resources, save data or a live Chronicle
+        object.  Therefore this probe is intentionally evidence-only: it lists
+        non-module string hits, never calls one active/completed/progress.
+        """
+        if not connected or not pm:
+            return {"verification": self.STATUS_UNSUPPORTED, "state": "未连接游戏",
+                    "reason": "运行时任务候选只能从已连接且已加载的游戏进程读取。"}
+        if not refresh:
+            return {"verification": self.STATUS_UNVERIFIED, "state": "等待手动刷新诊断",
+                    "reason": "为避免后台全内存扫描，仅在用户明确点击“刷新诊断”时读取运行时候选。"}
+        task_ids, seen = [], set()
+        for row in definitions or []:
+            task_id = str((row or {}).get("id") or "").strip()
+            if (not task_id or task_id.lower() in seen or len(task_id) > 96):
+                continue
+            try:
+                raw = task_id.encode("ascii")
+            except UnicodeEncodeError:
+                continue
+            if not raw:
+                continue
+            seen.add(task_id.lower())
+            task_ids.append((task_id, raw))
+            if len(task_ids) >= 80:
+                break
+        if not task_ids:
+            return {"verification": self.STATUS_FAILED, "state": "没有可扫描的任务 ID",
+                    "reason": "本地 quests.xml 中没有可用的 ASCII 任务标识。"}
+        started = time.time()
+        pm_obj = pm
+        with self._runtime_session_lock:
+            generation = self._runtime_session_generation
+        try:
+            pattern = b"(?:" + b"|".join(re.escape(raw) for _task_id, raw in task_ids) + b")"
+            hits = pm_obj.pattern_scan_all(pattern, return_multiple=True) or []
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"verification": self.STATUS_UNSUPPORTED, "state": "连接会话已变化",
+                        "reason": "扫描期间游戏断开或重新连接；旧结果已丢弃。"}
+            module_start = module_end = 0
+            try:
+                module = pymem.process.module_from_name(pm_obj.process_handle, MODULE_NAME)
+                module_start = int(module.lpBaseOfDll)
+                module_end = module_start + int(module.SizeOfImage)
+            except Exception:
+                pass
+            max_id_length = max(len(raw) for _task_id, raw in task_ids)
+            by_id = {}
+            for address in hits:
+                try:
+                    address = int(address)
+                    if module_start and module_start <= address < module_end:
+                        continue
+                    raw = pm_obj.read_bytes(address, max_id_length + 1)
+                    if not raw:
+                        continue
+                    for task_id, task_raw in task_ids:
+                        if not raw.startswith(task_raw):
+                            continue
+                        next_byte = raw[len(task_raw):len(task_raw) + 1]
+                        if next_byte and (next_byte[0:1].isalnum() or next_byte == b"_"):
+                            continue
+                        row = by_id.setdefault(task_id, {"id": task_id, "addresses": []})
+                        if len(row["addresses"]) < 8:
+                            row["addresses"].append("0x%08X" % address)
+                        break
+                except Exception:
+                    continue
+            candidates = []
+            for task_id, _raw in task_ids:
+                if task_id not in by_id:
+                    continue
+                row = by_id[task_id]
+                row["count"] = len(row["addresses"])
+                candidates.append(row)
+            # Cache only the candidate addresses for a same-session read-only
+            # before/after probe.  A reconnect clears this cache.
+            with self._runtime_session_lock:
+                if self._runtime_session_current(generation, pm_obj):
+                    self._task_runtime_candidates_generation = int(generation)
+                    self._task_runtime_candidates = {
+                        row["id"]: [int(value, 16) for value in row.get("addresses", [])]
+                        for row in candidates
+                    }
+                    self._task_runtime_probe_baselines = {}
+            return {
+                "verification": self.STATUS_UNVERIFIED,
+                "state": "已读取到运行时任务定义副本；尚未确认任务状态",
+                "scanned_id_count": len(task_ids), "runtime_id_hits": len(hits),
+                "candidate_count": len(candidates), "candidates": candidates[:30],
+                "scan_ms": int((time.time() - started) * 1000),
+                "reason": "任务 ID 的内存命中可能来自定义、缓存或存档镜像，不等于当前进行中、已完成或进度。要验证某一任务，需按游戏 UI 在进度变化前后至少对照两次字段。",
+            }
+        except Exception as exc:
+            return {"verification": self.STATUS_FAILED, "state": "运行时任务候选读取失败",
+                    "scan_ms": int((time.time() - started) * 1000), "reason": str(exc)}
+
+    def capture_task_runtime_probe(self, task_id, baseline=False):
+        """Compare only nearby runtime bytes for one user-selected task ID.
+
+        This is an evidence collection tool, not a task reader: a changed
+        field is deliberately reported as a changed candidate field until the
+        game UI confirms the same relationship more than once.
+        """
+        if not connected or not pm:
+            return {"ok": False, "verification": self.STATUS_UNSUPPORTED,
+                    "state": "未连接游戏", "reason": "请连接游戏并先手动刷新世界诊断。"}
+        task_id = str(task_id or "").strip()
+        if not task_id or len(task_id) > 96:
+            return {"ok": False, "verification": self.STATUS_FAILED,
+                    "state": "任务标识无效", "reason": "请选择诊断结果中的一个任务 ID。"}
+        with self._runtime_session_lock:
+            generation = int(self._runtime_session_generation)
+            pm_obj = pm
+            if int(self._task_runtime_candidates_generation) != generation:
+                addresses = []
+            else:
+                addresses = list(self._task_runtime_candidates.get(task_id) or [])
+        if not addresses:
+            return {"ok": False, "verification": self.STATUS_UNVERIFIED,
+                    "state": "尚无该任务的运行时候选", "reason": "请先点击“刷新诊断”，再选择候选任务记录前快照。"}
+        snapshots = {}
+        read_errors = []
+        for address in addresses[:8]:
+            try:
+                raw = bytes(pm_obj.read_bytes(int(address) - 64, 192) or b"")
+                if len(raw) != 192:
+                    raise RuntimeError("候选附近内存读取长度不足")
+                snapshots[int(address)] = raw
+            except Exception as exc:
+                read_errors.append("0x%08X：%s" % (int(address), exc))
+        if not self._runtime_session_current(generation, pm_obj):
+            return {"ok": False, "verification": self.STATUS_UNSUPPORTED,
+                    "state": "连接会话已变化", "reason": "读取期间游戏断开或重新连接，旧快照已丢弃。"}
+        if not snapshots:
+            return {"ok": False, "verification": self.STATUS_FAILED,
+                    "state": "任务候选附近内存读取失败", "reason": "；".join(read_errors[:3]) or "没有可读取的候选副本。"}
+        key = (generation, task_id)
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        if bool(baseline):
+            with self._runtime_session_lock:
+                if not self._runtime_session_current(generation, pm_obj):
+                    return {"ok": False, "verification": self.STATUS_UNSUPPORTED,
+                            "state": "连接会话已变化", "reason": "记录基线前连接已变化。"}
+                self._task_runtime_probe_baselines[key] = snapshots
+            return {"ok": True, "read_only": True, "verification": self.STATUS_UNVERIFIED,
+                    "state": "已记录候选字段基线", "task_id": task_id,
+                    "candidate_count": len(snapshots), "captured_at": now,
+                    "reason": "现在请在游戏中只推进该任务一次，然后点击“与前快照对比”。基线不代表任务已经激活或字段就是进度。",
+                    "read_errors": read_errors[:3]}
+        with self._runtime_session_lock:
+            previous = self._task_runtime_probe_baselines.get(key)
+        if not previous:
+            return {"ok": False, "verification": self.STATUS_UNVERIFIED,
+                    "state": "尚未记录前快照", "task_id": task_id,
+                    "reason": "请先在任务尚未完成时点击“记录前快照”。"}
+        changes = []
+        for address, raw in snapshots.items():
+            old = previous.get(address)
+            if old is None or len(old) != len(raw):
+                continue
+            fields = []
+            for index in range(0, len(raw), 4):
+                before_u = struct.unpack_from("<I", old, index)[0]
+                after_u = struct.unpack_from("<I", raw, index)[0]
+                if before_u == after_u:
+                    continue
+                rel = index - 64
+                fields.append({"offset": rel, "before_u32": before_u, "after_u32": after_u,
+                               "before_f32": struct.unpack_from("<f", old, index)[0],
+                               "after_f32": struct.unpack_from("<f", raw, index)[0]})
+            if fields:
+                changes.append({"address": "0x%08X" % int(address), "changed_fields": fields[:24],
+                                "changed_count": len(fields)})
+        return {"ok": True, "read_only": True, "verification": self.STATUS_UNVERIFIED,
+                "state": "已完成候选字段前后对比", "task_id": task_id,
+                "candidate_count": len(snapshots), "captured_at": now,
+                "changed_candidate_count": len(changes), "changes": changes,
+                "reason": "这些仅是任务 ID 候选附近发生变化的字段，不等于任务进度、完成状态或奖励。请将同一任务 UI 的一次变化重复对照至少两次后再判定语义。",
+                "read_errors": read_errors[:3]}
+
+    def _world_diagnostic_chronicles_definitions(self):
+        """Read Chronicles event definitions without treating them as live events."""
+        path = os.path.join(GAME_DATA_DIR, "Components", "Chronicles.xml")
+        if not os.path.isfile(path):
+            return {"verification": self.STATUS_UNSUPPORTED, "state": "未找到 Chronicles.xml",
+                    "event_count": 0, "events": [],
+                    "reason": "当前本地数据没有 Chronicles 定义文件；不会用旧版本事件表猜测运行时状态。"}
+        try:
+            tree = ET.parse(path)
+            rows = []
+            for node in tree.findall(".//chronicles/*"):
+                key = str(node.tag or "").strip()
+                if not key:
+                    continue
+                rows.append({"id": key, "icon": str(node.get("icon") or "")})
+            return {
+                "verification": self.STATUS_UNVERIFIED,
+                "state": "Chronicles 定义已读取；运行时事件状态尚未确认",
+                "event_count": len(rows), "events": rows[:80],
+                "reason": "本地 Chronicles.xml 只描述事件类型和图标，不代表当前存档已经触发、正在进行或已完成。"
+            }
+        except Exception as exc:
+            return {"verification": self.STATUS_FAILED, "state": "Chronicles 定义读取失败",
+                    "event_count": 0, "events": [], "reason": str(exc)}
+
+    def _world_diagnostic_goblin_camps(self):
+        """Count known goblin-camp object tiles in the currently loaded map.
+
+        The scan is explicit (only when the diagnostics panel is refreshed),
+        reads one row at a time, and never changes the map buffer. The local
+        block index is used only to obtain the current build's object IDs.
+        """
+        if not connected or not pm:
+            return {"verification": self.STATUS_UNSUPPORTED, "state": "未连接游戏",
+                    "reason": "哥布林营地只能从当前已载入地图的对象格读取。"}
+        try:
+            _ensure_resource_import_path()
+            from block_data import BLOCK_MAP
+            wanted = {}
+            for resource_id, info in (BLOCK_MAP or {}).items():
+                key = str((info or {}).get("en") or "").lower()
+                if key in ("spr_goblins_camp", "spr_cave_goblins_camp", "spr_christmass_goblin_camp"):
+                    wanted[int(resource_id)] = key
+            if not wanted:
+                return {"verification": self.STATUS_UNSUPPORTED, "state": "本地对象索引未找到哥布林营地",
+                        "reason": "不会用旧版本的固定对象 ID 猜测当前地图。"}
+            resolved = self._map_resolve()
+            if not resolved:
+                return {"verification": self.STATUS_UNSUPPORTED, "state": "当前地图未载入",
+                        "reason": "请进入存档地图后刷新。"}
+            data, width, height, _world_width, _world_height = resolved
+            started, stride = time.time(), self._map_row_stride(width)
+            groups = {resource_id: {"id": resource_id, "name": name, "count": 0, "positions": []}
+                      for resource_id, name in wanted.items()}
+            for row in range(height):
+                payload = pm.read_bytes(data + row * stride, stride)
+                if payload is None or len(payload) != stride:
+                    raise RuntimeError("地图第 %d 行读取不完整" % row)
+                for col in range(width):
+                    offset = col * self.MAP_COL_W
+                    raw = struct.unpack_from("<I", payload, offset)[0] & 0xFFFF
+                    inner = struct.unpack_from("<H", payload, offset + 2)[0]
+                    for layer, value in (("outer", raw), ("inner", inner)):
+                        if value not in groups:
+                            continue
+                        entry = groups[value]
+                        entry["count"] += 1
+                        if len(entry["positions"]) < 12:
+                            entry["positions"].append({"row": int(row), "col": int(col), "layer": layer})
+            rows = [entry for entry in groups.values() if entry["count"]]
+            return {"verification": self.STATUS_VERIFIED, "state": "已扫描当前地图对象格",
+                    "total": sum(entry["count"] for entry in rows), "camps": rows,
+                    "scan_ms": int((time.time() - started) * 1000),
+                    "reason": "结果来自当前已载入地图；计数为营地对象格数量，不是怪物数量。"}
+        except Exception as exc:
+            return {"verification": self.STATUS_FAILED, "state": "哥布林营地读取失败", "reason": str(exc)}
+
+    def get_world_diagnostics(self, refresh=False):
+        """Return a strict read-only task/world diagnostics snapshot.
+
+        This endpoint deliberately does not call get_pandora_status(), because
+        that legacy UI helper may auto-restore a one-shot event preset. Every
+        path here is read-only and values without a verified semantic mapping
+        remain explicitly labelled as such.
+        """
+        created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        tasks = self._world_diagnostic_task_definitions()
+        tasks["chronicles"] = self._world_diagnostic_chronicles_definitions()
+        tasks["runtime"] = self._world_diagnostic_task_runtime(tasks.get("definitions"), bool(refresh))
+        unavailable = lambda state, reason: {"verification": self.STATUS_UNSUPPORTED, "state": state, "reason": reason}
+        result = {
+            "ok": True, "read_only": True, "created_at": created_at,
+            "connection": "已连接" if connected and pm else "未连接",
+            "tasks": tasks,
+            "high_risk_assessment": {
+                "verification": self.STATUS_UNVERIFIED,
+                "feature": "任务完成 / 重置",
+                "state": "未开放",
+                "reason": "当前仅能以只读方式获得任务定义和运行时候选副本；尚未与真实进度、完成回调、奖励发放与 Chronicles 链路逐项对照。在此前不会写入。",
+            },
+            "weather": unavailable("天气 / 血月 / 温度 / 突发气候尚未读取", "未验证运行时结构，不能显示为 0 或晴天。"),
+            "blackboard": unavailable("Blackboard 世界字段尚未读取", "library_* 属于现有图书馆全局技能，不会冒充世界事件字段。"),
+            "kills": unavailable("击杀计数尚未读取", "未确认计数器所属对象及重置条件。"),
+        }
+        if not connected or not pm:
+            result.update({
+                "pandora": unavailable("未连接游戏", "请连接并进入已载入的地图后读取。"),
+                "waves": unavailable("未连接游戏", "请连接并进入已载入的地图后读取。"),
+                "goblin_camps": self._world_diagnostic_goblin_camps(),
+            })
+            return result
+        try:
+            module_base = int(base_addr or get_base())
+        except Exception:
+            module_base = 0
+        pandora, pandora_error = self._pandora_runtime_state(bool(refresh))
+        if pandora:
+            result["pandora"] = {
+                "verification": self.STATUS_VERIFIED,
+                "state": "当前地图存在潘多拉盒子" if pandora.get("exists") else "当前地图没有潘多拉盒子",
+                "chest_count": int(pandora.get("chest_count") or 0),
+                "spawn_timer_seconds": pandora.get("timer"),
+                "scan_ms": int(pandora.get("scan_ms") or 0),
+                "reason": pandora_error or "已按潘多拉生成器与盒子对象的已验证结构读取。",
+            }
+        else:
+            result["pandora"] = {"verification": self.STATUS_FAILED, "state": "潘多拉状态未读取",
+                                 "reason": pandora_error or "未能唯一定位潘多拉生成器。"}
+        try:
+            wave = self._wave_portal_status(module_base) if module_base else None
+            if not wave or int(wave.get("enabled", -1)) not in (0, 1):
+                result["waves"] = unavailable("怪物波次管理器未准备好", "未找到可信的当前地图波次管理器。")
+            elif int(wave.get("state", -1)) == 0 and int(wave.get("portals", 0)) == 0:
+                result["waves"] = {"verification": self.STATUS_VERIFIED, "state": "当前无进行中的波次或怪物传送门",
+                                   "enabled": bool(wave.get("enabled")), "portal_count": 0,
+                                   "reason": "已验证的空闲组合：state=0 且传送门列表为空。"}
+            else:
+                result["waves"] = {"verification": self.STATUS_UNVERIFIED, "state": "检测到非空闲波次管理器",
+                                   "enabled": bool(wave.get("enabled")), "portal_count": int(wave.get("portals") or 0),
+                                   "raw_state": int(wave.get("state") or 0),
+                                   "reason": "管理器结构已找到，但该非零 state 尚未逐一与游戏 UI 对照，不会猜测波次阶段。"}
+        except Exception as exc:
+            result["waves"] = {"verification": self.STATUS_FAILED, "state": "波次读取失败", "reason": str(exc)}
+        result["goblin_camps"] = self._world_diagnostic_goblin_camps()
+        return result
+
+    def set_pandora_spawn_timer(self, seconds):
+        """Set PandoraChestSpawner's next spawn countdown after full validation."""
+        try:
+            seconds = float(seconds)
+            if not math.isfinite(seconds) or seconds < 0.1 or seconds > 604800.0:
+                return {"ok": False, "error": "倒计时范围为 0.1～604800 游戏秒"}
+            status, error = self._pandora_runtime_state(True)
+            if not status or not status.get("spawner"):
+                return {"ok": False, "error": error or "未定位潘多拉生成器"}
+            hnd = self._suspend(pm.process_id)
+            if hnd is None:
+                return {"ok": False, "error": "无法暂停游戏以安全修改潘多拉倒计时"}
+            try:
+                # Revalidate after suspension so a map unload cannot turn this
+                # into a write to a reused heap allocation.
+                runtime, current_error = self._pandora_runtime_state(False)
+                if not runtime or int(runtime.get("spawner") or 0) != int(status["spawner"]):
+                    return {"ok": False, "error": current_error or "潘多拉生成器已变化，请重试"}
+                pm.write_float(int(status["timer_address"]), seconds)
+                actual = float(pm.read_float(int(status["timer_address"])))
+            finally:
+                self._resume(hnd)
+            if abs(actual - seconds) > 0.05:
+                return {"ok": False, "error": "潘多拉倒计时写入未确认"}
+            return {"ok": True, "timer": actual, "timer_address": int(status["timer_address"]),
+                    "message": "已修改潘多拉下一次生成倒计时"}
+        except Exception as e:
+            return {"ok": False, "error": "修改潘多拉倒计时失败：%s" % e}
+
+
+    def _read_region_chunks(self, region_base, region_size):
+        """Read memory with tiered fallback: 2MB->64KB->4KB. Yields (chunk_addr, chunk_bytes)"""
+        k32 = ctypes.windll.kernel32
+        pos = region_base
+        end = region_base + region_size
+        while pos < end:
+            chunk = None
+            # Tier 1: try 2MB
+            try:
+                sz = min(0x200000, end - pos)
+                chunk = pm.read_bytes(pos, sz)
+            except:
+                pass
+            # Tier 2: try 64KB
+            if chunk is None:
+                try:
+                    sz = min(0x10000, end - pos)
+                    chunk = pm.read_bytes(pos, sz)
+                except:
+                    pass
+            # Tier 3: try 4KB (single page)
+            if chunk is None:
+                try:
+                    sz = min(0x1000, end - pos)
+                    chunk = pm.read_bytes(pos, sz)
+                except:
+                    pass
+            if chunk is not None and len(chunk) > 0:
+                yield (pos, chunk)
+                pos += max(len(chunk) - 4, 1)  # overlap 4 bytes
+            else:
+                pos += 0x1000  # skip unreadable page
+
+    def _scan_dwarves_v2(self):
+        """V2: vtable AOB scan with tiered chunk reading (CE-style fallback)"""
+        global dwarf_cache
+        if not pm or not connected:
+            _set_cached_read_state("dwarves", self.STATUS_DISCONNECTED, "尚未连接游戏")
+            return []
+        import struct as _struct
+        k32 = ctypes.windll.kernel32
+        base = get_base()
+        dwarf_vtable = base + V2_DWARF_VTABLE_OFF
+        vt_bytes = _struct.pack("<I", dwarf_vtable)
+        res = []; seen_edis = set()
+        scanned = 0; failed = 0
+        class _MBI(ctypes.Structure):
+            _fields_ = [("BaseAddress",ctypes.c_void_p),("AllocationBase",ctypes.c_void_p),
+                       ("AllocationProtect",ctypes.c_uint32),("RegionSize",ctypes.c_size_t),
+                       ("State",ctypes.c_uint32),("Protect",ctypes.c_uint32),("Type",ctypes.c_uint32)]
+        mbi = _MBI(); addr = 0x10000000
+        while addr < 0x70000000:
+            if not k32.VirtualQueryEx(pm.process_handle, addr, ctypes.byref(mbi), ctypes.sizeof(mbi)):
+                addr += 0x100000; continue
+            if mbi.State != 0x1000 or mbi.Protect & 0x100 or mbi.RegionSize < 0x1000:
+                addr += mbi.RegionSize; continue
+            scanned += 1
+            region_ok = False
+            for chunk_addr, chunk in self._read_region_chunks(mbi.BaseAddress, mbi.RegionSize):
+                region_ok = True
+                pos = 0
+                while True:
+                    idx = chunk.find(vt_bytes, pos)
+                    if idx < 0: break
+                    edi = chunk_addr + idx
+                    pos = idx + 4
+                    if edi < 0x10000000 or edi in seen_edis: continue
+                    try:
+                        x = pm.read_float(edi + V2_DWARF_X)
+                        if x is None or x < 1000 or x > 13000: continue
+                        y = pm.read_float(edi + V2_DWARF_Y)
+                        if y is None or y < 1000 or y > 13000: continue
+                        g = pm.read_int(edi + V2_DWARF_GENDER)
+                        if g is None or (g != 0 and g != 1): continue
+                    except:
+                        continue
+                    seen_edis.add(edi)
+                    try:
+                        hp = pm.read_float(edi + V2_DWARF_HP_DISP)
+                        sat = pm.read_float(edi + V2_DWARF_SAT_DISP)
+                    except Exception:
+                        hp = None; sat = None
+                    gn = chr(0x7537) if (g or 0) == 0 else chr(0x5973)
+                    idx_n = len(res)
+                    name = self._dwarf_names.get(str(idx_n), "")
+                    res.append({"idx": idx_n, "edi": edi, "name": name,
+                                "x": "%.2f" % x, "y": "%.2f" % y,
+                                "hp": self._dwarf_hp_text(hp),
+                                "hp_status": "可用" if self._dwarf_hp_text(hp) != "—" else self.STATUS_FAILED,
+                                "sat": self._dwarf_satiety_text(sat),
+                                "sat_status": "可用" if self._dwarf_satiety_text(sat) != "—" else self.STATUS_FAILED,
+                                "gender": gn})
+            if not region_ok:
+                failed += 1
+            addr += mbi.RegionSize
+        if res:
+            _set_cached_read_state("dwarves", self.STATUS_VERIFIED)
+            return _replace_dwarf_cache(res)
+        state, error = self._runtime_read_unavailable_state()
+        _set_cached_read_state("dwarves", state, error)
+        return []
+
+    @staticmethod
+    def _v1_dwarf_name(edi, gender):
+        """Resolve a Steam V1 Worker's displayed name from its native index."""
+        try:
+            name_index = pm.read_int(int(edi) + V1_DWARF_NAME_INDEX)
+            table = V1_MALE_DWARF_NAMES if int(gender or 0) == 0 else V1_FEMALE_DWARF_NAMES
+            if 0 <= int(name_index) < len(table):
+                return table[int(name_index)]
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _read_secure_float(address, minimum=0.0, maximum=100000.0, tolerance=0.10):
+        """Read a duplicated encrypted float only when both copies agree."""
+        try:
+            a = pm.read_int(int(address))
+            b = pm.read_int(int(address) + 4)
+            k1 = pm.read_int(int(address) + 8)
+            k2 = pm.read_int(int(address) + 12)
+            if None in (a, b, k1, k2):
+                return None
+            first = struct.unpack("<f", struct.pack("<I", (int(a) ^ int(k1)) & 0xFFFFFFFF))[0]
+            second = struct.unpack("<f", struct.pack("<I", (int(b) ^ int(k2)) & 0xFFFFFFFF))[0]
+            if (not math.isfinite(first) or not math.isfinite(second) or
+                    first < minimum or second < minimum or
+                    first > maximum or second > maximum or
+                    abs(first - second) > tolerance):
+                return None
+            return float((first + second) * 0.5)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_u32(address):
+        """Read a 32-bit field without turning high user-space pointers negative.
+
+        CraftWorld is a 32-bit LargeAddressAware process. Its allocator may
+        legitimately place vector buffers above 0x80000000. ``pymem`` reads an
+        ``int`` as signed, so using that result directly made a valid skill
+        vector look corrupt whenever the buffer crossed that boundary.
+        """
+        value = pm.read_int(int(address))
+        return None if value is None else (int(value) & 0xFFFFFFFF)
+
+    @staticmethod
+    def _read_v1_personal_skill_id(record):
+        """Resolve a PersonalSkillRecord's native ASCII id without file I/O."""
+        try:
+            node = Api._read_u32(record)
+            return Api._read_v1_personal_skill_node_id(node)
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _read_v1_personal_skill_node_id(node):
+        """Resolve the id held by one personal-skill definition node."""
+        try:
+            node = int(node or 0) & 0xFFFFFFFF
+            if not node or not (0x10000 <= node < 0xFFF00000):
+                return ""
+            definition = Api._read_u32(node)
+            if not definition or not (0x10000 <= definition < 0xFFF00000):
+                return ""
+            raw = pm.read_bytes(definition + V1_DWARF_SKILL_DEF_ID_OFF, 32)
+            skill_id = bytes(raw).split(b"\0", 1)[0].decode("ascii", "ignore").strip().lower()
+            return skill_id if skill_id in V1_PERSONAL_SKILL_TITLES else ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _v1_personal_skill_vector_state(edi):
+        """Return a strictly validated Worker::personal-skills vector.
+
+        A dwarf with no personal skills owns a normal empty vector
+        {0,0,0}; that state is intentionally valid because the native
+        emplace helper can create its first allocation.
+        """
+        try:
+            vector = int(edi) + V1_DWARF_SKILL_VECTOR_OFF
+            begin = int(Api._read_u32(vector) or 0)
+            end = int(Api._read_u32(vector + 4) or 0)
+            cap = int(Api._read_u32(vector + 8) or 0)
+            if not begin and not end and not cap:
+                return {"address": vector, "begin": 0, "end": 0, "cap": 0, "count": 0}
+            if (not begin or not end or not cap or begin > end or end > cap or
+                    begin < 0x10000 or cap >= 0xFFF00000):
+                return None
+            span = end - begin
+            if span < 0 or span % V1_DWARF_SKILL_RECORD_SIZE:
+                return None
+            count = span // V1_DWARF_SKILL_RECORD_SIZE
+            if count > 32:
+                return None
+            return {"address": vector, "begin": begin, "end": end, "cap": cap, "count": count}
+        except Exception:
+            return None
+
+    def _resolve_v1_personal_skill_nodes(self):
+        """Find and verify all 14 native definition nodes from live data."""
+        try:
+            for worker in self._v1_dwarf_set():
+                state = self._v1_personal_skill_vector_state(worker)
+                if not state or not state["count"]:
+                    continue
+                for offset in range(0, state["count"] * V1_DWARF_SKILL_RECORD_SIZE, V1_DWARF_SKILL_RECORD_SIZE):
+                    record = state["begin"] + offset
+                    skill_id = self._read_v1_personal_skill_id(record)
+                    if not skill_id:
+                        continue
+                    node = int(pm.read_int(record) or 0)
+                    index = V1_PERSONAL_SKILL_ORDER.index(skill_id)
+                    table = node - index * V1_DWARF_SKILL_NODE_STRIDE
+                    if table < 0x10000:
+                        continue
+                    nodes = {
+                        known_id: table + known_index * V1_DWARF_SKILL_NODE_STRIDE
+                        for known_index, known_id in enumerate(V1_PERSONAL_SKILL_ORDER)
+                    }
+                    if all(self._read_v1_personal_skill_node_id(address) == known_id
+                           for known_id, address in nodes.items()):
+                        return nodes
+        except Exception:
+            pass
+        return {}
+
+    def _read_v1_personal_skills_snapshot(self, edi, attempts=3):
+        """Read one coherent Worker personal-skill vector snapshot.
+
+        The Worker update can replace the vector while the trainer is reading
+        it.  The former reader silently skipped an invalid record and exposed
+        the remaining list as if it were complete; a temporarily invalid
+        record therefore looked exactly like a dwarf with no skills.  Require
+        every record to validate and verify the vector again after the read.
+        """
+        attempts = max(1, int(attempts or 1))
+        for attempt in range(attempts):
+            try:
+                state = self._v1_personal_skill_vector_state(edi)
+                if not state:
+                    raise RuntimeError("personal skill vector is unstable")
+                if not state["count"]:
+                    return [], True
+
+                skills, seen = [], set()
+                complete = True
+                for offset in range(0, state["count"] * V1_DWARF_SKILL_RECORD_SIZE,
+                                    V1_DWARF_SKILL_RECORD_SIZE):
+                    record = int(state["begin"]) + offset
+                    skill_id = self._read_v1_personal_skill_id(record)
+                    value = self._read_secure_float(record + V1_DWARF_SKILL_VALUE_OFF)
+                    if (not skill_id or skill_id in seen or value is None or
+                            not math.isfinite(float(value)) or value < 0.0 or value > 1000000.0):
+                        complete = False
+                        break
+                    seen.add(skill_id)
+                    skills.append({
+                        "id": skill_id,
+                        "title": V1_PERSONAL_SKILL_TITLES[skill_id],
+                        "value": round(float(value), 3),
+                        "record": record,
+                    })
+
+                after = self._v1_personal_skill_vector_state(edi)
+                same_vector = bool(after and all(after.get(key) == state.get(key)
+                                                  for key in ("begin", "end", "cap", "count")))
+                if complete and same_vector and len(skills) == state["count"]:
+                    return skills, True
+            except Exception:
+                pass
+            # Yield once to the game update rather than publishing a partial
+            # list as a real editable result.
+            if attempt + 1 < attempts:
+                time.sleep(0.006)
+        return [], False
+
+    def _read_v1_personal_skills(self, edi):
+        """Return only a complete personal-skill list for existing callers."""
+        return self._read_v1_personal_skills_snapshot(edi)[0]
+
+    @staticmethod
+    def _dwarf_satiety_text(value, previous=None):
+        """Format a safe satiety display without ever leaking NaN to the UI."""
+        for candidate in (value, previous):
+            try:
+                number = float(candidate)
+                if math.isfinite(number) and 0.0 <= number <= 10.01:
+                    return "%.1f" % number
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return "—"
+
+    @staticmethod
+    def _dwarf_hp_text(value):
+        """Format HP honestly: an unreadable SecureFloat is never shown as 0."""
+        try:
+            number = float(value)
+            if math.isfinite(number) and 0.0 <= number <= 100000.0:
+                return "%.1f" % number
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return "—"
+
+    @staticmethod
+    def _personal_skill_summary(skills):
+        if not skills:
+            return "—"
+        return "、".join("%s %s" % (
+            item.get("title", item.get("id", "")),
+            ("%.3f" % float(item.get("value", 0))).rstrip("0").rstrip("."),
+        ) for item in skills)
+
+    def _v1_dwarf_vector_count(self):
+        """Return the authoritative V1 Worker-vector length, or None on failure."""
+        try:
+            base = get_base()
+            mgr = int(pm.read_int(base + 0xDC3614) or 0) & 0xFFFFFFFF
+            if not self._valid_runtime_pointer(mgr):
+                return None
+            begin = int(pm.read_int(mgr + 0x40) or 0) & 0xFFFFFFFF
+            end = int(pm.read_int(mgr + 0x44) or 0) & 0xFFFFFFFF
+            if (not self._valid_runtime_pointer(begin) or not self._valid_runtime_pointer(end) or
+                    end < begin or (end - begin) % 4 or (end - begin) // 4 > 256):
+                return None
+            return (end - begin) // 4
+        except Exception:
+            return None
+
+    def scan_dwarves_stable(self, max_wait=1.2):
+        """Read the Worker list until the live vector is complete or settles.
+
+        The game's vector can expose a freshly created Worker before its
+        position/SecureFloat fields are initialized.  Keeping the largest
+        complete sample prevents the UI from briefly presenting a smaller
+        roster as if those dwarves no longer existed.
+        """
+        if not pm or not connected or self._detect_v2():
+            return self.scan_dwarves()
+        expected = self._v1_dwarf_vector_count()
+        best = []
+        deadline = time.monotonic() + max(0.0, min(float(max_wait), 2.0))
+        while True:
+            rows = self.scan_dwarves()
+            if len(rows) >= len(best):
+                best = rows
+            if expected is None or len(best) >= expected or time.monotonic() >= deadline:
+                break
+            time.sleep(0.10)
+        # A short vector read is not a smaller roster.  It is an incomplete
+        # snapshot while the game rebuilds Worker objects.  Do not publish it
+        # as a valid list and make users believe dwarves disappeared.
+        if expected is not None and len(best) < expected:
+            _set_cached_read_state(
+                "dwarves", self.STATUS_STALE,
+                "矮人列表读取不完整：已验证 %s/%s 个对象；请稍候刷新，未将其显示为缺失矮人" %
+                (len(best), expected))
+            return []
+        # scan_dwarves updates the global cache on every pass. Restore the
+        # largest coherent snapshot if a final transient pass was shorter.
+        if best:
+            _set_cached_read_state("dwarves", self.STATUS_VERIFIED)
+            return _replace_dwarf_cache(best)
+        if expected == 0:
+            _set_cached_read_state("dwarves", self.STATUS_EMPTY, "当前存档没有矮人数据")
+        return []
+
+    def scan_dwarves(self):
+        """扫描并缓存所有矮人数据"""
+        global dwarf_cache
+        try:
+            if not pm or not connected:
+                _set_cached_read_state("dwarves", self.STATUS_DISCONNECTED, "尚未连接游戏")
+                return []
+            if self._detect_v2():
+                return self._scan_dwarves_v2()
+            # V1 exposes the same manager through a stable module global.
+            # Do not patch a live game function merely to capture ECX: that
+            # five-byte jump was racy and could leave damaged code on errors.
+            base = get_base()
+            mgr = int(pm.read_int(base + 0xDC3614) or 0) & 0xFFFFFFFF
+            if not self._valid_runtime_pointer(mgr):
+                state, error = self._runtime_read_unavailable_state()
+                _set_cached_read_state("dwarves", state, error)
+                return []
+            sp = int(pm.read_int(mgr + 0x40) or 0) & 0xFFFFFFFF
+            ep = int(pm.read_int(mgr + 0x44) or 0) & 0xFFFFFFFF
+            if not sp or not ep or ep < sp or (ep - sp) % 4 or (ep - sp) // 4 > 256:
+                _set_cached_read_state("dwarves", self.STATUS_STALE,
+                                       "矮人列表结构无效；可能正在切换存档或当前版本定位失效")
+                return []
+            res=[]
+            for i in range((ep-sp)//4):
+                edi=pm.read_int(sp+i*4)
+                # pymem.read_int is signed; normalize a 32-bit pointer before
+                # using it as an address (Workers may live above 0x80000000).
+                edi = int(edi or 0) & 0xFFFFFFFF
+                # The manager vector can retain freed/non-Worker entries while
+                # a world is loading. One bad pointer must not discard all
+                # valid dwarves that precede it.
+                if not self._valid_runtime_pointer(edi):
+                    continue
+                try:
+                    x=pm.read_float(edi+0x428)
+                    y=pm.read_float(edi+0x42C)
+                    # Coordinates are presentation data, not Worker identity.
+                    # Pandora can deliver a valid dwarf at the surface with
+                    # Y < 1000, so keep only a broad finite/range guard.
+                    if (x is None or y is None or not math.isfinite(float(x)) or
+                            not math.isfinite(float(y)) or
+                            not (-5000.0 <= float(x) <= 100000.0) or
+                            not (-5000.0 <= float(y) <= 100000.0)):
+                        continue
+                    # +0xBD0 is only a renderer/update cache. It can temporarily
+                    # be NaN while the game is rebuilding the character panel.
+                    # Read the duplicated encrypted value instead; this is the
+                    # same authoritative HP value used by the safe write path.
+                    hp=self._read_live_dwarf_hp(edi, False)
+                    # +0xBCC is a renderer cache and can be NaN during a Worker
+                    # rebuild. The paired SecureFloat at +0x1A4 is authoritative.
+                    sat=self._read_live_dwarf_satiety(edi, False)
+                    g=pm.read_int(edi+0x68)
+                    # Some valid Workers use a non-zero role/gender marker
+                    # (101 in the current save) rather than the old literal 1.
+                    # Pointer, position and encrypted attributes above already
+                    # validate the object, so do not discard that dwarf solely
+                    # because the presentation marker is non-standard.
+                    if g is None or not (0 <= int(g) <= 0xFF):
+                        continue
+                    gn=chr(0x7537) if g==0 else chr(0x5973)
+                    # Optional fields must never determine whether a valid Worker
+                    # appears in the list. During UI/world rebuilds the embedded
+                    # skill/name records can briefly be unavailable.
+                    try:
+                        name=self._v1_dwarf_name(edi, g) or self._dwarf_names.get(str(i),"")
+                    except Exception:
+                        name=self._dwarf_names.get(str(i),"")
+                    personal_skills, skills_ready = [], False
+                    try:
+                        personal_skills, skills_ready = self._read_v1_personal_skills_snapshot(edi)
+                    except Exception:
+                        pass
+                    res.append({"idx":i,"edi":edi,"name":name,"x":"%.2f"%x,"y":"%.2f"%y,
+                                "hp":self._dwarf_hp_text(hp),
+                                "hp_status":"可用" if self._dwarf_hp_text(hp) != "—" else "读取失败",
+                                "sat":self._dwarf_satiety_text(sat),
+                                "sat_status":"可用" if self._dwarf_satiety_text(sat) != "—" else "读取失败",
+                                "gender":gn,
+                                "skills": personal_skills,
+                                "skills_ready": skills_ready,
+                                "skill_summary": (self._personal_skill_summary(personal_skills)
+                                                  if skills_ready else "读取中…")})
+                except (OSError, ValueError, TypeError, OverflowError):
+                    continue
+            if res:
+                _set_cached_read_state("dwarves", self.STATUS_VERIFIED)
+                return _replace_dwarf_cache(res)
+            state = self.STATUS_EMPTY if ep == sp else self.STATUS_STALE
+            error = ("当前存档没有矮人数据" if state == self.STATUS_EMPTY
+                     else "矮人列表存在条目，但没有任何条目通过对象校验")
+            _set_cached_read_state("dwarves", state, error)
+            return []
+        except Exception as exc:
+            _set_cached_read_state("dwarves", self.STATUS_STALE,
+                                   "矮人读取异常：%s" % exc)
+            return []
+
+    def get_dwarves(self): return _dwarf_cache_snapshot()
+
+    def get_dwarves_status(self):
+        """Return dwarves with a visible state instead of a bare ambiguous list."""
+        state = _get_cached_read_state("dwarves")
+        rows = _dwarf_cache_snapshot()
+        if state.get("state") == self.STATUS_VERIFIED:
+            return self._read_envelope(True, self.STATUS_VERIFIED, rows, count=len(rows))
+        if state.get("state") == self.STATUS_EMPTY:
+            # This is a confirmed property of the loaded save, not a failed
+            # vector read.  Keep it distinct from a stale/unsupported roster.
+            return self._read_envelope(True, self.STATUS_EMPTY, [],
+                                       state.get("error") or "当前存档没有矮人数据", count=0)
+        return self._read_envelope(False, state.get("state") or self.STATUS_FAILED, [],
+                                   state.get("error") or "矮人数据未就绪", cached_count=len(rows))
+
+    def get_creature_list(self, refresh=False):
+        """Return the first verified creature roster for the unified list page.
+
+        Dwarves use the existing complete roster cache and pets use the
+        authoritative EnemyManager/Pet component scan.  Monster objects are
+        intentionally reported as an unverified category until their runtime
+        type/name mapping is confirmed; an unknown count is never presented as
+        a fabricated zero.
+        """
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "未连接游戏", "dwarves": None, "pets": None,
+                    "creatures": None, "categories": []}
+        try:
+            # Creature rows contain live object addresses.  The Worker manager can
+            # rebuild those objects between UI ticks, so the ordinary dwarf cache
+            # may still carry an address that now belongs to a different runtime
+            # object.  Re-scan the small Worker vector for every creature refresh
+            # before pairing current / maximum HP.
+            dwarf_result = self.scan_dwarves_status()
+            dwarf_state = dwarf_result.get("state") if isinstance(dwarf_result, dict) else self.STATUS_FAILED
+            dwarves = (dwarf_result.get("data") if isinstance(dwarf_result, dict) else None)
+            if not isinstance(dwarves, list):
+                dwarves = []
+            pet_result = self.get_pet_houses(bool(refresh))
+            pets = (pet_result.get("pets") if isinstance(pet_result, dict) else None)
+            if not isinstance(pets, list):
+                pets = []
+            monster_rows, monster_error = self._read_active_monster_records(int(get_base()))
+            if monster_rows is None:
+                monster_rows = []
+            creatures = []
+            map_data = self._map_resolve()
+            map_w = int(map_data[1]) if map_data else 0
+            map_h = int(map_data[2]) if map_data else 0
+            world_w = float(map_data[3]) if map_data else 0.0
+            world_h = float(map_data[4]) if map_data else 0.0
+            is_v2 = self._detect_v2()
+            for row in dwarves:
+                entry = dict(row)
+                # The roster historically returned only a formatted current
+                # HP string.  Keep that presentation field, but attach the
+                # authoritative current/max pair for the creature filters.
+                # A failed read remains explicit; it is never converted to 0.
+                entry["hp_value"] = None
+                entry["hp_max"] = None
+                entry["hp_state"] = self.STATUS_UNVERIFIED
+                entry["hp_reason"] = "矮人最大生命值尚未读取"
+                try:
+                    edi = int(entry.get("edi") or 0)
+                    # The game updates the two encrypted copies on its update
+                    # thread. Take two very short coherent samples so a single
+                    # copy-refresh frame does not make the UI alternate between
+                    # verified and pending.
+                    hp_value = hp_max = None
+                    for _health_sample in range(2):
+                        sample_hp = self._read_live_dwarf_hp(edi, is_v2)
+                        sample_max = self._read_live_dwarf_max_hp(edi, is_v2)
+                        if (sample_hp is not None and sample_max is not None and
+                                math.isfinite(float(sample_hp)) and math.isfinite(float(sample_max)) and
+                                0.0 <= float(sample_hp) <= float(sample_max) and float(sample_max) > 0.0):
+                            hp_value, hp_max = sample_hp, sample_max
+                            break
+                        time.sleep(0.008)
+                    if hp_value is not None and hp_max is not None:
+                        entry["hp_value"] = round(float(hp_value), 2)
+                        entry["hp_max"] = round(float(hp_max), 2)
+                        entry["hp_state"] = self.STATUS_VERIFIED
+                        entry["hp_reason"] = "矮人 SecureFloat 当前生命 / 最大生命"
+                except Exception as hp_exc:
+                    entry["hp_reason"] = "矮人生命读取失败：%s" % hp_exc
+                if (entry.get("hp_state") == self.STATUS_VERIFIED and
+                        entry.get("hp_value") is not None and
+                        float(entry.get("hp_value")) <= 0.0):
+                    # A confirmed zero-HP Worker is already dead or in the
+                    # engine's removal transition; do not present it as an
+                    # active dwarf row.
+                    continue
+                try:
+                    dx, dy = float(entry.get("x")), float(entry.get("y"))
+                    if map_w > 0 and map_h > 0 and world_w > 0 and world_h > 0:
+                        entry["col"] = max(0, min(map_w - 1, int(dx * map_w / world_w)))
+                        entry["row"] = max(0, min(map_h - 1, int(dy * map_h / world_h)))
+                        entry["coords_state"] = self.STATUS_VERIFIED
+                        entry["coords_reason"] = "矮人世界坐标已换算为地图列 / 行"
+                    else:
+                        entry["coords_state"] = self.STATUS_UNVERIFIED
+                        entry["coords_reason"] = "地图尺寸暂未读取，保留矮人世界坐标"
+                except (TypeError, ValueError):
+                    entry["col"] = entry["row"] = None
+                    entry["coords_state"] = self.STATUS_UNVERIFIED
+                    entry["coords_reason"] = "矮人世界坐标读取失败"
+                # Health cache identity must follow the live Worker object,
+                # not the vector index.  The game can reorder/rebuild Workers;
+                # an index-based key then briefly assigns one dwarf's old HP
+                # to another dwarf and produces the visible 8.0/5.8 flicker.
+                live_identity = entry.get("edi") or entry.get("address") or entry.get("idx", "")
+                try:
+                    live_identity = "%08X" % (int(live_identity) & 0xFFFFFFFF)
+                except (TypeError, ValueError):
+                    live_identity = str(live_identity)
+                entry.update({"creature_type": "dwarf", "creature_title": "矮人",
+                              "stable_id": "dwarf:%s" % live_identity})
+                creatures.append(entry)
+            for row in pets:
+                entry = dict(row)
+                entry.update({"creature_type": "pet", "creature_title": "宠物",
+                              "stable_id": "pet:%s" % entry.get("address", "")})
+                creatures.append(entry)
+            for row in monster_rows:
+                entry = dict(row)
+                group = "monster" if entry.get("category") == "monster" else "other"
+                entry.update({"creature_type": group, "creature_title": "怪物" if group == "monster" else "其它生物",
+                              "stable_id": "monster:%s" % entry.get("address", "")})
+                creatures.append(entry)
+            dwarf_ok = bool(isinstance(dwarf_result, dict) and dwarf_result.get("ok") and
+                             dwarf_state in (self.STATUS_VERIFIED, self.STATUS_EMPTY))
+            pet_ok = bool(isinstance(pet_result, dict) and pet_result.get("ok"))
+            monster_entries = [row for row in monster_rows if row.get("category") == "monster"]
+            other_entries = [row for row in monster_rows if row.get("category") != "monster"]
+            unknown_monsters = sum(1 for row in monster_rows if not row.get("type_verified"))
+            creature_state = (self.STATUS_FAILED if monster_error else
+                              (self.STATUS_UNVERIFIED if unknown_monsters else self.STATUS_VERIFIED))
+            categories = [
+                {"key": "dwarf", "title": "矮人", "state": dwarf_state or self.STATUS_FAILED,
+                 "count": len(dwarves) if dwarf_ok else None},
+                {"key": "pet", "title": "宠物", "state": pet_result.get("state", self.STATUS_FAILED) if isinstance(pet_result, dict) else self.STATUS_FAILED,
+                 "count": len(pets) if pet_ok else None},
+                {"key": "monster", "title": "怪物", "state": creature_state,
+                 "count": len(monster_entries) if not monster_error else None,
+                 "reason": (monster_error or ("%d 个怪物类型尚未完成名称映射；仍保留真实对象地址和 vtable。" % unknown_monsters
+                                           if unknown_monsters else "当前怪物对象均已完成运行时类型映射。"))},
+                {"key": "other", "title": "其它生物", "state": creature_state,
+                 "count": len(other_entries) if not monster_error else None,
+                 "reason": (monster_error or "动物、自然生物等运行时对象；当前只读，不开放属性或删除操作。")},
+            ]
+            if not dwarf_ok and not pet_ok:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "矮人和宠物均未完成可靠读取", "dwarves": None,
+                        "pets": None, "creatures": None, "categories": categories}
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "dwarves": dwarves, "pets": pets, "creatures": creatures,
+                    "categories": categories,
+                    "map": ({"width": map_w, "height": map_h,
+                             "world_width": world_w, "world_height": world_h}
+                            if map_w > 0 and map_h > 0 and world_w > 0 and world_h > 0 else None),
+                    "monster_note": categories[-1]["reason"],
+                    "summary": "已读取 %d 名矮人、%d 只活动宠物、%d 个怪物对象；怪物当前只读。" % (len(dwarves), len(pets), len(monster_rows))}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "生物列表读取失败：%s" % exc,
+                    "dwarves": None, "pets": None, "creatures": None, "categories": []}
+
+    def scan_dwarves_status(self):
+        self.scan_dwarves_stable()
+        return self.get_dwarves_status()
+
+    def _v1_equipment_class_map(self):
+        """Return the installed game's safe equip-resource class map.
+
+        The game's ResourceSlot records deliberately do not expose their XML
+        class as a stable field.  Pairing the live table with the installed
+        craft_resources*.xml definitions is both safer and more complete than
+        guessing from an item name.  Equipment supplied by a mod lives in its
+        own ``mods/<mod>/data`` directory, not GAME_DATA_DIR, so include those
+        definitions as well.  Consumables, ammunition and hidden
+        character-only resources are excluded here, before the UI can ever
+        submit their ids to a Worker equipment field.
+        """
+        cached = getattr(self, "_v1_equipment_class_map_cache", None)
+        if cached is not None:
+            return cached
+        classes = {}
+        try:
+            definition_files = []
+            for filename in os.listdir(GAME_DATA_DIR):
+                match = re.fullmatch(r"craft_resources(?:_(\d+))?\.xml", filename, re.I)
+                if match:
+                    definition_files.append(((0, int(match.group(1) or 0), filename.lower()),
+                                             os.path.join(GAME_DATA_DIR, filename)))
+
+            # The installed checkmate-style mods use the same resource schema
+            # as the base game, but their XML files are outside ``data``.
+            # Mod entries intentionally come last so an explicit mod override
+            # of a base resource keeps the class used by the running game.
+            mods_dir = os.path.join(GAME_ROOT, "mods")
+            if os.path.isdir(mods_dir):
+                for root, _dirs, files in os.walk(mods_dir):
+                    if os.path.basename(root).lower() != "data":
+                        continue
+                    for filename in files:
+                        match = re.fullmatch(r"craft_resources(?:_(\d+))?\.xml", filename, re.I)
+                        if match:
+                            definition_files.append(((1, root.casefold(), int(match.group(1) or 0),
+                                                      filename.casefold()), os.path.join(root, filename)))
+
+            for _order, path in sorted(definition_files, key=lambda entry: entry[0]):
+                # A few popular mods ship resource XML with non-XML-compatible
+                # legacy text in an unrelated entry.  ElementTree then refuses
+                # the whole file, even though the resource start tags we need
+                # are perfectly regular.  Prefer strict XML, then safely fall
+                # back to just those attribute tags; this never executes or
+                # interprets the malformed body content.
+                definitions = []
+                try:
+                    root = ET.parse(path).getroot()
+                    definitions = [dict(resource.attrib) for resource in root.iter("resource")]
+                except Exception:
+                    try:
+                        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
+                            raw_xml = handle.read()
+                        for match in re.finditer(r"<resource\b(?P<attrs>[^>]*)>", raw_xml,
+                                                 flags=re.I | re.S):
+                            attrs = {
+                                key.lower(): value
+                                for key, _quote, value in re.findall(
+                                    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"])(.*?)\2",
+                                    match.group("attrs"), flags=re.S)
+                            }
+                            if attrs:
+                                definitions.append(attrs)
+                    except Exception:
+                        continue
+                for resource in definitions:
+                    item_id = str(resource.get("name", "") or "").strip().lower()
+                    slot_class = str(resource.get("class", "") or "").strip().lower()
+                    application = str(resource.get("application", "") or "").strip().lower()
+                    if (not item_id or slot_class not in V1_DWARF_EQUIPMENT_CLASSES or
+                            application != "equip"):
+                        continue
+                    flags = {
+                        part.strip().lower().split("=", 1)[0]
+                        for part in str(resource.get("properties", "") or "").split(",")
+                        if part.strip()
+                    }
+                    # These are projectiles/hidden support records.  They may
+                    # share class="weapon", but are not legal Worker gear.
+                    if "no_char_inv" in flags or "no_inv" in flags:
+                        continue
+                    classes[item_id] = slot_class
+        except Exception:
+            classes = {}
+        self._v1_equipment_class_map_cache = classes
+        return classes
+
+    def _v1_equipment_catalog(self):
+        """Join live ResourceSlot ids to the legal classes of equipment."""
+        self._load_item_config()
+        try:
+            module_base = int(get_base())
+            world = int(pm.read_int(module_base + ITEM_BASE_OFFSET) or 0)
+            resource_begin, resource_end = _get_item_array(pm, is_v2=False)
+            cache_key = (world, int(resource_begin or 0), int(resource_end or 0))
+            cached = getattr(self, "_v1_equipment_catalog_cache", None)
+            if cached and cached[0] == cache_key:
+                return cached[1], ""
+        except Exception:
+            cache_key = None
+        resources, error = self._recipe_resource_catalog()
+        if not resources:
+            return None, error
+        classes = self._v1_equipment_class_map()
+        if not classes:
+            return None, "未读取到游戏装备定义"
+        legal_by_class = {slot_class: [] for slot_class in V1_DWARF_EQUIPMENT_CLASSES}
+        by_index = {}
+        for entry in resources.get("materials", []):
+            item_id = str(entry.get("id", "") or "").strip()
+            slot_class = classes.get(item_id.lower())
+            index = entry.get("index")
+            if slot_class not in legal_by_class or index is None:
+                continue
+            item = {
+                "value": int(index),
+                "id": item_id,
+                "name": self._recipe_item_label(item_id, entry.get("name", "")),
+                "class": slot_class,
+            }
+            legal_by_class[slot_class].append(item)
+            by_index[int(index)] = item
+        for slot_class in legal_by_class:
+            legal_by_class[slot_class].sort(key=lambda item: (
+                str(item.get("name", "")).casefold(), str(item.get("id", "")).casefold()
+            ))
+        # ``all_by_index`` is deliberately broader than the selectable list.
+        # It lets the editor identify an equipped item even when a newly added
+        # mod has a non-standard XML class.  Such an item is still not offered
+        # as a replacement unless its class passes the strict filter above.
+        result = {"by_class": legal_by_class, "by_index": by_index,
+                  "all_by_index": dict(resources.get("by_index", {}))}
+        if cache_key is not None:
+            self._v1_equipment_catalog_cache = (cache_key, result)
+        return result, ""
+
+    @staticmethod
+    def _clean_dwarf_equipment_preset(value):
+        """Keep only portable equipment choices from a feature preset.
+
+        Omitted keys mean "do not change".  ``-1`` intentionally remains a
+        real choice and means "remove this slot"; it must never be confused
+        with omission when a preset is restored.
+        """
+        clean = {}
+        if not isinstance(value, dict):
+            return clean
+        for raw_key, raw_value in value.items():
+            definition = V1_DWARF_EQUIPMENT_BY_KEY.get(str(raw_key or ""))
+            if not definition or isinstance(raw_value, bool):
+                continue
+            try:
+                numeric = int(raw_value)
+                if isinstance(raw_value, float) and raw_value != numeric:
+                    continue
+                if numeric < -1 or numeric > 10000:
+                    continue
+                clean[definition["key"]] = numeric
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return clean
+
+    def get_dwarf_spawn_options(self):
+        """Return only game-backed choices for the native Worker creator."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "矮人原生生成功能目前只支持 Steam 原版"}
+        return {
+            "ok": True,
+            "state": self.STATUS_VERIFIED,
+            "max_skills": self.PERSONAL_SKILL_MAX_PER_DWARF,
+            "names": {
+                "male": [{"index": index, "name": name}
+                         for index, name in enumerate(V1_MALE_DWARF_NAMES)],
+                "female": [{"index": index, "name": name}
+                           for index, name in enumerate(V1_FEMALE_DWARF_NAMES)],
+            },
+            "skills": [{"id": skill_id, "name": V1_PERSONAL_SKILL_TITLES[skill_id]}
+                       for skill_id in V1_PERSONAL_SKILL_ORDER
+                       if skill_id in V1_PERSONAL_SKILL_TITLES],
+            "note": "不指定名字或技能时，分别保留游戏原生的随机名称与随机个人技能。选择任意技能后，会以所选技能替换该矮人的随机个人技能。",
+        }
+
+    def _find_v1_main_warehouse(self, module_base):
+        """Locate one live MainWarehouseEntity without relying on a stale pointer.
+
+        The native Worker creator is a MainWarehouseEntity member function.  A
+        vtable scan plus its pending flag and SSO string layout gives a much
+        stronger identity check than remembering the address from a previous
+        map or process.
+        """
+        expected_vtable = int(module_base) + self.V1_MAIN_WAREHOUSE_VTABLE_RVA
+        try:
+            pattern = struct.pack("<I", expected_vtable & 0xFFFFFFFF)
+            hits = pymem.pattern.pattern_scan_all(pm.process_handle, pattern,
+                                                  return_multiple=True) or []
+            image_end = int(module_base)
+            try:
+                image_end += int(pymem.process.module_from_name(
+                    pm.process_handle, MODULE_NAME).SizeOfImage)
+            except Exception:
+                image_end = int(module_base)
+            candidates = []
+            for raw_address in hits:
+                address = int(raw_address or 0) & 0xFFFFFFFF
+                if (not self._valid_runtime_pointer(address) or
+                        int(module_base) <= address < image_end):
+                    continue
+                if (int(pm.read_int(address) or 0) & 0xFFFFFFFF) != expected_vtable:
+                    continue
+                pending = bytes(pm.read_bytes(address + 0x32A, 1) or b"")
+                sso = bytes(pm.read_bytes(address + 0x334, 24) or b"")
+                if len(pending) != 1 or len(sso) != 24:
+                    continue
+                length, capacity = struct.unpack_from("<II", sso, 16)
+                if length > 15 or capacity != 15:
+                    continue
+                label = sso[:length].decode("ascii", "ignore")
+                if len(label) != length or any(ord(char) < 0x20 or ord(char) > 0x7E
+                                                for char in label):
+                    continue
+                candidates.append({"address": address, "pending": pending[0],
+                                   "label": label})
+            if len(candidates) == 1:
+                return candidates[0], ""
+            if not candidates:
+                return None, "未定位到当前存档的主仓库对象"
+            return None, "检测到多个主仓库候选对象，拒绝猜测创建目标"
+        except Exception as exc:
+            return None, "读取主仓库对象失败：%s" % exc
+
+    @staticmethod
+    def _v1_worker_type(worker):
+        try:
+            raw = bytes(pm.read_bytes(int(worker) + 0x5C, 24) or b"")
+            return raw.split(b"\0", 1)[0].decode("ascii", "ignore").strip().lower()
+        except Exception:
+            return ""
+
+    def _record_nonreversible_native_spawn(self, generation, pm_obj, before, after,
+                                           request, dwarf):
+        """Keep a truthful audit item without offering an unsafe 'undo spawn'."""
+        entry = self._record_operation(
+            "native_dwarf_spawn", "runtime",
+            {"worker": "0x%08X" % int(dwarf.get("edi", 0) or 0),
+             "dwarf_index": int(dwarf.get("idx", -1)),
+             "name": dwarf.get("name") or "新矮人"},
+            "原生矮人生成", before, after, True, generation,
+            getattr(pm_obj, "process_id", None),
+            {"gender": request.get("gender"), "name_index": request.get("name_index"),
+             "skills": [row.get("id") for row in request.get("skills", [])],
+             "note": "由 MainWarehouseEntity 原生创建；创建新对象不提供不安全的撤销。"})
+        with self._operation_history_lock:
+            for item in reversed(self._operation_history):
+                if int(item.get("id", -1)) == int(entry.get("id", -1)):
+                    item["undo_available"] = False
+                    item["undo_reason"] = "原生创建的新矮人不能安全撤销"
+                    return self._operation_history_value(item)
+        return entry
+
+    def spawn_native_dwarf(self, gender="random", name=None, skills=None):
+        """Create one Worker through MainWarehouseEntity's normal game path.
+
+        Python submits only a compact request.  The game owns object allocation,
+        AI-vector registration, spawn effects and its random defaults; optional
+        name and personal skills are applied only after a fresh live-object
+        readback confirms the newly created Worker.
+        """
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏并进入已加载的存档"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "矮人原生生成功能目前只支持 Steam 原版"}
+
+        requested_gender = str(gender or "random").strip().lower()
+        gender_codes = {
+            "": ("random", self.NATIVE_DWARF_SPAWN_GENDER_RANDOM),
+            "random": ("random", self.NATIVE_DWARF_SPAWN_GENDER_RANDOM),
+            "male": ("male", self.NATIVE_DWARF_SPAWN_GENDER_MALE),
+            "female": ("female", self.NATIVE_DWARF_SPAWN_GENDER_FEMALE),
+            "男": ("male", self.NATIVE_DWARF_SPAWN_GENDER_MALE),
+            "女": ("female", self.NATIVE_DWARF_SPAWN_GENDER_FEMALE),
+        }
+        if requested_gender not in gender_codes:
+            return {"ok": False, "error": "性别选择无效"}
+        normalized_gender, gender_code = gender_codes[requested_gender]
+
+        name_gender, name_index = "", None
+        if name not in (None, "", {}):
+            if not isinstance(name, dict):
+                return {"ok": False, "error": "名字选择数据无效"}
+            name_gender = str(name.get("gender", "") or "").strip().lower()
+            if name_gender in ("男", "male"):
+                name_gender = "male"
+            elif name_gender in ("女", "female"):
+                name_gender = "female"
+            else:
+                return {"ok": False, "error": "名字池性别无效"}
+            try:
+                name_index = int(name.get("index"))
+            except (TypeError, ValueError, OverflowError):
+                return {"ok": False, "error": "名字编号无效"}
+            name_table = V1_MALE_DWARF_NAMES if name_gender == "male" else V1_FEMALE_DWARF_NAMES
+            if not 0 <= name_index < len(name_table):
+                return {"ok": False, "error": "名字编号超出游戏名字池范围"}
+            if normalized_gender == "random":
+                normalized_gender, gender_code = gender_codes[name_gender]
+            elif normalized_gender != name_gender:
+                return {"ok": False, "error": "所选名字池与性别选择不一致"}
+
+        selected_skills, seen_skills = [], set()
+        if skills is None:
+            skills = []
+        if not isinstance(skills, (list, tuple)) or len(skills) > self.PERSONAL_SKILL_MAX_PER_DWARF:
+            return {"ok": False, "error": "个人技能最多选择 3 项"}
+        try:
+            for raw in skills:
+                if not isinstance(raw, dict):
+                    continue
+                skill_id = str(raw.get("id", "") or "").strip().lower()
+                if not skill_id:
+                    continue
+                value = float(raw.get("value", 10.0))
+                if (skill_id not in V1_PERSONAL_SKILL_TITLES or skill_id in seen_skills or
+                        not math.isfinite(value) or value < 0.0 or value > 100000.0):
+                    return {"ok": False, "error": "个人技能、数值或重复选择无效"}
+                selected_skills.append({"id": skill_id, "value": value})
+                seen_skills.add(skill_id)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "个人技能数值无效"}
+
+        request_info = {"gender": normalized_gender, "name_index": name_index,
+                        "name_gender": name_gender, "skills": selected_skills}
+        expected_type = {"male": "worker", "female": "worker_female"}.get(normalized_gender)
+        with self._wave_portal_lock, self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "error": "游戏连接已失效，请重新连接后再试"}
+            try:
+                module_base = int(get_base())
+                native_address = module_base + self.V1_NATIVE_DWARF_SPAWN_RVA
+                if (pm.read_bytes(native_address, len(self.V1_NATIVE_DWARF_SPAWN_PREFIX)) !=
+                        self.V1_NATIVE_DWARF_SPAWN_PREFIX):
+                    return {"ok": False, "error": "矮人原生创建函数与当前游戏版本不匹配"}
+                warehouse, warehouse_error = self._find_v1_main_warehouse(module_base)
+                if not warehouse:
+                    return {"ok": False, "error": warehouse_error}
+                if int(warehouse.get("pending", 0)) != 0:
+                    return {"ok": False, "error": "游戏正在原生生成矮人，请稍候重试"}
+                controller, controller_error = self._ensure_wave_portal_controller()
+                if not controller:
+                    return {"ok": False, "error": controller_error}
+                data = int(controller["data"])
+                queue_request = data + self.NATIVE_DWARF_SPAWN_QUEUE_REQUEST_OFF
+                queue_result = data + self.NATIVE_DWARF_SPAWN_QUEUE_RESULT_OFF
+                if int(pm.read_int(queue_request) or 0):
+                    return {"ok": False, "error": "上一条矮人生成请求仍在等待游戏处理"}
+                before_workers = self._v1_dwarf_set()
+                if not before_workers and self._v1_dwarf_vector_count() is None:
+                    return {"ok": False, "error": "矮人管理器未就绪，请进入存档后再试"}
+                pm.write_int(queue_result, -1)
+                pm.write_int(data + self.NATIVE_DWARF_SPAWN_QUEUE_RETURN_OFF, 0)
+                pm.write_int(data + self.NATIVE_DWARF_SPAWN_QUEUE_WAREHOUSE_OFF,
+                             int(warehouse["address"]))
+                pm.write_int(data + self.NATIVE_DWARF_SPAWN_QUEUE_GENDER_OFF, gender_code)
+                # The request is deliberately last. The game thread therefore
+                # sees either a complete request or no request at all.
+                pm.write_int(queue_request, 1)
+            except Exception as exc:
+                return {"ok": False, "error": "提交原生矮人生成请求失败：%s" % exc}
+
+            deadline = time.monotonic() + 2.0
+            native_result = -1
+            while time.monotonic() < deadline:
+                if not self._runtime_session_current(generation, pm_obj):
+                    return {"ok": False, "error": "等待生成时游戏连接已失效"}
+                try:
+                    native_result = int(pm.read_int(queue_result))
+                except Exception:
+                    native_result = -1
+                if native_result != -1:
+                    break
+                time.sleep(0.03)
+            if native_result != 1:
+                return {"ok": False, "error": "游戏没有确认原生矮人生成请求"}
+
+            new_worker = None
+            deadline = time.monotonic() + 2.4
+            while time.monotonic() < deadline:
+                current_workers = self._v1_dwarf_set()
+                candidates = [worker for worker in current_workers - before_workers
+                              if self._validate_dwarf(worker, False)]
+                if expected_type:
+                    candidates = [worker for worker in candidates
+                                  if self._v1_worker_type(worker) == expected_type]
+                else:
+                    candidates = [worker for worker in candidates
+                                  if self._v1_worker_type(worker) in ("worker", "worker_female")]
+                if len(candidates) == 1:
+                    new_worker = int(candidates[0])
+                    break
+                if len(candidates) > 1:
+                    return {"ok": False, "created": True,
+                            "error": "检测到多个同时新增的矮人，已停止后续参数写入；请刷新列表确认"}
+                time.sleep(0.06)
+            if not new_worker:
+                return {"ok": False, "created": True,
+                        "error": "游戏已执行创建，但未能可靠定位新增矮人；请刷新生物列表确认"}
+
+            # Wait for the new object to become visible in the same validated
+            # Worker vector before touching its optional parameters.
+            new_row = None
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                for row in self.scan_dwarves_stable(0.35):
+                    if int(row.get("edi", 0) or 0) == new_worker:
+                        new_row = row
+                        break
+                if new_row:
+                    break
+                time.sleep(0.08)
+            if not new_row:
+                return {"ok": False, "created": True,
+                        "error": "新增矮人已创建但尚未完成初始化；请稍候刷新后再编辑"}
+
+            name_before = None
+            if name_index is not None:
+                def write_name(snapshot):
+                    if (new_worker not in self._v1_dwarf_set() or
+                            not self._validate_dwarf(new_worker, False)):
+                        raise RuntimeError("新增矮人对象已变化")
+                    if expected_type and self._v1_worker_type(new_worker) != expected_type:
+                        raise RuntimeError("新增矮人性别与请求不一致")
+                    address = new_worker + V1_DWARF_NAME_INDEX
+                    snapshot(address, 4)
+                    before_index = int(pm.read_int(address))
+                    pm.write_int(address, int(name_index))
+                    if int(pm.read_int(address)) != int(name_index):
+                        raise RuntimeError("名字索引读回不一致")
+                    return before_index
+                name_ok, name_before, name_error = self._paused_memory_transaction(write_name)
+                if not name_ok:
+                    return {"ok": False, "created": True,
+                            "error": "矮人已生成，但名字设置失败：%s" % name_error}
+
+            # Re-scan after the short pause: the list index is a vector slot,
+            # not a durable identity, so only the freshly read row may be sent
+            # to the existing transactional personal-skill editor.
+            for row in self.scan_dwarves_stable(0.7):
+                if int(row.get("edi", 0) or 0) == new_worker:
+                    new_row = row
+                    break
+            if selected_skills:
+                skill_result = self.save_dwarf_personal_skill_slots(
+                    int(new_row.get("idx", -1)), selected_skills)
+                if not skill_result.get("ok"):
+                    return {"ok": False, "created": True,
+                            "error": "矮人已生成，但个人技能设置失败：%s" %
+                                     (skill_result.get("error") or "游戏未确认")}
+
+            rows = self.scan_dwarves_stable(1.0)
+            for row in rows:
+                if int(row.get("edi", 0) or 0) == new_worker:
+                    new_row = row
+                    break
+            if not new_row or not self._validate_dwarf(new_worker, False):
+                return {"ok": False, "created": True,
+                        "error": "矮人已生成，但最终读回失败；请刷新列表确认"}
+            if expected_type and self._v1_worker_type(new_worker) != expected_type:
+                return {"ok": False, "created": True,
+                        "error": "矮人已生成，但性别读回与请求不一致；未继续写入其它字段"}
+            if name_index is not None:
+                current_name_index = int(pm.read_int(new_worker + V1_DWARF_NAME_INDEX))
+                if current_name_index != int(name_index):
+                    return {"ok": False, "created": True,
+                            "error": "矮人已生成，但名字读回不一致"}
+            if selected_skills:
+                actual_skills = self._read_v1_personal_skills(new_worker)
+                actual_values = {entry.get("id"): float(entry.get("value", 0.0))
+                                 for entry in actual_skills}
+                if (len(actual_skills) != len(selected_skills) or
+                        any(skill["id"] not in actual_values or
+                            abs(actual_values[skill["id"]] - skill["value"]) > 0.05
+                            for skill in selected_skills)):
+                    return {"ok": False, "created": True,
+                            "error": "矮人已生成，但个人技能读回不一致"}
+
+            history = self._record_nonreversible_native_spawn(
+                generation, pm_obj,
+                {"worker_count": len(before_workers)},
+                {"worker_count": len(self._v1_dwarf_set()),
+                 "name_index_before": name_before},
+                request_info, new_row)
+            return {"ok": True, "created": True, "dwarf": {
+                "idx": int(new_row.get("idx", -1)), "edi": int(new_worker),
+                "name": new_row.get("name") or "新矮人",
+                "gender": new_row.get("gender") or ("女" if self._v1_worker_type(new_worker) == "worker_female" else "男"),
+                "skills": new_row.get("skills", []),
+            }, "history_id": history.get("id") if isinstance(history, dict) else None,
+            "note": "已由游戏原生 MainWarehouseEntity 创建；新矮人不提供不安全的一键撤销。"}
+
+    def get_dwarf_equipment_catalog(self):
+        """Return the common selectable gear list for the all-dwarves preset."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "预设装备目前仅验证了 Steam 原版"}
+        catalog, error = self._v1_equipment_catalog()
+        if not catalog:
+            return {"ok": False, "state": self.STATUS_STALE, "error": error or "装备目录定位失败"}
+        slots = []
+        for definition in V1_DWARF_EQUIPMENT_SLOTS:
+            slots.append({
+                "key": definition["key"], "title": definition["title"], "icon": definition["icon"],
+                "class": definition["class"], "options": catalog["by_class"].get(definition["class"], []),
+            })
+        return {"ok": True, "state": self.STATUS_VERIFIED, "slots": slots}
+
+    def get_dwarf_training_profiles(self):
+        """Return the closed, V1.0-safe training profile catalogue."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "培养预设目前仅验证了 Steam 原版"}
+        profiles = []
+        for profile_id, profile in self.DWARF_TRAINING_PROFILES.items():
+            profiles.append({
+                "id": profile_id,
+                "name": profile["name"],
+                "skills": [{"id": skill_id,
+                            "name": V1_PERSONAL_SKILL_TITLES.get(skill_id, skill_id)}
+                           for skill_id in profile["skills"]],
+            })
+        catalog, error = self._v1_equipment_catalog()
+        if not catalog:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": error or "装备目录定位失效"}
+        equipment_slots = []
+        for key in self.DWARF_TRAINING_VERIFIED_EQUIPMENT_SLOTS:
+            definition = V1_DWARF_EQUIPMENT_BY_KEY[key]
+            equipment_slots.append({
+                "key": key, "title": definition["title"], "icon": definition["icon"],
+                "options": catalog["by_class"].get(definition["class"], []),
+                "write_state": "verified",
+            })
+        return {"ok": True, "state": self.STATUS_VERIFIED,
+                "profiles": profiles, "equipment_slots": equipment_slots,
+                "note": "已加载 8 个装备槽；应用时仍会逐槽校验装备类别并写后读回。"}
+
+    @staticmethod
+    def _clean_dwarf_training_indices(indices):
+        if not isinstance(indices, (list, tuple, set)):
+            return None
+        result, seen = [], set()
+        for raw in indices:
+            if isinstance(raw, bool):
+                return None
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if idx < 0 or idx > 255 or idx in seen:
+                continue
+            seen.add(idx)
+            result.append(idx)
+        return result[:40]
+
+    def _build_dwarf_training_plan(self, indices, profile_id, level, equipment=None):
+        """Resolve one current, address-free training plan from live objects.
+
+        This is used for both preview and apply.  It never creates a missing
+        skill record: a profile only changes records that game code has already
+        created for the selected dwarf.
+        """
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "培养预设目前仅验证了 Steam 原版"}
+        indices = self._clean_dwarf_training_indices(indices)
+        if not indices:
+            return {"ok": False, "error": "请至少选择一名矮人"}
+        profile_id = str(profile_id or "").strip().lower()
+        profile = self.DWARF_TRAINING_PROFILES.get(profile_id)
+        if not profile:
+            return {"ok": False, "error": "未知培养预设"}
+        try:
+            level = float(level)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "技能目标值无效"}
+        if not math.isfinite(level) or level < 0.0 or level > 100000.0:
+            return {"ok": False, "error": "技能目标值必须在 0 到 100000 之间"}
+        requested_equipment = self._clean_dwarf_equipment_preset(equipment or {})
+        if any(key not in self.DWARF_TRAINING_VERIFIED_EQUIPMENT_SLOTS
+               for key in requested_equipment):
+            return {"ok": False, "state": self.STATUS_UNVERIFIED,
+                    "error": "培养预设包含未知装备槽"}
+        if requested_equipment:
+            catalog, error = self._v1_equipment_catalog()
+            if not catalog:
+                return {"ok": False, "error": error}
+            requested_equipment, error = self._validate_v1_equipment_request(
+                requested_equipment, catalog)
+            if not requested_equipment:
+                return {"ok": False, "error": error or "装备选择无效"}
+        rows, skipped = [], []
+        for idx in indices:
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf:
+                skipped.append({"idx": idx, "reason": "矮人已离开或列表已刷新"})
+                continue
+            edi = int(dwarf.get("edi") or 0)
+            if not self._validate_dwarf(edi, False) or edi not in self._v1_dwarf_set():
+                skipped.append({"idx": idx, "name": dwarf.get("name", ""), "reason": "矮人对象已失效"})
+                continue
+            skills, skills_ready = self._read_v1_personal_skills_snapshot(edi)
+            if not skills_ready:
+                skipped.append({"idx": idx, "name": dwarf.get("name", ""), "reason": "个人技能仍在读取中"})
+                continue
+            live_skills = {str(row.get("id") or ""): float(row.get("value") or 0.0)
+                           for row in skills}
+            skill_before, skill_after, skill_changes = {}, {}, []
+            for skill_id in profile["skills"]:
+                if skill_id not in live_skills:
+                    continue
+                before = float(live_skills[skill_id])
+                if abs(before - level) <= 0.05:
+                    continue
+                skill_before[skill_id] = before
+                skill_after[skill_id] = level
+                skill_changes.append({"id": skill_id,
+                                      "name": V1_PERSONAL_SKILL_TITLES.get(skill_id, skill_id),
+                                      "before": before, "after": level})
+            equipment_before, equipment_after, equipment_changes = {}, {}, []
+            if requested_equipment:
+                info = self.get_dwarf_equipment(idx)
+                if not info.get("ok"):
+                    skipped.append({"idx": idx, "name": dwarf.get("name", ""),
+                                    "reason": info.get("error") or "装备栏读取失败"})
+                    continue
+                current = {str(slot.get("key")): int(slot.get("value"))
+                           for slot in info.get("slots", [])}
+                for key, value in requested_equipment.items():
+                    before = current.get(key)
+                    if before is None or before == int(value):
+                        continue
+                    equipment_before[key] = before
+                    equipment_after[key] = int(value)
+                    equipment_changes.append({"key": key,
+                        "name": V1_DWARF_EQUIPMENT_BY_KEY[key]["title"],
+                        "before": before, "after": int(value)})
+            if not skill_changes and not equipment_changes:
+                reason = ("没有可修改的已拥有技能或目标装备槽"
+                          if not any(skill_id in live_skills for skill_id in profile["skills"])
+                          else "当前值已符合预设")
+                skipped.append({"idx": idx, "name": dwarf.get("name", ""), "reason": reason})
+                continue
+            rows.append({"idx": idx, "name": dwarf.get("name") or ("矮人 #%s" % idx),
+                         "skills_before": skill_before, "skills_after": skill_after,
+                         "equipment_before": equipment_before, "equipment_after": equipment_after,
+                         "skill_changes": skill_changes, "equipment_changes": equipment_changes})
+        return {"ok": True, "profile": {"id": profile_id, "name": profile["name"]},
+                "level": level, "requested_indices": indices, "rows": rows,
+                "skipped": skipped, "changed": len(rows)}
+
+    def preview_dwarf_training_preset(self, indices, profile_id, level, equipment=None):
+        """Read-only preview of each exact field a later apply would touch."""
+        return self._build_dwarf_training_plan(indices, profile_id, level, equipment)
+
+    def _restore_dwarf_training_rows(self, rows, restore_before=True):
+        """Restore a completed batch in reverse order with current-value guards."""
+        failures = []
+        for row in reversed(list(rows or [])):
+            idx, name = int(row.get("idx", -1)), str(row.get("name") or "")
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf or (name and str(dwarf.get("name") or "") != name):
+                failures.append("矮人 #%s 已变化" % idx)
+                continue
+            skills = row.get("skills_before" if restore_before else "skills_after") or {}
+            skills_expected = row.get("skills_after" if restore_before else "skills_before") or {}
+            equipment = row.get("equipment_before" if restore_before else "equipment_after") or {}
+            equipment_expected = row.get("equipment_after" if restore_before else "equipment_before") or {}
+            if equipment:
+                result = self.save_dwarf_equipment(idx, equipment,
+                    _expected_current=equipment_expected, _record_history=False)
+                if not result.get("ok"):
+                    failures.append("矮人 #%s 装备：%s" % (idx, result.get("error") or "写入失败"))
+                    continue
+            if skills:
+                result = self._save_dwarf_personal_skills_transaction(idx, skills,
+                    _expected_current=skills_expected, _record_history=False,
+                    _return_result=True)
+                if not result or not result.get("ok"):
+                    failures.append("矮人 #%s 技能写入失败" % idx)
+        return {"ok": not failures, "error": "；".join(failures)}
+
+    def _verify_dwarf_training_snapshot(self, rows):
+        for row in list(rows or []):
+            idx, name = int(row.get("idx", -1)), str(row.get("name") or "")
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf or (name and str(dwarf.get("name") or "") != name):
+                return False, "矮人 #%s 已变化" % idx
+            expected_skills = row.get("skills") or {}
+            if expected_skills:
+                edi = int(dwarf.get("edi") or 0)
+                live_skills = {item["id"]: float(item["value"])
+                               for item in self._read_v1_personal_skills(edi)}
+                if any(key not in live_skills or abs(live_skills[key] - float(value)) > 0.05
+                       for key, value in expected_skills.items()):
+                    return False, "矮人 #%s 的个人技能读回不一致" % idx
+            expected_equipment = row.get("equipment") or {}
+            if expected_equipment:
+                info = self.get_dwarf_equipment(idx)
+                current = {item["key"]: int(item["value"]) for item in info.get("slots", [])}
+                if not info.get("ok") or any(current.get(key) != int(value)
+                                              for key, value in expected_equipment.items()):
+                    return False, "矮人 #%s 的装备读回不一致" % idx
+        return True, ""
+
+    def apply_dwarf_training_preset(self, indices, profile_id, level, equipment=None):
+        """Apply a current preview as one rollback-capable V1.0 operation."""
+        guard = self._require_safe_write("矮人培养预设")
+        if guard:
+            return {"ok": False, "error": guard}
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "error": "游戏连接已失效，请重新读取矮人"}
+            plan = self._build_dwarf_training_plan(indices, profile_id, level, equipment)
+            if not plan.get("ok"):
+                return plan
+            if not plan.get("rows"):
+                return {"ok": False, "error": "没有符合条件的可修改字段", "skipped": plan.get("skipped", [])}
+            completed = []
+            for row in plan["rows"]:
+                completed_row = {key: row[key] for key in (
+                    "idx", "name", "skills_before", "skills_after",
+                    "equipment_before", "equipment_after")}
+                if completed_row["skills_after"]:
+                    result = self._save_dwarf_personal_skills_transaction(
+                        row["idx"], completed_row["skills_after"],
+                        _expected_current=completed_row["skills_before"],
+                        _record_history=False, _return_result=True)
+                    if not result or not result.get("ok"):
+                        rollback = self._restore_dwarf_training_rows(completed, True)
+                        return {"ok": False, "error": "个人技能写入失败；已回滚：%s" %
+                                ("成功" if rollback.get("ok") else rollback.get("error") or "失败")}
+                completed.append(completed_row)
+                if completed_row["equipment_after"]:
+                    result = self.save_dwarf_equipment(
+                        row["idx"], completed_row["equipment_after"],
+                        _expected_current=completed_row["equipment_before"], _record_history=False)
+                    if not result.get("ok"):
+                        rollback = self._restore_dwarf_training_rows(completed, True)
+                        return {"ok": False, "error": "装备槽写入失败；已回滚：%s" %
+                                ("成功" if rollback.get("ok") else rollback.get("error") or "失败")}
+            before = [{"idx": row["idx"], "name": row["name"],
+                       "skills": row["skills_before"], "equipment": row["equipment_before"]}
+                      for row in completed]
+            after = [{"idx": row["idx"], "name": row["name"],
+                      "skills": row["skills_after"], "equipment": row["equipment_after"]}
+                     for row in completed]
+            ok, error = self._verify_dwarf_training_snapshot(after)
+            if not ok:
+                rollback = self._restore_dwarf_training_rows(completed, True)
+                return {"ok": False, "error": "写后读回失败；已回滚：%s" %
+                        ("成功" if rollback.get("ok") else rollback.get("error") or error)}
+            history = self._record_operation(
+                "dwarf_training_preset", "runtime",
+                {"dwarf_indices": [row["idx"] for row in completed],
+                 "profile_id": plan["profile"]["id"], "profile_name": plan["profile"]["name"]},
+                "矮人培养预设", before, after, True, generation, pm_obj.process_id,
+                {"level": plan["level"], "count": len(completed),
+                 "verified_equipment_slots": list(self.DWARF_TRAINING_VERIFIED_EQUIPMENT_SLOTS)})
+            return {"ok": True, "changed": len(completed), "skipped": plan.get("skipped", []),
+                    "operation_id": history.get("id"), "readback_ok": True,
+                    "profile": plan["profile"]}
+
+    def _validate_v1_equipment_request(self, equipment, catalog):
+        """Validate caller-selected slots against the current live resource table."""
+        if not isinstance(equipment, dict):
+            return None, "装备选择数据无效"
+        requested = {}
+        try:
+            for key, raw_value in equipment.items():
+                definition = V1_DWARF_EQUIPMENT_BY_KEY.get(str(key or ""))
+                if not definition:
+                    return None, "未知装备槽位"
+                if isinstance(raw_value, bool):
+                    return None, "装备编号无效"
+                value = int(raw_value)
+                if isinstance(raw_value, float) and raw_value != value:
+                    return None, "装备编号无效"
+                if value != -1:
+                    candidate = catalog["by_index"].get(value)
+                    if not candidate or candidate.get("class") != definition["class"]:
+                        return None, "%s 不能放入%s槽" % (
+                            (candidate or {}).get("name", "该物品"), definition["title"]
+                        )
+                requested[definition["key"]] = value
+        except (TypeError, ValueError, OverflowError):
+            return None, "装备编号无效"
+        return requested, ""
+
+    def apply_dwarf_equipment_preset(self, equipment):
+        """Apply selected equipment slots to every live Steam V1 Worker.
+
+        This operation pauses the process once, validates every worker, and
+        rolls all changed fields back if any write cannot be confirmed.
+
+        V1.0 intentionally does not expose this legacy all-dwarf writer.
+        The replacement cultivation preset will be built only after the
+        individual skill, equipment and inventory transactions complete their
+        full re-entry persistence validation.
+        """
+        return {"ok": False,
+                "error": "V1.0 已暂停旧版全体装备预设；请先完成单目标装备槽的完整验收。"}
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "预设装备目前仅验证了 Steam 原版"}
+        guard = self._require_safe_write("全体预设装备写入")
+        if guard:
+            return {"ok": False, "error": guard}
+        catalog, error = self._v1_equipment_catalog()
+        if not catalog:
+            return {"ok": False, "error": error}
+        requested, error = self._validate_v1_equipment_request(equipment, catalog)
+        if requested is None:
+            return {"ok": False, "error": error}
+        if not requested:
+            return {"ok": False, "error": "请至少选择一个需要修改的装备槽"}
+
+        hnd = self._suspend(pm.process_id)
+        if not hnd:
+            return {"ok": False, "error": "无法暂停游戏以安全应用装备"}
+        originals, changed_dwarves, skipped = {}, 0, 0
+        try:
+            workers = list(self._v1_dwarf_set())
+            if not workers:
+                raise RuntimeError("未找到有效矮人")
+            for worker in workers:
+                if not self._validate_dwarf(worker, False):
+                    skipped += 1
+                    continue
+                dwarf_changed = False
+                for key, value in requested.items():
+                    definition = V1_DWARF_EQUIPMENT_BY_KEY[key]
+                    address = int(worker) + int(definition["offset"])
+                    before_raw = pm.read_int(address)
+                    before = -1 if before_raw is None or (int(before_raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(before_raw)
+                    if before == value:
+                        continue
+                    originals[address] = before_raw
+                    pm.write_int(address, value)
+                    after_raw = pm.read_int(address)
+                    after = -1 if after_raw is None or (int(after_raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(after_raw)
+                    if after != value:
+                        raise RuntimeError("%s 写入未确认" % definition["title"])
+                    dwarf_changed = True
+                if dwarf_changed:
+                    changed_dwarves += 1
+            return {"ok": True, "count": len(workers), "changed": changed_dwarves,
+                    "skipped": skipped, "slots": [V1_DWARF_EQUIPMENT_BY_KEY[key]["title"] for key in requested]}
+        except Exception as e:
+            for address, previous in originals.items():
+                try:
+                    pm.write_int(address, int(previous))
+                except Exception:
+                    pass
+            return {"ok": False, "error": "应用装备失败，已回滚：%s" % e}
+        finally:
+            self._resume(hnd)
+
+    def get_dwarf_equipment(self, idx):
+        """Read one live Worker's eight native equipment slots and candidates."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "装备编辑目前仅验证了 Steam 原版"}
+        try:
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf:
+                return {"ok": False, "state": self.STATUS_EMPTY,
+                        "error": "该矮人已离开或列表已刷新，请重新打开窗口"}
+            edi = int(dwarf.get("edi", 0) or 0)
+            if not self._validate_dwarf(edi, False) or edi not in self._v1_dwarf_set():
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "矮人对象已失效，请刷新列表后重试"}
+            catalog, error = self._v1_equipment_catalog()
+            if not catalog:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": error or "装备目录定位失败"}
+            slots = []
+            for definition in V1_DWARF_EQUIPMENT_SLOTS:
+                raw = pm.read_int(edi + int(definition["offset"]))
+                value = -1 if raw is None or (int(raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(raw)
+                current = (catalog["by_index"].get(value) or
+                           catalog.get("all_by_index", {}).get(value))
+                options = [{"value": -1, "id": "", "name": "— 无装备 —"}]
+                options.extend(catalog["by_class"].get(definition["class"], []))
+                key = definition["key"]
+                verified = key in self.DWARF_INDIVIDUAL_VERIFIED_EQUIPMENT_SLOTS
+                candidate = key == self.DWARF_INDIVIDUAL_CANDIDATE_EQUIPMENT_SLOT
+                slots.append({
+                    "key": key, "title": definition["title"], "icon": definition["icon"],
+                    "class": definition["class"], "value": value,
+                    "current": current or ({"value": value, "id": "", "name": "未知装备 ID %d" % value} if value >= 0 else options[0]),
+                    "options": options,
+                    # UI state is informative only; save_dwarf_equipment enforces
+                    # the same boundary server-side before it ever suspends the game.
+                    "write_enabled": bool(verified or candidate),
+                    "write_state": "verified" if verified else ("candidate" if candidate else "read_only"),
+                })
+            return {"ok": True, "state": self.STATUS_VERIFIED, "slots": slots}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "读取装备栏失败：%s" % e}
+
+    def save_dwarf_equipment(self, idx, equipment, _expected_current=None,
+                             _record_history=True, _training_experimental=False):
+        '''Save legal equipment slots and retain an independently read snapshot.'''
+        if not isinstance(equipment, dict) or not equipment:
+            return {'ok': False, 'error': '没有可保存的装备改动'}
+        requested = {}
+        try:
+            for raw_key, raw_value in equipment.items():
+                key = str(raw_key or '')
+                if key not in V1_DWARF_EQUIPMENT_BY_KEY:
+                    return {'ok': False, 'error': '未知装备槽位'}
+                requested[key] = int(raw_value)
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': '装备编号无效'}
+        # Retain the old flag for compatibility with cached UI calls.  All
+        # eight slots are now available after player-side testing.
+        allowed = set(self.DWARF_INDIVIDUAL_VERIFIED_EQUIPMENT_SLOTS)
+        blocked = [key for key in requested if key not in allowed]
+        if blocked:
+            return {'ok': False, 'error': '装备槽无效：' + '、'.join(blocked)}
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {'ok': False, 'error': '游戏连接已失效，请重新读取矮人'}
+            before_info = self.get_dwarf_equipment(idx)
+            if not before_info.get('ok'):
+                return before_info
+            before_all = {slot['key']: int(slot['value'])
+                          for slot in before_info.get('slots', [])}
+            expected = dict(_expected_current or {})
+            for key, expected_value in expected.items():
+                if key not in before_all or before_all[key] != int(expected_value):
+                    return {'ok': False, 'error': '装备槽已被游戏或其他操作修改，拒绝覆盖'}
+            before = {key: before_all[key] for key in requested
+                      if key in before_all and before_all[key] != requested[key]}
+            if not before:
+                return {'ok': True, 'changed': [], 'before': {}, 'after': {},
+                        'readback_ok': True}
+            # For undo, expected slots are checked a second time while paused.
+            result = self._save_dwarf_equipment_write(
+                idx, requested, _expected_current=expected or None)
+            if not result.get('ok'):
+                return result
+            after_info = self.get_dwarf_equipment(idx)
+            if not after_info.get('ok'):
+                rollback = self._save_dwarf_equipment_write(
+                    idx, before, _expected_current=requested)
+                return {'ok': False, 'error': '装备写入后无法重新读取；已尝试回滚：%s' %
+                        ('成功' if rollback.get('ok') else rollback.get('error', '失败'))}
+            after_all = {slot['key']: int(slot['value'])
+                         for slot in after_info.get('slots', [])}
+            after = {key: after_all.get(key) for key in before}
+            if any(after.get(key) != requested[key] for key in before):
+                rollback = self._save_dwarf_equipment_write(
+                    idx, before, _expected_current=requested)
+                return {'ok': False, 'error': '装备写后读回不一致；已尝试回滚：%s' %
+                        ('成功' if rollback.get('ok') else rollback.get('error', '失败'))}
+            result['before'] = before
+            result['after'] = after
+            result['readback_ok'] = True
+            if _record_history:
+                dwarf = self._live_dwarf_by_index(idx) or {}
+                history = self._record_operation(
+                    'dwarf_equipment', 'runtime',
+                    {'dwarf_index': int(idx), 'edi': hex(int(dwarf.get('edi') or 0)),
+                     'dwarf_name': dwarf.get('name') or ('矮人 #%s' % idx)},
+                    '装备槽', before, after, True, generation, pm_obj.process_id,
+                    {'slots': list(before.keys())})
+                result['operation_id'] = history['id']
+            return result
+
+    def _save_dwarf_equipment_write(self, idx, equipment, _expected_current=None):
+        """Atomically write changed, class-validated Steam V1 gear fields."""
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "装备编辑目前仅验证了 Steam 原版"}
+        guard = self._require_safe_write("矮人装备写入")
+        if guard:
+            return {"ok": False, "error": guard}
+        if not isinstance(equipment, dict) or not equipment:
+            return {"ok": False, "error": "没有可保存的装备改动"}
+        catalog, error = self._v1_equipment_catalog()
+        if not catalog:
+            return {"ok": False, "error": error}
+        requested = {}
+        try:
+            for key, raw_value in equipment.items():
+                definition = V1_DWARF_EQUIPMENT_BY_KEY.get(str(key or ""))
+                if not definition:
+                    return {"ok": False, "error": "未知装备槽位"}
+                value = int(raw_value)
+                if value != -1:
+                    candidate = catalog["by_index"].get(value)
+                    if not candidate or candidate.get("class") != definition["class"]:
+                        return {"ok": False, "error": "%s 不能放入%s槽" % (
+                            (candidate or {}).get("name", "该物品"), definition["title"]
+                        )}
+                requested[definition["key"]] = value
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "装备编号无效"}
+
+        hnd = self._suspend(pm.process_id)
+        if not hnd:
+            return {"ok": False, "error": "无法暂停游戏以安全写入装备"}
+        originals, changed = {}, []
+        try:
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf:
+                raise RuntimeError("该矮人已离开或列表已刷新")
+            edi = int(dwarf.get("edi", 0) or 0)
+            if not self._validate_dwarf(edi, False) or edi not in self._v1_dwarf_set():
+                raise RuntimeError("矮人对象已失效")
+            expected = dict(_expected_current or {})
+            for key, expected_value in expected.items():
+                definition = V1_DWARF_EQUIPMENT_BY_KEY.get(str(key or ''))
+                if not definition:
+                    raise RuntimeError('Invalid undo equipment slot')
+                address = edi + int(definition['offset'])
+                raw = pm.read_int(address)
+                current = -1 if raw is None or (int(raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(raw)
+                if current != int(expected_value):
+                    raise RuntimeError('Equipment slot changed; undo refused')
+            for key, value in requested.items():
+                definition = V1_DWARF_EQUIPMENT_BY_KEY[key]
+                address = edi + int(definition["offset"])
+                before_raw = pm.read_int(address)
+                before = -1 if before_raw is None or (int(before_raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(before_raw)
+                if before == value:
+                    continue
+                originals[address] = before_raw
+                pm.write_int(address, value)
+                after_raw = pm.read_int(address)
+                after = -1 if after_raw is None or (int(after_raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(after_raw)
+                if after != value:
+                    raise RuntimeError("%s 写入未确认" % definition["title"])
+                changed.append(definition["title"])
+            return {"ok": True, "changed": changed}
+        except Exception as e:
+            # A failed multi-slot save must not leave an arbitrary half-set of
+            # equipment behind.  Restoration happens before the game resumes.
+            for address, previous in originals.items():
+                try:
+                    pm.write_int(address, int(previous))
+                except Exception:
+                    pass
+            return {"ok": False, "error": "保存装备失败，已回滚：%s" % e}
+        finally:
+            self._resume(hnd)
+
+    def _validate_dwarf(self, edi, is_v2=None):
+        """验证矮人内存地址是否仍然有效，防止写入失效地址导致游戏崩溃"""
+        if not pm or not edi or edi < 0x10000000:
+            return False
+        try:
+            if is_v2 is None:
+                is_v2 = self._detect_v2()
+            if is_v2:
+                # V2: 检查 vtable 指针是否匹配
+                vt = pm.read_int(edi)
+                expected_vt = get_base() + V2_DWARF_VTABLE_OFF
+                if vt != expected_vt:
+                    return False
+                # 二次验证：坐标范围检查
+                x = pm.read_float(edi + V2_DWARF_X)
+                if x is None or x < 1000 or x > 13000:
+                    return False
+            else:
+                # V1 Worker identity is the embedded class label plus the
+                # caller's AI-manager membership check.  Pandora can create
+                # a valid Worker at surface Y < 1000, so coordinates must not
+                # determine whether it appears or can be safely edited.
+                raw_type = bytes(pm.read_bytes(edi + 0x5C, 24) or b'')
+                worker_type = raw_type.split(b'\0', 1)[0].decode('ascii', 'ignore').strip().lower()
+                if worker_type not in ('worker', 'worker_female'):
+                    return False
+            return True
+        except:
+            return False
+
+    def _v1_dwarf_set(self):
+        """重新读取 V1 矮人管理器列表，返回当前仍存活的矮人 edi 集合"""
+        try:
+            base = get_base()
+            mgr = int(pm.read_int(base + 0xDC3614) or 0) & 0xFFFFFFFF
+            if not self._valid_runtime_pointer(mgr):
+                return set()
+            sp = int(pm.read_int(mgr + 0x40) or 0) & 0xFFFFFFFF
+            ep = int(pm.read_int(mgr + 0x44) or 0) & 0xFFFFFFFF
+            if not sp or not ep or ep < sp or (ep - sp) % 4 or (ep - sp) // 4 > 256:
+                return set()
+            out = set()
+            for i in range((ep - sp) // 4):
+                p = pm.read_int(sp + i * 4)
+                if p:
+                    out.add(int(p) & 0xFFFFFFFF)
+            return out
+        except Exception:
+            return set()
+
+    def refresh_dwarves(self):
+        """刷新矮人数据（验证有效性并更新数值）"""
+        global dwarf_cache
+        snapshot = _dwarf_cache_snapshot()
+        if not pm or not connected:
+            _set_cached_read_state("dwarves", self.STATUS_DISCONNECTED, "尚未连接游戏")
+            return []
+        if not snapshot:
+            state = _get_cached_read_state("dwarves")
+            if state.get("state") == self.STATUS_VERIFIED:
+                _set_cached_read_state("dwarves", self.STATUS_EMPTY, "当前存档没有已扫描的矮人")
+            return []
+        is_v2 = self._detect_v2()
+        valid = []
+        for d in snapshot:
+            try:
+                if not self._validate_dwarf(d["edi"], is_v2):
+                    continue
+                if is_v2:
+                    d["x"] = "%.2f" % pm.read_float(d["edi"] + V2_DWARF_X)
+                    d["y"] = "%.2f" % pm.read_float(d["edi"] + V2_DWARF_Y)
+                    d["hp"] = self._dwarf_hp_text(pm.read_float(d["edi"] + V2_DWARF_HP_DISP))
+                    d["hp_status"] = "可用" if d["hp"] != "—" else self.STATUS_FAILED
+                    d["sat"] = self._dwarf_satiety_text(
+                        pm.read_float(d["edi"] + V2_DWARF_SAT_DISP), d.get("sat"))
+                    d["sat_status"] = "可用" if d["sat"] != "—" else self.STATUS_FAILED
+                else:
+                    d["x"] = "%.2f" % pm.read_float(d["edi"] + 0x428)
+                    d["y"] = "%.2f" % pm.read_float(d["edi"] + 0x42C)
+                    hp = self._read_live_dwarf_hp(d["edi"], False)
+                    d["hp"] = self._dwarf_hp_text(hp)
+                    d["hp_status"] = "可用" if d["hp"] != "—" else self.STATUS_FAILED
+                    d["sat"] = self._dwarf_satiety_text(
+                        self._read_live_dwarf_satiety(d["edi"], False), d.get("sat"))
+                    d["sat_status"] = "可用" if d["sat"] != "—" else self.STATUS_FAILED
+                    gender = pm.read_int(d["edi"] + 0x68)
+                    native_name = self._v1_dwarf_name(d["edi"], gender)
+                    if native_name:
+                        d["name"] = native_name
+                    personal_skills, skills_ready = self._read_v1_personal_skills_snapshot(d["edi"])
+                    d["skills"] = personal_skills
+                    d["skills_ready"] = skills_ready
+                    d["skill_summary"] = (self._personal_skill_summary(personal_skills)
+                                          if skills_ready else "读取中…")
+                valid.append(d)
+            except: pass
+        # A Worker can be temporarily unavailable while the game rebuilds its
+        # character state. Never let this lightweight refresh shrink the full
+        # list; only a complete scan is allowed to confirm a real removal.
+        #
+        # Keeping the last complete cache is useful for a smooth UI, but it
+        # must not continue to be labelled as current data if this refresh
+        # only validated part of the roster.  The status envelope will then
+        # show ``读取失效`` and retain the cache count solely as diagnostic
+        # information, rather than making missing workers look deleted.
+        if len(valid) == len(snapshot):
+            _set_cached_read_state("dwarves", self.STATUS_VERIFIED)
+            return _replace_dwarf_cache(valid)
+        _set_cached_read_state(
+            "dwarves", self.STATUS_STALE,
+            "矮人实时刷新不完整：已验证 %s/%s 个对象；保留上次完整缓存，但未将其当作当前结果" %
+            (len(valid), len(snapshot)))
+        return _dwarf_cache_snapshot()
+
+    def refresh_dwarves_status(self):
+        self.refresh_dwarves()
+        return self.get_dwarves_status()
+
+    def _find_skill_base(self):
+        """按 vtable 模式扫描定位技能对象（V1/V2 参数不同）"""
+        try:
+            is_v2 = self._detect_v2()
+            if self._skill_base_cache and self._skill_base_ver == is_v2:
+                return self._skill_base_cache
+            base = get_base()
+            vtable_addr = base + (V2_SKILL_VTABLE_OFF if is_v2 else V1_SKILL_VTABLE_OFF)
+            offsets = V2_SKILL_OFFSETS if is_v2 else V1_SKILL_OFFSETS
+            pattern = struct.pack("<I", vtable_addr)
+            results = pymem.pattern.pattern_scan_all(pm.process_handle, pattern, return_multiple=True)
+            if results:
+                image_size = pymem.process.module_from_name(pm.process_handle, MODULE_NAME).SizeOfImage
+                for addr in results:
+                    try:
+                        if addr < 0x10000:
+                            continue
+                        # 跳过模块内代码/数据引用
+                        if base <= addr < base + image_size:
+                            continue
+                        vals = [pm.read_int(addr + off) for off in offsets]
+                        if is_v2:
+                            ok = all(v is not None and 0 <= v < 9999 for v in vals)
+                        else:
+                            ok = all(v is not None and 0 < v < 9999 for v in vals)
+                        if ok:
+                            self._skill_base_cache = addr
+                            self._skill_base_ver = is_v2
+                            return addr
+                    except:
+                        continue
+            self._skill_base_cache = None
+            self._skill_base_ver = None
+        except:
+            return None
+        return self._skill_base_cache
+
+    def _sync_skill_copies(self, base_addr, vals):
+        """Mirror edits only into the live tech-tree level copies.
+
+        The ``library_*`` records embedded near the beginning of the object
+        are declarations loaded from LibraryBehaviour.xml.  They look like
+        levels but intentionally stay unchanged when a book is completed.
+        Writing them made direct edits differ from a normal library upgrade.
+        """
+        try:
+            if self._detect_v2():
+                return
+            node_ids = ("library_craft", "library_healt", "library_mana", "library_skill")
+            for node in _read_live_tech_nodes(pm):
+                try:
+                    if node["id"] in node_ids:
+                        # +0x70 is the level declared by LibraryBehaviour.xml
+                        # (the starting level), not the live library level.
+                        # A normal book completion leaves +0x70 untouched, then
+                        # updates both runtime level copies at +0x80/+0x84 and
+                        # resets the node's progress.  Writing +0x70 was why
+                        # the old editor could change the displayed value while
+                        # leaving the game mechanics stale.
+                        value = vals[node_ids.index(node["id"])]
+                        pm.write_int(node["address"] + 0x80, value)
+                        pm.write_int(node["address"] + 0x84, value)
+                        pm.write_float(node["address"] + TECH_NODE_PROGRESS_OFF, 0.0)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _sync_skill_hp_effect(self, harden, old_harden):
+        """Apply the hardening bonus to every live dwarf immediately.
+
+        The game stores each dwarf's max HP in the encrypted pair at
+        EDI+0x1C0 and only refreshes it on its own update events.  Recompute
+        both max and current HP here so a skill edit takes effect right away.
+        """
+        if not pm or not connected or self._detect_v2():
+            return 0
+        harden = max(1, int(harden))
+        old_harden = max(1, int(old_harden))
+        count = 0
+        for dwarf in self.scan_dwarves():
+            try:
+                edi = dwarf["edi"]
+                gender = pm.read_int(edi + 0x68)
+                base = 10.0 if int(gender or 0) == 0 else 8.0
+                new_max = base * (1.0 + max(0, harden - 1) * 0.05)
+                es_max = edi + 0x1C0
+                mk1 = pm.read_int(es_max + 8); mk2 = pm.read_int(es_max + 12)
+                stored_max = struct.unpack("<f", struct.pack("<I", (pm.read_int(es_max) or 0) ^ mk1))[0]
+                old_max = stored_max if stored_max and stored_max > 0.1 else base * (1.0 + max(0, old_harden - 1) * 0.05)
+                es_hp = edi + 0x190
+                k1 = pm.read_int(es_hp + 8); k2 = pm.read_int(es_hp + 12)
+                enc = pm.read_int(es_hp) or 0
+                current = struct.unpack("<f", struct.pack("<I", enc ^ k1))[0]
+                if old_max > 0:
+                    current = current * (new_max / old_max)
+                current = max(1.0, min(new_max, current))
+                hp_bits = struct.unpack("<I", struct.pack("<f", current))[0]
+                pm.write_int(es_hp, hp_bits ^ k1)
+                pm.write_int(es_hp + 4, hp_bits ^ k2)
+                max_bits = struct.unpack("<I", struct.pack("<f", new_max))[0]
+                pm.write_int(es_max, max_bits ^ mk1)
+                pm.write_int(es_max + 4, max_bits ^ mk2)
+                count += 1
+            except Exception:
+                continue
+        return count
+
+    def get_skills(self):
+        """读取技能等级数据"""
+        if not pm or not connected:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏"}
+        try:
+            base_addr = self._find_skill_base()
+            if not base_addr:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "未定位技能数据"}
+            offsets = V2_SKILL_OFFSETS if self._detect_v2() else V1_SKILL_OFFSETS
+            vals = {}
+            for i, off in enumerate(offsets):
+                v = pm.read_int(base_addr + off)
+                if v is None:
+                    return {"ok": False, "state": self.STATUS_STALE,
+                            "error": "技能字段读取不完整，未将失败显示为 0"}
+                vals[i] = int(v)
+            return {"ok": True, "state": self.STATUS_VERIFIED, "base": base_addr,
+                    "prod": vals[0], "harden": vals[1], "mana": vals[2], "educ": vals[3]}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "技能等级读取失败：%s" % e}
+
+    def save_skills(self, prod, harden, mana, educ):
+        """保存技能等级数据"""
+        if not pm:
+            return False
+        try:
+            base_addr = self._find_skill_base()
+            if not base_addr:
+                return False
+            offsets = V2_SKILL_OFFSETS if self._detect_v2() else V1_SKILL_OFFSETS
+            vals = [int(prod), int(harden), int(mana), int(educ)]
+            old_harden = 1
+            try:
+                old_harden = max(1, int(pm.read_int(base_addr + offsets[1]) or 1))
+            except Exception:
+                pass
+            for i, off in enumerate(offsets):
+                v = vals[i]
+                if v < 0: v = 0
+                # Skill levels are stored as signed 32-bit integers.  The
+                # game itself has no gameplay cap at 100, so keep only that
+                # storage boundary instead of imposing a modifier limit.
+                if v > 0x7FFFFFFF: v = 0x7FFFFFFF
+                pm.write_int(base_addr + off, v)
+            if not self._detect_v2():
+                self._sync_skill_copies(base_addr, vals)
+                # Only hardening has a per-dwarf cached effect.  Do not
+                # rewrite encrypted HP fields when its level was unchanged.
+                if vals[1] != old_harden:
+                    self._sync_skill_hp_effect(vals[1], old_harden)
+            return True
+        except:
+            return False
+
+    def apply_skill_targets(self, prod, harden, mana, educ):
+        """Apply target library levels with one native refresh per changed branch.
+
+        A normal direct level write only changes the displayed data.  The
+        fastest proven way to get a real game refresh is to write target - 1,
+        then let the game's own LibraryBehaviour handler perform the final
+        +1.  It works for upgrades and downgrades alike, while avoiding ten
+        separate game-thread calls for a target such as level 10.
+
+        Level 1 intentionally remains a direct write.  The game UI starts at
+        one and forcing a synthetic level zero just to invoke a final +1 is
+        not worth the risk for this rarely used edge case.
+        """
+        if not pm or not connected:
+            return {"ok": False, "error": "未连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "快捷原生技能应用目前仅支持 Steam 原版"}
+        specs = (
+            ("craft", "prod", "生产率", "library_craft", 0),
+            ("harden", "harden", "硬化", "library_healt", 1),
+            ("mana", "mana", "法力", "library_mana", 2),
+            ("educ", "educ", "可教育性", "library_skill", 3),
+        )
+        try:
+            targets = [int(prod), int(harden), int(mana), int(educ)]
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "四项目标等级都必须是整数"}
+        # No gameplay level ceiling is imposed here.  ``target - 1`` must fit
+        # in the game's signed 32-bit level field before the native final +1.
+        if any(level < 1 or level > 0x7FFFFFFF for level in targets):
+            return {"ok": False, "error": "技能目标等级必须是 1 以上的 32 位整数"}
+
+        current_data = self.get_skills()
+        if not current_data.get("ok"):
+            return {"ok": False, "error": current_data.get("error", "未定位图书馆技能数据")}
+        current = [int(current_data[name]) for _, name, *_ in specs]
+        native_indices = [i for i, target in enumerate(targets)
+                          if target != current[i] and target > 1]
+        if not native_indices:
+            if targets == current:
+                return {"ok": True, "changed": [], "levels": current,
+                        "message": "目标等级与当前等级一致"}
+            if not self.save_skills(*targets):
+                return {"ok": False, "error": "写入 1 级目标失败"}
+            return {"ok": True, "changed": [specs[i][2] for i in range(4) if targets[i] != current[i]],
+                    "levels": targets, "direct_only": [specs[i][2] for i in range(4) if targets[i] != current[i]],
+                    "message": "已直接设为 1 级（按安全约定不模拟 0 级升级）"}
+
+        # Validate all required research nodes before touching any level, so a
+        # locked branch cannot leave a partial target - 1 write behind.
+        try:
+            nodes = {str(node.get("id")): node for node in _read_live_tech_nodes(pm)}
+            for index in native_indices:
+                node = nodes.get(specs[index][3])
+                if not node or int(node.get("state", 0)) != 1:
+                    return {"ok": False, "error": "“%s”当前不可研究或尚未完成" % specs[index][2]}
+        except Exception as e:
+            return {"ok": False, "error": "验证技能节点失败：%s" % e}
+
+        # Unchanged values stay untouched.  Every non-1 changed value is
+        # prepared one level below its requested target for one native +1.
+        prepared = list(current)
+        direct_only = []
+        for index, target in enumerate(targets):
+            if target == current[index]:
+                continue
+            if target == 1:
+                prepared[index] = 1
+                direct_only.append(specs[index][2])
+            else:
+                prepared[index] = target - 1
+        if not self.save_skills(*prepared):
+            return {"ok": False, "error": "写入原生升级前的准备等级失败"}
+
+        changed, queued = [], False
+        for index in native_indices:
+            result = self.native_skill_upgrade(specs[index][0])
+            if not result or not result.get("ok"):
+                return {
+                    "ok": False, "partial": True, "changed": changed, "direct_only": direct_only,
+                    "error": "“%s”原生升级失败：%s" % (specs[index][2], (result or {}).get("error", "未知错误")),
+                }
+            changed.append(specs[index][2])
+            if result.get("queued"):
+                queued = True
+                break
+            if int(result.get("level", -1)) != targets[index]:
+                return {"ok": False, "partial": True, "changed": changed, "direct_only": direct_only,
+                        "error": "“%s”升级后的等级与目标不一致" % specs[index][2]}
+
+        levels = self.get_skills()
+        return {
+            "ok": True, "changed": changed, "direct_only": direct_only,
+            "queued": queued, "levels": [levels.get(name, prepared[i]) for i, (_, name, *_rest) in enumerate(specs)],
+            "message": ("已提交一项原生升级；恢复游戏后再次点击“快捷应用”完成其余目标" if queued
+                        else "目标技能已通过游戏原生升级流程应用"),
+        }
+
+    def native_skill_upgrade(self, skill_key):
+        """Run exactly one LibraryBehaviour upgrade on the game update thread.
+
+        This is intentionally a one-level operation.  It is the same native
+        handler reached when a completed encyclopedia is processed, while the
+        surrounding dispatcher guarantees that the event is raised from the
+        game's own thread instead of a Python/CE worker thread.  Keeping the
+        operation single-step also makes an unexpected build mismatch benign:
+        the request is consumed at most once.
+        """
+        if not pm or not connected:
+            return {"ok": False, "error": "未连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "当前原生升级仅支持 Steam 原版"}
+        defs = {
+            "craft": ("library_craft", "生产率", "生产率百科全书", 0),
+            "harden": ("library_healt", "硬化", "力量与健康百科全书", 1),
+            "mana": ("library_mana", "法力", "魔法百科全书", 2),
+            "educ": ("library_skill", "可教育性", "技能百科全书", 3),
+        }
+        spec = defs.get(str(skill_key))
+        if not spec:
+            return {"ok": False, "error": "未知的技能分支"}
+        node_id, title, book, index = spec
+        try:
+            module_base = int(get_base())
+            skill_base = self._find_skill_base()
+            if not skill_base:
+                return {"ok": False, "error": "未定位图书馆技能对象"}
+            # The secondary LibraryBehaviour object is what the skill scanner
+            # finds; the handler's this pointer is its owner 0x118 bytes back.
+            if pm.read_int(skill_base) != module_base + V1_SKILL_VTABLE_OFF:
+                return {"ok": False, "error": "图书馆技能对象校验失败，请重新连接游戏"}
+            behaviour = int(skill_base) - 0x118
+            if behaviour < 0x10000 or pm.read_int(behaviour) != module_base + V1_LIBRARY_BEHAVIOUR_VTABLE_OFF:
+                return {"ok": False, "error": "原生升级对象校验失败，请重启游戏后重试"}
+            target = next((node for node in _read_live_tech_nodes(pm) if node["id"] == node_id), None)
+            if not target:
+                return {"ok": False, "error": "当前地图没有“%s”节点" % title}
+            if int(target["state"]) != 1:
+                return {"ok": False, "error": "“%s”当前不可研究或已完成" % title}
+            level_addr = int(skill_base) + V1_SKILL_OFFSETS[index]
+            old_level = int(pm.read_int(level_addr) or 0)
+            if old_level >= 0x7FFFFFFF:
+                return {"ok": False, "error": "“%s”已达到 32 位等级字段上限" % title}
+        except Exception as e:
+            return {"ok": False, "error": "升级前校验失败：%s" % e}
+
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            try:
+                data = int(controller["data"])
+                # Do not interleave a library event with a manually created
+                # monster wave.  Both are serviced by the same update cave.
+                if pm.read_int(data + 0x00) or pm.read_int(data + 0x04):
+                    return {"ok": False, "error": "怪物传送门请求正在执行，请结束后再升级技能"}
+                if pm.read_int(data + self.LIBRARY_QUEUE_REQUEST_OFF):
+                    return {"ok": False, "error": "已有技能升级请求正在等待游戏处理"}
+                pm.write_int(data + self.LIBRARY_QUEUE_THIS_OFF, behaviour)
+                pm.write_int(data + self.LIBRARY_QUEUE_NODE_OFF, int(target["address"]))
+                pm.write_int(data + self.LIBRARY_QUEUE_RESULT_OFF, 0)
+                # Write the request last: the update thread observes either a
+                # complete {this,node} pair or no work at all.
+                pm.write_int(data + self.LIBRARY_QUEUE_REQUEST_OFF, 1)
+            except Exception as e:
+                return {"ok": False, "error": "提交原生升级请求失败：%s" % e}
+
+        # Usually consumed on the very next frame.  A short wait lets the UI
+        # refresh with the actual game-owned value, but a paused game still
+        # receives a truthful queued result instead of a false failure.
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline:
+            try:
+                result = int(pm.read_int(data + self.LIBRARY_QUEUE_RESULT_OFF) or 0)
+                current = int(pm.read_int(level_addr) or 0)
+                if result == 1:
+                    if current > old_level:
+                        return {
+                            "ok": True, "native": True, "name": title, "book": book,
+                            "old_level": old_level, "level": current,
+                            "message": "游戏原生升级已完成，相关效果与正常制造百科全书一致。",
+                        }
+                    return {"ok": False, "error": "游戏已执行升级处理器，但等级没有变化；该分支可能已达上限或条件不足"}
+            except Exception as e:
+                return {"ok": False, "error": "等待原生升级结果失败：%s" % e}
+            time.sleep(0.025)
+        return {
+            "ok": True, "queued": True, "native": True, "name": title,
+            "old_level": old_level,
+            "message": "原生升级请求已排入游戏线程；恢复游戏后点击刷新即可确认等级。",
+        }
+
+    def _write_dwarf_hp_legacy_layout(self, edi, value, is_v2):
+        """Write the same health fields as v2.76, never executable code."""
+        value = float(value)
+        if is_v2:
+            es = edi + V2_DWARF_HP_ENC
+            k1 = pm.read_int(es + 8); k2 = pm.read_int(es + 12)
+            fi = struct.unpack("<I", struct.pack("<f", value))[0]
+            pm.write_int(es, fi ^ k1); pm.write_int(es + 4, fi ^ k2)
+            pm.write_float(edi + V2_DWARF_HP_DISP, value)
+            pm.write_float(edi + V2_DWARF_HP_CACHE, value)
+        else:
+            # CE verification on the current Steam V1 build shows that
+            # EDI+0x180 and EDI+0x188 are control fields (0, 0, 15, 63), not
+            # HP cache floats.  Older v2.76 wrote them as value*2/value and
+            # immediately corrupted the dwarf object.  HP is the two encrypted
+            # words at +0x190/+0x194; touch those words only.
+            es = edi + 0x190
+            k1 = pm.read_int(es + 8); k2 = pm.read_int(es + 12)
+            fi = struct.unpack("<I", struct.pack("<f", value))[0]
+            pm.write_int(es, fi ^ k1)
+            pm.write_int(es + 4, fi ^ k2)
+
+    def _read_live_dwarf_hp(self, edi, is_v2):
+        """Read authoritative HP without exposing a transient NaN cache.
+
+        Steam V1 keeps two independently encrypted copies at ``+0x190``.
+        The UI cache at ``+0xBD0`` is not authoritative and is occasionally
+        NaN for a frame, even when both secure copies are valid.  Requiring
+        the two copies to agree also avoids displaying data from a dwarf that
+        is being removed or rebuilt by the game.
+        """
+        try:
+            if is_v2:
+                value = pm.read_float(edi + V2_DWARF_HP_DISP)
+                if value is None or not math.isfinite(value) or value < 0.0 or value > 100000.0:
+                    return None
+                return float(value)
+            es = edi + 0x190
+            a = pm.read_int(es)
+            b = pm.read_int(es + 4)
+            k1 = pm.read_int(es + 8)
+            k2 = pm.read_int(es + 12)
+            if None in (a, b, k1, k2):
+                return None
+            first = struct.unpack("<f", struct.pack("<I", (int(a) ^ int(k1)) & 0xFFFFFFFF))[0]
+            second = struct.unpack("<f", struct.pack("<I", (int(b) ^ int(k2)) & 0xFFFFFFFF))[0]
+            if (not math.isfinite(first) or not math.isfinite(second) or
+                    first < 0.0 or second < 0.0 or first > 100000.0 or second > 100000.0 or
+                    abs(first - second) > 0.10):
+                return None
+            return float((first + second) * 0.5)
+        except Exception:
+            return None
+
+    def _write_dwarf_satiety_legacy_layout(self, edi, value, is_v2):
+        """Write both encrypted V1 satiety copies while the game is paused.
+
+        On the current Steam build ``EDI+0x1A4/+0x1A8`` are the two encrypted
+        hunger values; ``+0xBCC`` is only the displayed cache.  Updating that
+        cache alone is overwritten by the next game update, which made the
+        old full-satiety button appear to do nothing.  The two ciphertexts are
+        written as one paused transaction, then the cache is synchronised for
+        an immediate UI refresh.
+        """
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0 or value > 10.0:
+            raise ValueError("satiety must be between 0 and 10")
+        if is_v2:
+            es = edi + V2_DWARF_SAT_ENC
+            k1 = pm.read_int(es + 8); k2 = pm.read_int(es + 12)
+            fi = struct.unpack("<I", struct.pack("<f", value))[0]
+            pm.write_int(es, fi ^ k1); pm.write_int(es + 4, fi ^ k2)
+            pm.write_float(edi + V2_DWARF_SAT_DISP, value)
+        else:
+            es = edi + 0x1A4
+            k1 = pm.read_int(es + 8)
+            k2 = pm.read_int(es + 12)
+            if k1 is None or k2 is None:
+                raise RuntimeError("unable to read V1 satiety keys")
+            fi = struct.unpack("<I", struct.pack("<f", value))[0]
+            pm.write_int(es, fi ^ int(k1))
+            pm.write_int(es + 4, fi ^ int(k2))
+            pm.write_float(edi + 0xBCC, value)
+
+    def _read_live_dwarf_satiety(self, edi, is_v2):
+        """Read the authoritative satiety field and reject unstable objects."""
+        try:
+            if is_v2:
+                value = pm.read_float(edi + V2_DWARF_SAT_DISP)
+                if value is None or not math.isfinite(value) or value < 0.0 or value > 10.01:
+                    return None
+                return float(value)
+            es = edi + 0x1A4
+            a = pm.read_int(es)
+            b = pm.read_int(es + 4)
+            k1 = pm.read_int(es + 8)
+            k2 = pm.read_int(es + 12)
+            if None in (a, b, k1, k2):
+                return None
+            first = struct.unpack("<f", struct.pack("<I", (int(a) ^ int(k1)) & 0xFFFFFFFF))[0]
+            second = struct.unpack("<f", struct.pack("<I", (int(b) ^ int(k2)) & 0xFFFFFFFF))[0]
+            if (not math.isfinite(first) or not math.isfinite(second) or
+                    first < 0.0 or first > 10.01 or second < 0.0 or second > 10.01 or
+                    abs(first - second) > 0.01):
+                return None
+            return float((first + second) * 0.5)
+        except Exception:
+            return None
+
+    def _bulk_live_dwarves(self, is_v2):
+        """Return a freshly scanned, still-listed group of writable dwarves.
+
+        This helper is called while the game is suspended.  Checking both the
+        manager list and object coordinates avoids writing a pointer that was
+        removed or reused between the UI refresh and the button click.
+        """
+        live_v1 = None if is_v2 else self._v1_dwarf_set()
+        if live_v1 is not None and not live_v1:
+            return []
+        result = []
+        for dwarf in self.scan_dwarves():
+            try:
+                edi = int(dwarf.get("edi", 0))
+                if (live_v1 is not None and edi not in live_v1) or not self._validate_dwarf(edi, is_v2):
+                    continue
+                result.append(dwarf)
+            except Exception:
+                continue
+        return result
+
+    def _live_dwarf_by_index(self, idx):
+        """Re-scan immediately before a write; do not rely on a stale UI cache."""
+        for dwarf in self.scan_dwarves():
+            if dwarf.get("idx") == int(idx):
+                return dwarf
+        return None
+
+    def _dwarf_max_hp(self, gender, is_v2):
+        """Use the same hardening bonus calculation as v2.76's heal button."""
+        base_hp = 10.0 if int(gender or 0) == 0 else 8.0
+        harden = 1
+        try:
+            skill_base = self._find_skill_base()
+            if skill_base:
+                offs = V2_SKILL_OFFSETS if is_v2 else V1_SKILL_OFFSETS
+                harden = max(1, int(pm.read_int(skill_base + offs[1])))
+        except Exception:
+            pass
+        return round(base_hp * (1.0 + max(0, harden - 1) * 0.05), 1)
+
+    def _read_live_dwarf_max_hp(self, edi, is_v2):
+        """Return the max HP currently stored by the game, never a derived guess."""
+        try:
+            es = edi + (V2_DWARF_MAXHP_ENC if is_v2 else 0x1C0)
+            k1 = pm.read_int(es + 8)
+            k2 = pm.read_int(es + 12)
+            a = pm.read_int(es)
+            b = pm.read_int(es + 4)
+            if None in (k1, k2, a, b):
+                return None
+            first = struct.unpack("<f", struct.pack("<I", (int(a) ^ int(k1)) & 0xFFFFFFFF))[0]
+            second = struct.unpack("<f", struct.pack("<I", (int(b) ^ int(k2)) & 0xFFFFFFFF))[0]
+            # The two encrypted copies must agree.  Refuse to write an object
+            # in the middle of being changed/despawned by the game.
+            if not (1.0 <= first <= 100.0 and abs(first - second) <= 0.05):
+                return None
+            return float(first)
+        except Exception:
+            return None
+
+    def heal_all(self):
+        """Fill each dwarf to the live max HP currently held by the game."""
+        if not pm or not connected:
+            return {"ok": False, "error": "请先连接游戏"}
+        guard = self._require_safe_write("全体回血")
+        if guard:
+            print(guard)
+            return {"ok": False, "error": guard}
+        is_v2 = self._detect_v2()
+
+        def write_and_verify(snapshot):
+            count = 0
+            for dwarf in self._bulk_live_dwarves(is_v2):
+                edi = int(dwarf["edi"])
+                max_hp = self._read_live_dwarf_max_hp(edi, is_v2)
+                if max_hp is None:
+                    continue
+                hp_enc = edi + (V2_DWARF_HP_ENC if is_v2 else 0x190)
+                snapshot(hp_enc, 16)
+                snapshot(edi + (V2_DWARF_HP_DISP if is_v2 else 0xBD0), 4)
+                if is_v2:
+                    snapshot(edi + V2_DWARF_HP_CACHE, 4)
+                self._write_dwarf_hp_legacy_layout(edi, max_hp, is_v2)
+                actual = self._read_live_dwarf_hp(edi, is_v2)
+                if actual is None or abs(actual - max_hp) > 0.05:
+                    raise RuntimeError("矮人生命值读回不一致")
+                count += 1
+            return count
+
+        ok, count, error = self._paused_memory_transaction(write_and_verify)
+        if not ok:
+            print("heal_all:", error)
+            return {"ok": False, "error": error or "全员回血未通过写后读回校验"}
+        # WebView write endpoints use an explicit result envelope.  Returning
+        # only the affected count made a successful ``12`` look like a failed
+        # protected write to the generic operation logger.
+        return {"ok": True, "count": int(count or 0)}
+
+    def full_sat(self):
+        """Fill only validated, still-listed dwarves with a verified field."""
+        if not pm or not connected:
+            return {"ok": False, "error": "请先连接游戏"}
+        guard = self._require_safe_write("全体饱食")
+        if guard:
+            print(guard)
+            return {"ok": False, "error": guard}
+        is_v2 = self._detect_v2()
+
+        def write_and_verify(snapshot):
+            count = 0
+            for dwarf in self._bulk_live_dwarves(is_v2):
+                edi = int(dwarf["edi"])
+                # A valid authoritative value is the last guard before
+                # writing.  Never turn a reused pointer into a dwarf merely
+                # because it still happens to occur in the vector.
+                if self._read_live_dwarf_satiety(edi, is_v2) is None:
+                    continue
+                sat_enc = edi + (V2_DWARF_SAT_ENC if is_v2 else 0x1A4)
+                snapshot(sat_enc, 16)
+                snapshot(edi + (V2_DWARF_SAT_DISP if is_v2 else 0xBCC), 4)
+                self._write_dwarf_satiety_legacy_layout(edi, 10.0, is_v2)
+                actual = self._read_live_dwarf_satiety(edi, is_v2)
+                if actual is None or abs(actual - 10.0) > 0.02:
+                    raise RuntimeError("矮人饱食度读回不一致")
+                count += 1
+            return count
+
+        ok, count, error = self._paused_memory_transaction(write_and_verify)
+        if not ok:
+            print("full_sat:", error)
+            return {"ok": False, "error": error or "全员补饱食度未通过写后读回校验"}
+        return {"ok": True, "count": int(count or 0)}
+
+    @staticmethod
+    def _write_secure_float(address, value):
+        """Write both encrypted float copies while the caller holds a pause."""
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0 or value > 100000.0:
+            raise ValueError("invalid secure float")
+        k1 = pm.read_int(int(address) + 8)
+        k2 = pm.read_int(int(address) + 12)
+        if k1 is None or k2 is None:
+            raise RuntimeError("unable to read secure float keys")
+        bits = struct.unpack("<I", struct.pack("<f", value))[0]
+        pm.write_int(int(address), bits ^ int(k1))
+        pm.write_int(int(address) + 4, bits ^ int(k2))
+
+    def _save_dwarf_personal_skills_transaction(self, idx, values,
+                                                _expected_current=None,
+                                                _record_history=True,
+                                                _return_result=False):
+        '''Private verified transaction for existing personal-skill values.
+
+        The public legacy endpoint remains intentionally policy-blocked.  All
+        verified callers use this private path so an old endpoint's safety
+        wrapper cannot accidentally deny the checked transaction itself.
+        '''
+        if not isinstance(values, dict) or not values:
+            return False
+        requested = {}
+        try:
+            for raw_id, raw_value in values.items():
+                skill_id = str(raw_id or '').strip().lower()
+                value = float(raw_value)
+                if (skill_id not in V1_PERSONAL_SKILL_TITLES or
+                        not math.isfinite(value) or value < 0.0 or value > 100000.0):
+                    return False
+                requested[skill_id] = value
+        except (TypeError, ValueError):
+            return False
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return False
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf:
+                return False
+            edi = int(dwarf.get('edi') or 0)
+            if not self._validate_dwarf(edi, False) or edi not in self._v1_dwarf_set():
+                return False
+            before_live = {item['id']: float(item['value'])
+                           for item in self._read_v1_personal_skills(edi)}
+            if any(skill_id not in before_live for skill_id in requested):
+                return False
+            expected = dict(_expected_current or {})
+            for skill_id, expected_value in expected.items():
+                current = before_live.get(skill_id)
+                if current is None or abs(current - float(expected_value)) > 0.05:
+                    return False
+            before = {skill_id: before_live[skill_id] for skill_id in requested
+                      if abs(before_live[skill_id] - requested[skill_id]) > 0.05}
+            if not before:
+                result = {
+                    "ok": True,
+                    "changed": [],
+                    "before": {},
+                    "after": {},
+                    "readback_ok": True,
+                    "operation_id": None,
+                }
+                return result if _return_result else True
+            if not self._save_dwarf_personal_skills_write(
+                    idx, requested, _expected_current=expected or None):
+                return False
+            after_live = {item['id']: float(item['value'])
+                          for item in self._read_v1_personal_skills(edi)}
+            after = {skill_id: after_live.get(skill_id) for skill_id in before}
+            if any(after.get(skill_id) is None or
+                   abs(after[skill_id] - requested[skill_id]) > 0.05
+                   for skill_id in before):
+                rollback_ok = self._save_dwarf_personal_skills_write(
+                    idx, before, _expected_current=requested)
+                print('save_dwarf_personal_skills: post-write readback failed; rollback=%s' % rollback_ok)
+                return False
+            # The write has already been verified against the live record.
+            # Mirror that verified record into the UI cache so the next
+            # get_dwarves() response cannot briefly show the pre-write value.
+            try:
+                verified_skills = self._read_v1_personal_skills(edi)
+                cache_rows = _dwarf_cache_snapshot()
+                for cached in cache_rows:
+                    if int(cached.get('idx', -1)) == int(idx):
+                        cached['skills'] = [dict(item) for item in verified_skills]
+                        cached['skills_ready'] = True
+                        cached['skill_summary'] = self._personal_skill_summary(verified_skills)
+                        break
+                _replace_dwarf_cache(cache_rows)
+            except Exception as exc:
+                print('save_dwarf_personal_skills: cache refresh failed:', exc)
+            operation_id = None
+            if _record_history:
+                history = self._record_operation(
+                    'dwarf_personal_skill', 'runtime',
+                    {'dwarf_index': int(idx), 'edi': hex(edi),
+                     'dwarf_name': dwarf.get('name') or ('矮人 #%s' % idx)},
+                    '个人技能点', before, after, True,
+                    generation, pm_obj.process_id,
+                    {'skills': list(before.keys())})
+                operation_id = history.get("id") if isinstance(history, dict) else None
+            if _return_result:
+                return {
+                    "ok": True,
+                    "changed": list(before.keys()),
+                    "before": before,
+                    "after": after,
+                    "readback_ok": True,
+                    "operation_id": operation_id,
+                }
+            return True
+
+    def save_dwarf_personal_skills(self, idx, values, _expected_current=None,
+                                   _record_history=True, _return_result=False):
+        """Legacy public endpoint kept only so the central policy can deny it.
+
+        The UI must use ``save_dwarf_personal_skill_slots`` instead.  This
+        method deliberately remains a separately wrapped compatibility entry;
+        verified transactions call the private method above directly.
+        """
+        return self._save_dwarf_personal_skills_transaction(
+            idx, values, _expected_current=_expected_current,
+            _record_history=_record_history, _return_result=_return_result)
+
+    def _save_dwarf_personal_skills_write(self, idx, values, _expected_current=None):
+        """Safely write selected Steam V1 personal skills for one live Worker."""
+        if not pm or not connected or self._detect_v2() or not isinstance(values, dict):
+            return False
+        guard = self._require_safe_write("个人技能数值写入")
+        if guard:
+            print(guard)
+            return False
+        requested = {}
+        try:
+            for skill_id, value in values.items():
+                skill_id = str(skill_id or "").strip().lower()
+                numeric = float(value)
+                if (skill_id not in V1_PERSONAL_SKILL_TITLES or not math.isfinite(numeric) or
+                        numeric < 0.0 or numeric > 100000.0):
+                    return False
+                requested[skill_id] = numeric
+        except Exception:
+            return False
+        if not requested:
+            return True
+
+        def write_and_verify(snapshot):
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf:
+                raise RuntimeError("矮人已经离开或列表已刷新")
+            edi = int(dwarf.get("edi", 0))
+            if not self._validate_dwarf(edi, False) or edi not in self._v1_dwarf_set():
+                raise RuntimeError("矮人对象校验失败")
+            live_skills = {item["id"]: item for item in self._read_v1_personal_skills(edi)}
+            if any(skill_id not in live_skills for skill_id in requested):
+                raise RuntimeError("个人技能列表已变更")
+            expected = dict(_expected_current or {})
+            for skill_id, expected_value in expected.items():
+                item = live_skills.get(str(skill_id or '').strip().lower())
+                if item is None or abs(float(item.get('value', 0.0)) - float(expected_value)) > 0.05:
+                    raise RuntimeError("个人技能已被游戏或其他操作修改，拒绝覆盖")
+            for skill_id, numeric in requested.items():
+                record = int(live_skills[skill_id]["record"])
+                # Re-check the definition immediately before the paired write.
+                if self._read_v1_personal_skill_id(record) != skill_id:
+                    raise RuntimeError("技能定义校验失败")
+                snapshot(record + V1_DWARF_SKILL_VALUE_OFF, 16)
+                self._write_secure_float(record + V1_DWARF_SKILL_VALUE_OFF, numeric)
+                actual = self._read_secure_float(record + V1_DWARF_SKILL_VALUE_OFF)
+                if actual is None or abs(float(actual) - numeric) > 0.05:
+                    raise RuntimeError("技能数值读回不一致")
+            return True
+
+        ok, _result, error = self._paused_memory_transaction(write_and_verify)
+        if not ok:
+            print("save_dwarf_personal_skills:", error)
+        return bool(ok)
+
+    def _queue_v1_personal_skill_mutation(self, worker, operation, node=0, index=0, value=10.0):
+        """Submit one add/remove mutation to the already-hooked game thread."""
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            try:
+                base = int(controller["base"])
+                helper = base + self.PERSONAL_SKILL_NATIVE_ADD_RVA
+                if (int(operation) == self.PERSONAL_SKILL_QUEUE_ADD and
+                        pm.read_bytes(helper, len(self.PERSONAL_SKILL_NATIVE_ADD_PREFIX)) != self.PERSONAL_SKILL_NATIVE_ADD_PREFIX):
+                    return {"ok": False, "error": "个人技能原生添加函数与当前游戏版本不匹配"}
+                data = int(controller["data"])
+                request = data + self.PERSONAL_SKILL_QUEUE_REQUEST_OFF
+                result = data + self.PERSONAL_SKILL_QUEUE_RESULT_OFF
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "error": "上一条个人技能操作仍在等待游戏处理"}
+                if int(operation) == self.PERSONAL_SKILL_QUEUE_ADD:
+                    if not self._read_v1_personal_skill_node_id(node):
+                        return {"ok": False, "error": "个人技能定义节点无效"}
+                    bits = struct.unpack("<I", struct.pack("<f", float(value)))[0]
+                    queue_value = int(bits)
+                elif int(operation) == self.PERSONAL_SKILL_QUEUE_REMOVE:
+                    queue_value = int(index)
+                else:
+                    return {"ok": False, "error": "未知个人技能操作"}
+                pm.write_int(result, -1)
+                pm.write_int(data + self.PERSONAL_SKILL_QUEUE_WORKER_OFF, int(worker))
+                pm.write_int(data + self.PERSONAL_SKILL_QUEUE_NODE_OFF, int(node))
+                pm.write_int(data + self.PERSONAL_SKILL_QUEUE_OPERATION_OFF, int(operation))
+                pm.write_int(data + self.PERSONAL_SKILL_QUEUE_INDEX_OFF, queue_value)
+                # Request is deliberately written last: the next update frame
+                # sees either a complete mutation or no work at all.
+                pm.write_int(request, 1)
+            except Exception as e:
+                return {"ok": False, "error": "提交个人技能原生操作失败：%s" % e}
+
+            deadline = time.monotonic() + 1.5
+            native_result = -1
+            while time.monotonic() < deadline:
+                try:
+                    native_result = int(pm.read_int(result))
+                    if native_result != -1:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.03)
+        if native_result != 1:
+            return {"ok": False, "error": "游戏没有确认个人技能操作，请刷新后检查"}
+        return {"ok": True}
+
+    def save_dwarf_personal_skill_slots(self, idx, slots):
+        """Make the three personal-skill slots match the submitted UI state."""
+        if not pm or not connected:
+            return {"ok": False, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "个人技能增删目前只验证了 Steam 原版"}
+        guard = self._require_safe_write("个人技能增删")
+        if guard:
+            return {"ok": False, "error": guard}
+        if not isinstance(slots, (list, tuple)) or len(slots) > self.PERSONAL_SKILL_MAX_PER_DWARF:
+            return {"ok": False, "error": "个人技能槽位数据无效"}
+        desired = []
+        seen = set()
+        try:
+            for raw in slots:
+                if not isinstance(raw, dict):
+                    continue
+                skill_id = str(raw.get("id", "") or "").strip().lower()
+                if not skill_id:
+                    continue
+                value = float(raw.get("value", 10.0))
+                if (skill_id not in V1_PERSONAL_SKILL_TITLES or skill_id in seen or
+                        not math.isfinite(value) or value < 0.0 or value > 100000.0):
+                    return {"ok": False, "error": "技能名称、数值或重复技能无效"}
+                desired.append({"id": skill_id, "value": value})
+                seen.add(skill_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "个人技能数值无效"}
+
+        dwarf = self._live_dwarf_by_index(idx)
+        if not dwarf:
+            return {"ok": False, "error": "该矮人已离开或数据已刷新，请重新打开窗口"}
+        worker = int(dwarf.get("edi", 0) or 0)
+        if not self._validate_dwarf(worker, False) or worker not in self._v1_dwarf_set():
+            return {"ok": False, "error": "矮人对象已失效，请刷新列表后重试"}
+        state = self._v1_personal_skill_vector_state(worker)
+        live = self._read_v1_personal_skills(worker)
+        if not state or state["count"] != len(live) or state["count"] > self.PERSONAL_SKILL_MAX_PER_DWARF:
+            return {"ok": False, "error": "个人技能列表正在更新，暂不能安全增删"}
+        wanted_ids = {item["id"] for item in desired}
+        added, removed = [], []
+        # Remove from the end so vector indexes remain valid after each native
+        # erase.  The helper executes on the game thread and every mutation is
+        # followed by a fresh vector read before the next one is submitted.
+        for position in range(len(live) - 1, -1, -1):
+            row = live[position]
+            if row.get("id") in wanted_ids:
+                continue
+            result = self._queue_v1_personal_skill_mutation(
+                worker, self.PERSONAL_SKILL_QUEUE_REMOVE, index=position)
+            if not result.get("ok"):
+                return {"ok": False, "error": "删除个人技能失败：%s" % (result.get("error") or "游戏未确认")}
+            removed.append(str(row.get("id") or ""))
+            state = self._v1_personal_skill_vector_state(worker)
+            live = self._read_v1_personal_skills(worker)
+            if not state or state["count"] != len(live):
+                return {"ok": False, "error": "删除后个人技能列表读回失败"}
+
+        live_ids = {item["id"] for item in live}
+        missing = [item for item in desired if item["id"] not in live_ids]
+        if missing:
+            nodes = self._resolve_v1_personal_skill_nodes()
+            for item in missing:
+                node = int(nodes.get(item["id"], 0) or 0)
+                if not node:
+                    return {"ok": False, "error": "未定位到“%s”的原生技能定义" % item["id"]}
+                result = self._queue_v1_personal_skill_mutation(
+                    worker, self.PERSONAL_SKILL_QUEUE_ADD, node=node, value=item["value"])
+                if not result.get("ok"):
+                    return {"ok": False, "error": "新增个人技能失败：%s" % (result.get("error") or "游戏未确认")}
+                added.append(item["id"])
+                state = self._v1_personal_skill_vector_state(worker)
+                live = self._read_v1_personal_skills(worker)
+                if not state or state["count"] != len(live) or item["id"] not in {row["id"] for row in live}:
+                    return {"ok": False, "error": "新增后个人技能列表读回失败"}
+
+        values = {item["id"]: item["value"] for item in desired}
+        skill_result = (self._save_dwarf_personal_skills_transaction(
+            idx, values, _return_result=True) if values else
+            {"ok": True, "changed": [], "operation_id": None})
+        if not skill_result or not skill_result.get("ok"):
+            return {"ok": False, "error": "技能数值写入失败；请刷新后重新设置数值"}
+        return {
+            "ok": True,
+            "count": len(desired),
+            "changed": skill_result.get("changed", []),
+            "added": added,
+            "removed": removed,
+            "operation_id": skill_result.get("operation_id"),
+            "readback_ok": bool(skill_result.get("readback_ok", True)),
+        }
+
+    def save_dwarf_fields(self, idx, values):
+        """Atomically save changed dwarf fields from one dialog submission."""
+        if not pm or not connected or not isinstance(values, dict):
+            return False
+        guard = self._require_safe_write("矮人属性写入")
+        if guard:
+            print(guard)
+            return False
+        try:
+            requested = {}
+            for key in ("x", "y", "hp", "sat"):
+                if key not in values:
+                    continue
+                value = float(values[key])
+                if not math.isfinite(value):
+                    return False
+                if key in ("x", "y") and not (0.0 <= value <= 20000.0):
+                    return False
+                if key == "hp" and not (0.0 <= value <= 100000.0):
+                    return False
+                if key == "sat" and not (0.0 <= value <= 10.0):
+                    return False
+                requested[key] = value
+            if not requested:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+        is_v2 = self._detect_v2()
+
+        def write_and_verify(snapshot):
+            # Resolve the UI index only after pausing; a cached address can be
+            # freed/reused while a dwarf dies, teleports, or leaves the world.
+            dwarf = self._live_dwarf_by_index(idx)
+            if not dwarf:
+                raise RuntimeError("矮人已经离开或列表已刷新")
+            edi = int(dwarf["edi"])
+            if not self._validate_dwarf(edi, is_v2):
+                raise RuntimeError("矮人对象校验失败")
+            if not is_v2 and edi not in self._v1_dwarf_set():
+                raise RuntimeError("矮人已不在当前游戏列表中")
+
+            if "x" in requested:
+                snapshot(edi + (V2_DWARF_X if is_v2 else 0x428), 4)
+            if "y" in requested:
+                snapshot(edi + (V2_DWARF_Y if is_v2 else 0x42C), 4)
+            if "hp" in requested:
+                hp_enc = edi + (V2_DWARF_HP_ENC if is_v2 else 0x190)
+                snapshot(hp_enc, 16)
+                snapshot(edi + (V2_DWARF_HP_DISP if is_v2 else 0xBD0), 4)
+                if is_v2:
+                    snapshot(edi + V2_DWARF_HP_CACHE, 4)
+            if "sat" in requested:
+                sat_enc = edi + (V2_DWARF_SAT_ENC if is_v2 else 0x1A4)
+                snapshot(sat_enc, 16)
+                snapshot(edi + (V2_DWARF_SAT_DISP if is_v2 else 0xBCC), 4)
+
+            if "x" in requested:
+                pm.write_float(edi + (V2_DWARF_X if is_v2 else 0x428), requested["x"])
+            if "y" in requested:
+                pm.write_float(edi + (V2_DWARF_Y if is_v2 else 0x42C), requested["y"])
+            if "hp" in requested:
+                self._write_dwarf_hp_legacy_layout(edi, requested["hp"], is_v2)
+            if "sat" in requested:
+                self._write_dwarf_satiety_legacy_layout(edi, requested["sat"], is_v2)
+
+            if "x" in requested:
+                actual_x = pm.read_float(edi + (V2_DWARF_X if is_v2 else 0x428))
+                if actual_x is None or abs(float(actual_x) - requested["x"]) > 0.01:
+                    raise RuntimeError("X 坐标读回不一致")
+            if "y" in requested:
+                actual_y = pm.read_float(edi + (V2_DWARF_Y if is_v2 else 0x42C))
+                if actual_y is None or abs(float(actual_y) - requested["y"]) > 0.01:
+                    raise RuntimeError("Y 坐标读回不一致")
+            if "hp" in requested:
+                actual = self._read_live_dwarf_hp(edi, is_v2)
+                if actual is None or abs(actual - requested["hp"]) > 0.05:
+                    raise RuntimeError("生命值读回不一致")
+            if "sat" in requested:
+                actual = self._read_live_dwarf_satiety(edi, is_v2)
+                if actual is None or abs(actual - requested["sat"]) > 0.02:
+                    raise RuntimeError("饱食度读回不一致")
+            return True
+
+        ok, _result, error = self._paused_memory_transaction(write_and_verify)
+        if not ok:
+            print("save_dwarf_fields:", error)
+        return bool(ok)
+
+    def save_dwarf(self, idx, field, val):
+        """Backward-compatible single-field entry point for existing UI calls."""
+        if field not in ("x", "y", "hp", "sat"):
+            return False
+        return self.save_dwarf_fields(idx, {field: val})
+
+    def scan_items(self):
+        """扫描并缓存所有物品"""
+        global item_cache
+        if not pm or not connected:
+            _set_cached_read_state("items", self.STATUS_DISCONNECTED, "尚未连接游戏")
+            return 0
+        try:
+            is_v2 = self._detect_v2()
+            arr_start, arr_end = _get_item_array(pm, is_v2=is_v2)
+            elem_size = V2_RES_ELEM_SIZE if is_v2 else SLOT_SIZE
+            if (not self._valid_runtime_pointer(arr_start) or
+                    not self._valid_runtime_pointer(arr_end) or
+                    int(arr_end) < int(arr_start) or
+                    (int(arr_end) - int(arr_start)) % int(elem_size) != 0):
+                _set_cached_read_state(
+                    "items", self.STATUS_STALE,
+                    "物品数组定位失败或结构无效；未把该结果当作空仓库")
+                return len(item_cache)
+            slot_count = (int(arr_end) - int(arr_start)) // int(elem_size)
+            if slot_count < 0 or slot_count > 65536:
+                _set_cached_read_state(
+                    "items", self.STATUS_STALE,
+                    "物品数组长度异常；未把该结果当作空仓库")
+                return len(item_cache)
+            result = scan_all_items(pm, is_v2=is_v2)
+            if not isinstance(result, list):
+                raise RuntimeError("物品扫描器返回结构无效")
+            item_cache=result
+            if item_cache:
+                _set_cached_read_state("items", self.STATUS_VERIFIED)
+            else:
+                state, error = self._runtime_read_unavailable_state()
+                if state == self.STATUS_STALE:
+                    state, error = self.STATUS_EMPTY, "当前存档没有可扫描的仓库物品"
+                _set_cached_read_state("items", state, error)
+            return len(item_cache)
+        except Exception as exc:
+            _set_cached_read_state("items", self.STATUS_STALE, "物品扫描异常：%s" % exc)
+            return 0
+
+    def get_items(self,page=0,ps=99999):
+        """获取物品列表（支持分页）"""
+        self._load_item_config()
+        start=page*ps;items=[]
+        self._load_item_states()
+        for it in item_cache[start:start+ps]:
+            sh=""
+            if hasattr(self,"_shop_data") and it.get("name_en","") in self._shop_data:
+                sd=self._shop_data[it["name_en"]]
+                sh="%d-%d"%(sd.get("price",0),sd.get("qty",0))
+            name_en = it.get("name_en","")
+            name_cn = it.get("name_cn","") or self.get_translation(name_en) or name_en
+            cat = self._category_overrides.get(name_en, "") or it.get("category", "")
+            pt = self._proof.get(name_en, "")
+            lk = "on" if name_en in self._locked else "off"
+            fv = "on" if name_en in self._fav else "off"
+            ws = "on" if name_en in self._world else "off"
+            sc = "on" if name_en in self._scrapped else "off"
+            items.append({"id":name_en,"name":name_cn,"qty":it.get("qty",0),"cat":cat,"shdata":sh,"proof":pt,"lock":lk,"fav":fv,"world":ws,"scrap":sc})
+        return items
+
+    def get_items_status(self, page=0, ps=99999):
+        """Return item cache with an explicit outcome for the inventory UI."""
+        state = _get_cached_read_state("items")
+        if state.get("state") == self.STATUS_EMPTY:
+            return self._read_envelope(True, self.STATUS_EMPTY, [],
+                                       state.get("error") or "当前存档没有可扫描的仓库物品", count=0)
+        if state.get("state") != self.STATUS_VERIFIED:
+            return self._read_envelope(False, state.get("state") or self.STATUS_FAILED, [],
+                                       state.get("error") or "物品数据未就绪", cached_count=len(item_cache))
+        rows = self.get_items(page, ps)
+        return self._read_envelope(True, self.STATUS_VERIFIED, rows, count=len(rows))
+
+    def scan_items_status(self):
+        self.scan_items()
+        return self.get_items_status()
+
+    def scan_shop(self):
+        """扫描商店数据"""
+        try:
+            self._shop_data = scan_shop_data(pm, self._detect_v2())
+            return len(self._shop_data)
+        except:
+            self._shop_data = {}
+            return 0
+
+    def item_count(self): return len(item_cache)
+    def _validate_item_slot(self, slot_addr, expected_name, is_v2=None):
+        """验证物品槽地址是否仍然有效，防止写入失效地址导致游戏崩溃"""
+        if not pm or not slot_addr or slot_addr < 0x10000:
+            return False
+        try:
+            if is_v2 is None:
+                is_v2 = self._detect_v2()
+            if is_v2:
+                name = _read_item_name(pm, slot_addr, 0x64, 32, 32)
+            else:
+                name = _read_item_name(pm, slot_addr, OFF_NAME_EN, 16, 32)
+            if not name or name != expected_name:
+                return False
+            return True
+        except:
+            return False
+
+    def refresh_items(self):
+        """只重读缓存中物品的数量，不做全量扫描"""
+        global item_cache
+        if not pm or not connected:
+            _set_cached_read_state("items", self.STATUS_DISCONNECTED, "尚未连接游戏")
+            return 0
+        if not item_cache:
+            return 0
+        is_v2 = self._detect_v2()
+        refreshed = []
+        failed = 0
+        for original in item_cache:
+            try:
+                # Work on a fresh row and only publish the complete batch.
+                # A failed slot read must not silently leave an old quantity
+                # on screen and pretend that it came from this refresh.
+                it = dict(original)
+                sa = it.get("slot_addr")
+                name_en = str(it.get("name_en") or "")
+                if not sa or not name_en or not self._validate_item_slot(sa, name_en, is_v2):
+                    raise RuntimeError("物品槽已变化")
+                if is_v2:
+                    key1 = pm.read_int(sa + V2_ELEM_KEY1)
+                    enc1 = pm.read_int(sa + V2_ELEM_ENC1)
+                    qty = (key1 ^ enc1) & 0xFFFFFFFF
+                else:
+                    dec1 = pm.read_int(sa + OFF_DEC1)
+                    enc1 = pm.read_int(sa + OFF_ENC1)
+                    qty = (enc1 ^ dec1) & 0xFFFFFFFF
+                if qty > 0x7FFFFFFF:
+                    qty -= 0x100000000
+                if qty < 0:
+                    qty = 0
+                it["qty"] = qty
+                refreshed.append(it)
+            except Exception:
+                failed += 1
+        if failed or len(refreshed) != len(item_cache):
+            _set_cached_read_state(
+                "items", self.STATUS_STALE,
+                "物品数量刷新不完整：已验证 %s/%s 个物品槽；保留上次完整缓存，但未将其当作当前结果" %
+                (len(refreshed), len(item_cache)))
+            return len(item_cache)
+        item_cache = refreshed
+        _set_cached_read_state("items", self.STATUS_VERIFIED)
+        return len(item_cache)
+
+    def refresh_items_status(self):
+        self.refresh_items()
+        return self.get_items_status()
+
+    def _modify_item_qty_transaction(self, name_en, qty, expected_current=None,
+                                      record_history=True):
+        '''Write one scanned stack and prove the exact field was changed.'''
+        guard = self._require_safe_write('物品数量写入')
+        if guard:
+            return {'ok': False, 'error': guard}
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': '数量必须是整数'}
+        if qty < 0 or qty > 99999:
+            return {'ok': False, 'error': '数量必须在 0 到 99999 之间'}
+        name_en = str(name_en or '')
+        with self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {'ok': False, 'error': '游戏连接已失效，请重新连接后扫描物品'}
+            item = next((entry for entry in item_cache
+                         if entry.get('name_en') == name_en), None)
+            if not item:
+                return {'ok': False, 'error': '物品不在当前扫描结果中，请重新扫描'}
+            slot_addr = int(item.get('slot_addr') or 0)
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                return {'ok': False, 'error': '无法暂停游戏以安全写入物品'}
+            try:
+                is_v2 = self._detect_v2()
+                if not self._validate_item_slot(slot_addr, name_en, is_v2):
+                    return {'ok': False, 'error': '物品槽已变化，请重新扫描后再试'}
+                if is_v2:
+                    before = (int(pm_obj.read_int(slot_addr + V2_ELEM_KEY1)) ^
+                              int(pm_obj.read_int(slot_addr + V2_ELEM_ENC1))) & 0xFFFFFFFF
+                else:
+                    before = (int(pm_obj.read_int(slot_addr + OFF_DEC1)) ^
+                              int(pm_obj.read_int(slot_addr + OFF_ENC1))) & 0xFFFFFFFF
+                if before > 0x7FFFFFFF:
+                    before -= 0x100000000
+                if before < 0:
+                    return {'ok': False, 'error': '物品数量字段无效，请重新扫描'}
+                if expected_current is not None and int(before) != int(expected_current):
+                    return {'ok': False, 'error': '物品数量已被游戏或其他操作修改，拒绝覆盖'}
+                if int(before) == qty:
+                    return {'ok': True, 'changed': False, 'before': int(before),
+                            'after': int(before), 'readback_ok': True}
+                ok, message = modify_item_quantity(pm_obj, slot_addr, qty, is_v2)
+                if not ok:
+                    return {'ok': False, 'error': str(message or '物品数量写入失败，已回滚')}
+                if is_v2:
+                    after = (int(pm_obj.read_int(slot_addr + V2_ELEM_KEY1)) ^
+                             int(pm_obj.read_int(slot_addr + V2_ELEM_ENC1))) & 0xFFFFFFFF
+                else:
+                    after = (int(pm_obj.read_int(slot_addr + OFF_DEC1)) ^
+                             int(pm_obj.read_int(slot_addr + OFF_ENC1))) & 0xFFFFFFFF
+                if after > 0x7FFFFFFF:
+                    after -= 0x100000000
+                if int(after) != qty:
+                    # ``modify_item_quantity`` has its own paired-field
+                    # rollback, but a later readback can still disagree if a
+                    # process/API failure happened between helper validation
+                    # and this authoritative transaction read.  Restore the
+                    # exact snapshot before reporting failure; never merely
+                    # *claim* that a rollback occurred.
+                    rollback_ok, rollback_message = modify_item_quantity(
+                        pm_obj, slot_addr, int(before), is_v2)
+                    if rollback_ok:
+                        return {'ok': False, 'error': '物品数量写后读回不一致，已按快照回滚'}
+                    return {'ok': False, 'error': '物品数量写后读回不一致，回滚失败：%s' % rollback_message}
+                item['qty'] = int(after)
+                result = {'ok': True, 'changed': True, 'before': int(before),
+                          'after': int(after), 'readback_ok': True}
+                if record_history:
+                    history = self._record_operation(
+                        'runtime_item_qty', 'runtime',
+                        {'item_id': name_en,
+                         'item_name': item.get('name_cn') or self.get_translation(name_en) or name_en,
+                         'slot_addr': hex(slot_addr)},
+                        '数量', int(before), int(after), True,
+                        generation, pm_obj.process_id,
+                        {'version': 'v2' if is_v2 else 'v1'})
+                    result['operation_id'] = history['id']
+                return result
+            except Exception as exc:
+                return {'ok': False, 'error': '物品数量写入异常：%s' % exc}
+            finally:
+                self._resume(hnd)
+
+    def modify_item_qty(self, name_en, qty):
+        """Return the verified V1.0 transaction result for one existing stack."""
+        return self._modify_item_qty_transaction(name_en, qty)
+
+    def _clean_item_quick_settings(self, value):
+        """Validate the compact, portable form stored in user_data.json."""
+        clean = {}
+        if not isinstance(value, dict):
+            return clean
+        for raw_id, raw in value.items():
+            try:
+                name_en = str(raw_id or "").strip()
+                if not name_en or len(name_en) > 160 or not isinstance(raw, dict):
+                    continue
+                qty = raw.get("qty")
+                if qty is not None:
+                    if isinstance(qty, bool):
+                        continue
+                    numeric = float(qty)
+                    if not math.isfinite(numeric) or int(numeric) != numeric:
+                        continue
+                    qty = int(numeric)
+                    if qty < 0 or qty > 0x7FFFFFFF:
+                        continue
+                title = str(raw.get("title", "")).strip()[:80]
+                clean[name_en] = {"qty": qty, "lock": bool(raw.get("lock", False)), "title": title}
+                if len(clean) >= self.ITEM_QUICK_LIMIT:
+                    break
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return clean
+
+    def _read_item_quick_settings(self):
+        try:
+            return self._clean_item_quick_settings(self._read_config().get("item_quick_settings", {}))
+        except Exception:
+            return {}
+
+    def get_item_quick_settings(self):
+        """Return saved common items together with their currently scanned quantity."""
+        self._load_item_config()
+        settings = self._read_item_quick_settings()
+        by_name = {str(item.get("name_en", "")): item for item in item_cache}
+        result = []
+        for name_en, entry in settings.items():
+            item = by_name.get(name_en)
+            title = (item or {}).get("name_cn", "") or self.get_translation(name_en) or entry.get("title") or name_en
+            result.append({
+                "id": name_en,
+                "name": title,
+                "current_qty": (item or {}).get("qty"),
+                "qty": entry.get("qty"),
+                "lock": bool(entry.get("lock", False)),
+                "available": bool(item),
+            })
+        return result
+
+    def save_item_quick_setting(self, name_en, qty=None, lock=False, title=""):
+        """Add or update one item in the persistent common-item list."""
+        try:
+            name_en = str(name_en or "").strip()
+            if not name_en or len(name_en) > 160:
+                return {"ok": False, "error": "物品 ID 无效"}
+            if qty is not None:
+                if isinstance(qty, bool):
+                    return {"ok": False, "error": "目标数量必须是整数"}
+                number = float(qty)
+                if not math.isfinite(number) or int(number) != number:
+                    return {"ok": False, "error": "目标数量必须是整数"}
+                qty = int(number)
+                if qty < 0 or qty > 0x7FFFFFFF:
+                    return {"ok": False, "error": "目标数量范围为 0～2147483647"}
+            title = str(title or "").strip()[:80]
+
+            def update(cfg):
+                settings = self._clean_item_quick_settings(cfg.get("item_quick_settings", {}))
+                if name_en not in settings and len(settings) >= self.ITEM_QUICK_LIMIT:
+                    raise ValueError("常用物品最多保存 %d 个" % self.ITEM_QUICK_LIMIT)
+                settings[name_en] = {"qty": qty, "lock": bool(lock), "title": title}
+                cfg["item_quick_settings"] = settings
+
+            if not self._update_config(update):
+                return {"ok": False, "error": "写入用户配置失败"}
+            return {"ok": True}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def remove_item_quick_setting(self, name_en):
+        """Remove only the shortcut; it intentionally does not change the live item."""
+        try:
+            name_en = str(name_en or "").strip()
+            if not name_en:
+                return False
+            def update(cfg):
+                settings = self._clean_item_quick_settings(cfg.get("item_quick_settings", {}))
+                settings.pop(name_en, None)
+                cfg["item_quick_settings"] = settings
+            return bool(self._update_config(update))
+        except Exception:
+            return False
+
+    def _apply_item_quick_entries(self, settings):
+        """Apply a previously validated settings dictionary under one write gate."""
+        settings = self._clean_item_quick_settings(settings)
+        result, changed = [], 0
+        for name_en, entry in settings.items():
+            item = next((item for item in item_cache if item.get("name_en") == name_en), None)
+            if not item:
+                result.append({"id": name_en, "ok": False, "error": "当前物品缓存中不存在"})
+                continue
+            ok = True
+            message = ""
+            if entry.get("qty") is not None:
+                ok = bool(self.modify_item_qty(name_en, entry["qty"]).get("ok"))
+                if not ok:
+                    message = "数量写入失败（物品槽已变化，请重新扫描）"
+                else:
+                    changed += 1
+            # Apply the lock after changing quantity so its retained value is
+            # exactly the target amount.  This also supports a stored unlock.
+            if ok:
+                wanted = "on" if entry.get("lock") else "off"
+                state = self.set_item_state(name_en, "lock", wanted)
+                if state != wanted:
+                    ok, message = False, "锁定状态更新失败"
+                elif entry.get("lock"):
+                    changed += 1
+            result.append({"id": name_en, "ok": ok, "error": message})
+        return {"ok": all(item["ok"] for item in result) if result else True,
+                "count": len(result), "changed": changed, "items": result}
+
+    def apply_item_quick_settings(self):
+        """Batch apply all saved common-item settings in a single safe request."""
+        return self._apply_item_quick_entries(self._read_item_quick_settings())
+
+    def get_feature_presets(self):
+        """List compact summaries; full contents stay in user_data.json until applied."""
+        try:
+            config = self._read_config()
+            presets = config.get("feature_presets", [])
+            default_name = str(config.get("default_feature_preset", "")).strip()
+            result = []
+            for preset in presets if isinstance(presets, list) else []:
+                if not isinstance(preset, dict):
+                    continue
+                name = str(preset.get("name", "")).strip()
+                if not name:
+                    continue
+                items = self._clean_item_quick_settings(preset.get("items", {}))
+                pins = self._clean_map_pins(preset.get("pins", []))
+                equipment = self._clean_dwarf_equipment_preset(preset.get("dwarf_equipment", {}))
+                result.append({"name": name[:40], "time": None, "speed": preset.get("speed"),
+                               "item_count": len(items), "pin_count": len(pins), "map_key": str(preset.get("map_key", "")),
+                               "is_default": name == default_name,
+                               "mana_max_locked": self._clean_mana_max_lock(preset.get("mana_max_lock")).get("enabled", False),
+                               "equipment_count": len(equipment)})
+            return result[:self.FEATURE_PRESET_LIMIT]
+        except Exception:
+            return []
+
+    def save_feature_preset(self, name, map_key="", pins=None, dwarf_equipment=None):
+        """Save current settings and the *selection* of the all-dwarves gear preset."""
+        try:
+            name = " ".join(str(name or "").split())[:40]
+            if not name:
+                return {"ok": False, "error": "请填写预设名称"}
+            time_state = self.get_game_time_state()
+            speed_value = None
+            if isinstance(time_state, dict) and time_state.get("ok"):
+                speed_value = float(time_state.get("speed", 1.0))
+            map_key = str(map_key or "")
+            if not map_key.startswith("world-"):
+                map_key, pins = "", []
+            clean_pins = self._clean_map_pins(pins)
+            quick_items = self._read_item_quick_settings()
+            clean_equipment = self._clean_dwarf_equipment_preset(dwarf_equipment)
+            record = {"name": name, "speed": speed_value,
+                      "items": quick_items, "map_key": map_key, "pins": clean_pins,
+                      "mana_max_lock": self.get_mana_max_lock(), "dwarf_equipment": clean_equipment}
+
+            def update(cfg):
+                presets = cfg.get("feature_presets", [])
+                presets = [item for item in presets if isinstance(item, dict) and str(item.get("name", "")).strip() != name]
+                presets.append(record)
+                if len(presets) > self.FEATURE_PRESET_LIMIT:
+                    presets = presets[-self.FEATURE_PRESET_LIMIT:]
+                cfg["feature_presets"] = presets
+
+            if not self._update_config(update):
+                return {"ok": False, "error": "写入用户配置失败"}
+            return {"ok": True, "time_saved": False, "item_count": len(quick_items), "pin_count": len(clean_pins),
+                    "equipment_count": len(clean_equipment)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_feature_preset(self, name):
+        try:
+            name = str(name or "").strip()
+            if not name:
+                return False
+            def update(cfg):
+                cfg["feature_presets"] = [item for item in (cfg.get("feature_presets", []) or [])
+                                          if not isinstance(item, dict) or str(item.get("name", "")).strip() != name]
+                if str(cfg.get("default_feature_preset", "")).strip() == name:
+                    cfg["default_feature_preset"] = ""
+            return bool(self._update_config(update))
+        except Exception:
+            return False
+
+    def apply_feature_preset(self, name, current_map_key=""):
+        """Restore one profile.  Map pins are restored only to their own world."""
+        try:
+            name = str(name or "").strip()
+            preset = next((item for item in (self._read_config().get("feature_presets", []) or [])
+                           if isinstance(item, dict) and str(item.get("name", "")).strip() == name), None)
+            if not preset:
+                return {"ok": False, "error": "找不到该预设"}
+            result = {"ok": True, "name": name, "time": None, "speed": None, "items": None,
+                      "pins": None, "map_key": "", "mana_max_lock": None,
+                      # This is intentionally returned only as UI state.  A
+                      # profile restore must never equip every dwarf without a
+                      # separate explicit click in the equipment-preset panel.
+                      "dwarf_equipment": self._clean_dwarf_equipment_preset(preset.get("dwarf_equipment", {})),
+                      "messages": []}
+            if preset.get("speed") is not None:
+                result["speed"] = self.set_game_speed(preset["speed"])
+                if not result["speed"].get("ok"):
+                    result["ok"] = False
+                    result["messages"].append("速度未恢复")
+            if "mana_max_lock" in preset:
+                lock = self._clean_mana_max_lock(preset.get("mana_max_lock"))
+                result["mana_max_lock"] = self.set_mana_max_lock(lock["enabled"], lock["target"])
+                if not result["mana_max_lock"].get("ok"):
+                    result["ok"] = False
+                    result["messages"].append("法力上限锁定未恢复")
+            settings = self._clean_item_quick_settings(preset.get("items", {}))
+            if settings:
+                # Make this profile's item setup become the visible common
+                # setup as well, then apply it against freshly scanned slots.
+                if not self._update_config(lambda cfg: cfg.update({"item_quick_settings": settings})):
+                    result["ok"] = False
+                    result["messages"].append("常用物品设置未写入配置文件")
+                result["items"] = self._apply_item_quick_entries(settings)
+                if not result["items"].get("ok"):
+                    result["ok"] = False
+                    result["messages"].append("部分物品未恢复")
+            saved_key = str(preset.get("map_key", ""))
+            saved_pins = self._clean_map_pins(preset.get("pins", []))
+            if saved_key and saved_key == str(current_map_key or ""):
+                if self.save_map_pins(saved_key, saved_pins):
+                    result["pins"], result["map_key"] = saved_pins, saved_key
+                else:
+                    result["ok"] = False
+                    result["messages"].append("地图标记未写入配置文件")
+            elif saved_key:
+                result["messages"].append("地图标记仅会恢复到保存它的同一张地图")
+            return result
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_default_feature_preset(self, name):
+        try:
+            name = str(name or "").strip()
+            if name and not any(isinstance(item, dict) and str(item.get("name", "")).strip() == name
+                                for item in (self._read_config().get("feature_presets", []) or [])):
+                return {"ok": False, "error": "找不到该预设"}
+            if not self._update_config(lambda cfg: cfg.update({"default_feature_preset": name})):
+                return {"ok": False, "error": "无法保存默认预设"}
+            return {"ok": True, "name": name}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ==================== 宠物屋运行时读取（V1，CE 实测） ====================
+    V1_PET_HOUSE_VTABLE_RVA = 0xBC56B8
+    PET_HOUSE_STATE_OFF = 0x1CC
+    PET_HOUSE_X_OFF = 0x120
+    PET_HOUSE_Y_OFF = 0x130
+    V1_PET_COMPONENT_VTABLE_RVA = 0xBC5440
+    PET_COMPONENT_OFF = 0x568
+    _pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0, "houses": [], "pets": []}
+    _pet_limit_override_original = None
+    _pet_limit_override_value = None
+
+    def _read_active_pet_addresses(self, base):
+        """Read Pet objects currently registered by EnemyManager.
+
+        This is a read-only membership check. It removes heap matches left
+        behind by a natural pet death/expiry before the allocator reuses the
+        object memory, so the UI never presents a dead object as active.
+        """
+        try:
+            manager = int(pm.read_int(int(base) + self.V1_ENEMY_MANAGER_INSTANCE_RVA) or 0)
+            if not self._pandora_pointer_ok(manager):
+                return None
+            begin = int(pm.read_int(manager + self.ENEMY_MANAGER_BEGIN_OFF) or 0)
+            end = int(pm.read_int(manager + self.ENEMY_MANAGER_END_OFF) or 0)
+            if not begin and not end:
+                return set()
+            if not (begin and end >= begin and (end - begin) % 4 == 0):
+                return None
+            count = (end - begin) // 4
+            if count < 0 or count > self.ENEMY_MANAGER_MAX_ENTRIES:
+                return None
+            raw = pm.read_bytes(begin, count * 4) if count else b""
+            pet_vtable = int(base) + self.PET_DIRECT_VTABLE_RVA
+            enemy_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
+            active = set()
+            for index in range(count):
+                obj = struct.unpack_from("<I", raw, index * 4)[0]
+                if not obj or not self._pandora_pointer_ok(obj):
+                    continue
+                try:
+                    # EnemyManager stores the IEnemyBase subobject, which is
+                    # embedded at Pet+0x568 rather than the Pet object's
+                    # AnimationContainer vtable at offset zero.
+                    if int(pm.read_int(obj) or 0) == enemy_vtable:
+                        parent = int(obj) - self.PET_COMPONENT_OFF
+                        if self._pandora_pointer_ok(parent) and int(pm.read_int(parent) or 0) == pet_vtable:
+                            active.add(parent)
+                except Exception:
+                    continue
+            return active
+        except Exception:
+            return None
+
+    def _read_active_monster_records(self, base):
+        """Read EnemyManager's current non-pet entries without writing memory."""
+        try:
+            manager = int(pm.read_int(int(base) + self.V1_ENEMY_MANAGER_INSTANCE_RVA) or 0)
+            if not self._pandora_pointer_ok(manager):
+                return None, "生物管理器尚未加载"
+            begin = int(pm.read_int(manager + self.ENEMY_MANAGER_BEGIN_OFF) or 0)
+            end = int(pm.read_int(manager + self.ENEMY_MANAGER_END_OFF) or 0)
+            if not begin and not end:
+                return [], ""
+            if not (begin and end >= begin and (end - begin) % 4 == 0):
+                return None, "生物管理器数组边界无效"
+            count = (end - begin) // 4
+            if count < 0 or count > self.ENEMY_MANAGER_MAX_ENTRIES:
+                return None, "生物管理器数组数量超出允许范围"
+            raw = pm.read_bytes(begin, count * 4) if count else b""
+            pet_component_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
+            map_data = self._map_resolve()
+            world_w = float(map_data[3]) if map_data else 0.0
+            world_h = float(map_data[4]) if map_data else 0.0
+            rows, seen = [], set()
+            for index in range(count):
+                obj = int(struct.unpack_from("<I", raw, index * 4)[0])
+                if not obj or obj in seen or not self._pandora_pointer_ok(obj):
+                    continue
+                seen.add(obj)
+                try:
+                    vtable = int(pm.read_int(obj) or 0)
+                    if not vtable or vtable == pet_component_vtable:
+                        continue
+                    rva = vtable - int(base)
+                    info = self.V1_CREATURE_VTABLE_INFO.get(rva)
+                    # EnemyManager also owns pooled controllers, dormant
+                    # spawners and other implementation objects.  They have
+                    # no mapped creature vtable and must never be presented
+                    # as visible "其它生物" rows merely because they happen
+                    # to sit in the same manager vector.
+                    if not info or info.get("category") == "skip":
+                        continue
+                    known_name = info.get("name") if info else None
+                    creature_id = str(info.get("id") or "") if info else ""
+                    definition_hp = CREATURE_DEFINITION_HEALTH.get(creature_id)
+                    x = y = col = row = None
+                    coords_state = self.STATUS_UNVERIFIED
+                    coords_reason = "该类型的地图坐标字段尚待定位"
+                    if world_w > 0.0 and world_h > 0.0:
+                        try:
+                            coord_base = obj
+                            coord_x_off, coord_y_off = self.CREATURE_WORLD_X_OFF, self.CREATURE_WORLD_Y_OFF
+                            coord_label = "EnemyBase 世界坐标（+0x424/+0x428）"
+                            override = self.V1_CREATURE_COORDINATE_OVERRIDES.get(rva)
+                            if override:
+                                coord_x_off = int(override["x_off"])
+                                coord_y_off = int(override["y_off"])
+                                coord_label = str(override["label"])
+                                base_delta = override.get("base_delta")
+                                if base_delta is not None:
+                                    coord_base = int(obj) + int(base_delta)
+                                    if not self._pandora_pointer_ok(coord_base):
+                                        raise ValueError("生物完整对象地址无效")
+                                pointer_off = override.get("pointer_off")
+                                if pointer_off is not None:
+                                    coord_base = int(pm.read_int(obj + int(pointer_off)) or 0)
+                                    if not self._pandora_pointer_ok(coord_base):
+                                        raise ValueError("牦牛位置组件指针无效")
+                            candidate_x = float(pm.read_float(coord_base + coord_x_off))
+                            candidate_y = float(pm.read_float(coord_base + coord_y_off))
+                            # A real world object is never represented by the
+                            # manager's 0/0 or 0/-2.98 staging values.  Use a
+                            # small positive lower bound rather than treating
+                            # such sentinels as map origin.
+                            if (math.isfinite(candidate_x) and math.isfinite(candidate_y) and
+                                    candidate_x > 1.0 and candidate_y > 1.0 and
+                                    candidate_x < world_w and candidate_y < world_h):
+                                x, y = round(candidate_x, 2), round(candidate_y, 2)
+                                # The UI and map tools are grid-oriented. Keep
+                                # the original floats for locating but return
+                                # the derived grid position so callers never
+                                # need to guess X/Y-to-cell conversion.
+                                col = max(0, min(int(map_data[1]) - 1,
+                                                 int(candidate_x * int(map_data[1]) / world_w)))
+                                row = max(0, min(int(map_data[2]) - 1,
+                                                 int(candidate_y * int(map_data[2]) / world_h)))
+                                coords_state = self.STATUS_VERIFIED
+                                coords_reason = "%s 已通过地图范围校验" % coord_label
+                            elif (math.isfinite(candidate_x) and math.isfinite(candidate_y) and
+                                  abs(candidate_x) <= 1.0 and
+                                  (abs(candidate_y) <= 1.0 or abs(candidate_y + 2.98) <= 0.15)):
+                                # The manager uses these values for objects
+                                # waiting to spawn or pending recycle. They are
+                                # real manager entries, but not map entities.
+                                coords_state = "未落地"
+                                coords_reason = "EnemyManager 中的待命/回收对象，当前没有地图位置"
+                            else:
+                                coords_reason = "该类型尚未定位可用的地图坐标布局"
+                        except Exception:
+                            coords_reason = "坐标字段读取失败"
+                    hp = hp_max = None
+                    hp_state = self.STATUS_UNVERIFIED
+                    hp_reason = "血量字段待用受伤样本完成读回验证"
+                    health_override = self.V1_CREATURE_HEALTH_OVERRIDES.get(rva)
+                    if health_override:
+                        try:
+                            health_base = int(obj) + int(health_override.get("base_delta", 0))
+                            if not self._pandora_pointer_ok(health_base):
+                                raise ValueError("完整生物对象地址无效")
+                            candidate_hp = self._read_secure_float(health_base + int(health_override["hp_off"]),
+                                                                   minimum=0.0, maximum=10000.0)
+                            candidate_max = self._read_secure_float(health_base + int(health_override["max_hp_off"]),
+                                                                    minimum=0.01, maximum=10000.0)
+                            if (candidate_hp is None or candidate_max is None or
+                                    not math.isfinite(float(candidate_hp)) or not math.isfinite(float(candidate_max)) or
+                                    candidate_hp < 0.0 or candidate_max <= 0.0 or candidate_hp > candidate_max + 0.05):
+                                raise ValueError("当前值/最大值范围不一致")
+                            hp, hp_max = round(float(candidate_hp), 2), round(float(candidate_max), 2)
+                            hp_state = self.STATUS_VERIFIED
+                            hp_reason = str(health_override["label"])
+                        except Exception as health_exc:
+                            hp_reason = "牦牛血量读取失败：%s" % health_exc
+                    # A verified 0 HP object is a dead/pending-cleanup entry
+                    # that EnemyManager has not removed yet.  It is not an
+                    # active creature for the player's list, so hide it here
+                    # instead of presenting a misleading alive row.
+                    if hp_state == self.STATUS_VERIFIED and hp is not None and float(hp) <= 0.0:
+                        continue
+                    rows.append({
+                        "address": "0x%X" % obj, "address_value": obj,
+                        "source_index": index, "vtable": "0x%X" % vtable,
+                        "vtable_rva": "0x%X" % rva if 0 <= rva < 0x20000000 else None,
+                        "name": known_name or "未命名生物对象",
+                        "creature_id": creature_id or None,
+                        "definition_hp": definition_hp,
+                        "type_verified": bool(known_name),
+                        "category": info.get("category") if info else "other",
+                        "status": "EnemyManager 活动列表",
+                        "x": x, "y": y,
+                        "col": col if x is not None and y is not None else None,
+                        "row": row if x is not None and y is not None else None,
+                        "coords_state": coords_state,
+                        "coords_reason": coords_reason,
+                        "hp": hp,
+                        "hp_max": hp_max,
+                        "hp_state": hp_state,
+                        "hp_reason": hp_reason,
+                    })
+                except Exception:
+                    continue
+            rows.sort(key=lambda row: (not row.get("type_verified"), row.get("name", ""), row.get("address_value", 0)))
+            return rows, ""
+        except Exception as exc:
+            return None, "怪物活动列表读取失败：%s" % exc
+
+    def _read_available_pet_addresses(self, base, active_addresses):
+        """Keep only active Pets that pass the game's own availability test.
+
+        An EnemyManager vector entry can outlive a visible creature while its
+        death/despawn transition is still pending.  EnemyManager::Counter()
+        calls IEnemyBase::Battle::IsAvailable before treating an entry as
+        countable, so this uses the same predicate on the game update thread.
+        Any queue/controller failure returns ``None`` rather than hiding a
+        legitimate pet from the player.
+        """
+        if active_addresses is None:
+            return None
+        if not active_addresses:
+            return set()
+        try:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return None
+            data = int(controller["data"])
+            request = data + self.PET_AVAILABLE_QUERY_REQUEST_OFF
+            target_addr = data + self.PET_AVAILABLE_QUERY_TARGET_OFF
+            result_addr = data + self.PET_AVAILABLE_QUERY_RESULT_OFF
+            status_addr = data + self.PET_AVAILABLE_QUERY_STATUS_OFF
+            pending = (
+                self.WAVE_PORTAL_END_REQUEST_OFF, self.LIBRARY_QUEUE_REQUEST_OFF,
+                self.MAGIC_QUEUE_REQUEST_OFF, self.RECIPE_QUEUE_REQUEST_OFF,
+                self.PERSONAL_SKILL_QUEUE_REQUEST_OFF, self.PET_DIRECT_QUEUE_REQUEST_OFF,
+                self.PET_REMOVE_QUEUE_REQUEST_OFF, self.PET_LIMIT_QUERY_REQUEST_OFF,
+            )
+            if int(pm.read_int(request) or 0) or any(int(pm.read_int(data + off) or 0) for off in pending):
+                return None
+            component_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
+            available = set()
+            for pet in sorted(active_addresses):
+                component = int(pet) + self.PET_COMPONENT_OFF
+                if (not self._pandora_pointer_ok(component) or
+                        int(pm.read_int(component) or 0) != component_vtable):
+                    continue
+                pm.write_int(target_addr, component)
+                pm.write_int(result_addr, 0)
+                pm.write_int(status_addr, 0)
+                pm.write_int(request, 1)
+                deadline = time.monotonic() + 0.7
+                while time.monotonic() < deadline and int(pm.read_int(request) or 0):
+                    time.sleep(0.008)
+                if int(pm.read_int(request) or 0) or int(pm.read_int(status_addr) or 0) != 1:
+                    return None
+                if int(pm.read_int(result_addr) or 0) == 1:
+                    available.add(int(pet))
+            return available
+        except Exception:
+            return None
+
+    def _read_pet_house_record(self, obj, vtable):
+        try:
+            if not self._pandora_pointer_ok(obj) or pm.read_int(int(obj)) != int(vtable):
+                return None
+            state_raw = pm.read_bytes(int(obj) + self.PET_HOUSE_STATE_OFF, 24)
+            state = bytes(state_raw or b"").split(b"\0", 1)[0].decode("ascii", "ignore").strip().lower()
+            if state not in ("empty", "idle"):
+                return None
+            payload = pm.read_bytes(int(obj), 0x400) or b""
+            pet_type = ""
+            for candidate in (b"basilisk_pet", b"catowl_pet", b"crip_catowl_pet", b"imp_pet"):
+                if candidate in payload:
+                    pet_type = candidate.decode("ascii")
+                    break
+            x = float(pm.read_float(int(obj) + self.PET_HOUSE_X_OFF))
+            y = float(pm.read_float(int(obj) + self.PET_HOUSE_Y_OFF))
+            if not (math.isfinite(x) and math.isfinite(y) and abs(x) < 100000 and abs(y) < 100000):
+                return None
+            return {"address": int(obj), "state": state, "pet_type": pet_type or "未识别",
+                    "x": x, "y": y, "has_generated": state == "idle"}
+        except Exception:
+            return None
+
+    def _read_live_pet_record(self, obj, vtable, component_vtable, active_addresses=None):
+        """Reject stale heap matches by checking both pet and its live component."""
+        try:
+            obj = int(obj)
+            if active_addresses is not None and obj not in active_addresses:
+                return None
+            if not self._pandora_pointer_ok(obj) or pm.read_int(obj) != int(vtable):
+                return None
+            raw = pm.read_bytes(obj + self.PET_DIRECT_TYPE_OFF, 16) or b""
+            pet_type = bytes(raw).split(b"\0", 1)[0].decode("ascii", "ignore").strip().lower()
+            if pet_type not in self.PET_DIRECT_QUEUE_TYPES:
+                return None
+            # The Pet component is embedded at +0x568; this field is its
+            # vtable, not a pointer to a separately allocated component.
+            component = int(obj + self.PET_COMPONENT_OFF)
+            if int(pm.read_int(component) or 0) != int(component_vtable):
+                return None
+            return {"address": obj, "pet_type": pet_type, "component": component}
+        except Exception:
+            return None
+
+    def _scan_live_pets(self, base):
+        try:
+            pet_vtable = int(base) + self.PET_DIRECT_VTABLE_RVA
+            component_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
+            active_addresses = self._read_active_pet_addresses(base)
+            available_addresses = self._read_available_pet_addresses(base, active_addresses)
+            if available_addresses is not None:
+                active_addresses = available_addresses
+            signature = struct.pack("<I", pet_vtable)
+            matches = pymem.pattern.pattern_scan_all(pm.process_handle, signature, return_multiple=True)
+            pets, seen = [], set()
+            for obj in matches or []:
+                record = self._read_live_pet_record(int(obj), pet_vtable, component_vtable, active_addresses)
+                if record and record["address"] not in seen:
+                    seen.add(record["address"])
+                    pets.append(record)
+            pets.sort(key=lambda row: (row["pet_type"], row["address"]))
+            return pets
+        except Exception:
+            return []
+
+    def _validate_cached_live_pets(self, base, cached_pets):
+        """Cheaply reject cached pets whose native objects were already freed.
+
+        Natural expiry/death can happen between two full scans.  A five-second
+        cache must not keep rendering those stale addresses; validate the
+        object vtable, type string and embedded component before returning the
+        cached list.  If any entry is invalid, the caller performs one fresh
+        heap scan instead of returning a partial/stale result.
+        """
+        pet_vtable = int(base) + self.PET_DIRECT_VTABLE_RVA
+        component_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
+        active_addresses = self._read_active_pet_addresses(base)
+        available_addresses = self._read_available_pet_addresses(base, active_addresses)
+        if available_addresses is not None:
+            active_addresses = available_addresses
+        valid = []
+        invalid = False
+        for row in list(cached_pets or []):
+            record = self._read_live_pet_record(int(row.get("address", 0)), pet_vtable, component_vtable, active_addresses)
+            if not record:
+                invalid = True
+                continue
+            valid.append(record)
+        valid.sort(key=lambda row: (row["pet_type"], row["address"]))
+        return valid, invalid
+
+    def _scan_pet_runtime_fast(self, base):
+        """Scan both pet vtables in one pass over writable private heaps.
+
+        The generic pattern scanner walks every readable mapping once per
+        signature. Pet houses and live pets are normal private heap objects,
+        so one bounded private-heap pass is both sufficient for this build and
+        substantially faster than two full-process pattern scans.
+        """
+        house_vtable = int(base) + self.V1_PET_HOUSE_VTABLE_RVA
+        pet_vtable = int(base) + self.PET_DIRECT_VTABLE_RVA
+        component_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
+        active_addresses = self._read_active_pet_addresses(base)
+        available_addresses = self._read_available_pet_addresses(base, active_addresses)
+        if available_addresses is not None:
+            active_addresses = available_addresses
+        house_sig, pet_sig = struct.pack("<I", house_vtable), struct.pack("<I", pet_vtable)
+        houses, pets, seen_houses, seen_pets = [], [], set(), set()
+        k32 = ctypes.windll.kernel32
+
+        class _MBI(ctypes.Structure):
+            _fields_ = [("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
+                         ("AllocationProtect", ctypes.c_uint32), ("RegionSize", ctypes.c_size_t),
+                         ("State", ctypes.c_uint32), ("Protect", ctypes.c_uint32), ("Type", ctypes.c_uint32)]
+
+        mbi, address = _MBI(), 0x10000
+        while address < 0x80000000:
+            queried = k32.VirtualQueryEx(pm.process_handle, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi))
+            if not queried:
+                address += 0x10000
+                continue
+            region_base, region_size = int(mbi.BaseAddress or 0), int(mbi.RegionSize or 0)
+            next_address = region_base + region_size
+            if next_address <= address:
+                address += 0x1000
+                continue
+            address = next_address
+            protect = int(mbi.Protect)
+            if not (mbi.State == 0x1000 and mbi.Type == 0x20000 and not (protect & 0x100)
+                    and (protect & 0xFF) in (0x04, 0x08, 0x40, 0x80) and region_size >= 4):
+                continue
+            offset = 0
+            while offset < region_size:
+                size = min(2 * 1024 * 1024, region_size - offset)
+                chunk_addr = region_base + offset
+                offset += size
+                try:
+                    chunk = pm.read_bytes(chunk_addr, size)
+                except Exception:
+                    continue
+                for signature, vtable, seen, reader, output in (
+                    (house_sig, house_vtable, seen_houses, self._read_pet_house_record, houses),
+                    (pet_sig, pet_vtable, seen_pets, None, pets),
+                ):
+                    pos = 0
+                    while True:
+                        found = chunk.find(signature, pos)
+                        if found < 0:
+                            break
+                        obj = int(chunk_addr + found)
+                        pos = found + 4
+                        if obj in seen:
+                            continue
+                        seen.add(obj)
+                        record = (reader(obj, vtable) if reader else
+                                  self._read_live_pet_record(obj, pet_vtable, component_vtable, active_addresses))
+                        if record:
+                            output.append(record)
+        houses.sort(key=lambda row: (row["x"], row["y"], row["address"]))
+        pets.sort(key=lambda row: (row["pet_type"], row["address"]))
+        return houses, pets
+
+    def get_pet_houses(self, refresh=False):
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏并进入已载入的存档"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "宠物屋运行时结构目前仅验证了 Steam 原版"}
+        try:
+            pid, base = int(pm.process_id), int(get_base())
+            cache = self._pet_house_runtime_cache
+            if (not refresh and cache.get("pid") == pid and cache.get("base") == base
+                    and time.time() - float(cache.get("at", 0.0)) < 5.0):
+                cached_pets, stale_pet = self._validate_cached_live_pets(base, cache.get("pets", []))
+                if stale_pet:
+                    # A pet died/expired or its heap object was recycled after
+                    # the cached scan. Fall through to one authoritative scan.
+                    refresh = True
+                else:
+                    return {"ok": True, "state": self.STATUS_VERIFIED, "houses": list(cache.get("houses", [])),
+                            "house_count": len(cache.get("houses", [])), "generated_house_count": sum(1 for row in cache.get("houses", []) if row.get("has_generated")),
+                            "pets": cached_pets, "pet_count": len(cached_pets),
+                            "pet_count_state": "已按活动实体、游戏原生可用性、主对象、类型和内部组件校验。"}
+            try:
+                houses, pets = self._scan_pet_runtime_fast(base)
+            except Exception as exc:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "宠物屋快速扫描失败：%s" % exc}
+            self._pet_house_runtime_cache = {"pid": pid, "base": base, "at": time.time(), "houses": houses, "pets": pets}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "houses": houses,
+                    "house_count": len(houses), "generated_house_count": sum(1 for row in houses if row.get("has_generated")),
+                    "pets": pets, "pet_count": len(pets),
+                    "pet_count_state": "已按活动实体、游戏原生可用性、主对象、类型和内部组件校验。"}
+
+            # Legacy manual page walk kept below for reverse-engineering
+            # reference only. The early return above avoids its slow path.
+            houses, seen = [], set()
+            k32 = ctypes.windll.kernel32
+            class _MBI(ctypes.Structure):
+                _fields_ = [("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
+                             ("AllocationProtect", ctypes.c_uint32), ("RegionSize", ctypes.c_size_t),
+                             ("State", ctypes.c_uint32), ("Protect", ctypes.c_uint32), ("Type", ctypes.c_uint32)]
+            mbi, address = _MBI(), 0x10000
+            while address < 0x80000000:
+                queried = k32.VirtualQueryEx(pm.process_handle, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi))
+                if not queried:
+                    address += 0x10000
+                    continue
+                region_base, region_size = int(mbi.BaseAddress or 0), int(mbi.RegionSize or 0)
+                next_address = region_base + region_size
+                if next_address <= address:
+                    address += 0x1000
+                    continue
+                protect = int(mbi.Protect)
+                if (mbi.State == 0x1000 and mbi.Type == 0x20000 and not (protect & 0x100)
+                        and (protect & 0xFF) in (0x04, 0x08, 0x40, 0x80) and region_size >= 4):
+                    # Pet houses are rare and their vtable is a four-byte exact
+                    # signature.  A direct region read is dramatically faster
+                    # here than the generic small-chunk fallback used by broad
+                    # scanners; use that fallback only if the region rejects a
+                    # single read.  In practice the fallback can stall on a
+                    # protected heap region, while valid PetHouseEntity objects
+                    # live in directly readable private allocations, so skip a
+                    # rejected region instead of degrading the whole UI scan.
+                    chunks, offset = [], 0
+                    while offset < region_size:
+                        size = min(2 * 1024 * 1024, region_size - offset)
+                        try:
+                            chunks.append((region_base + offset, pm.read_bytes(region_base + offset, size)))
+                        except Exception:
+                            pass
+                        offset += size
+                    for chunk_addr, chunk in chunks:
+                        if not chunk:
+                            continue
+                        pos = 0
+                        while True:
+                            found = chunk.find(signature, pos)
+                            if found < 0:
+                                break
+                            obj = int(chunk_addr + found)
+                            pos = found + 4
+                            if obj in seen:
+                                continue
+                            seen.add(obj)
+                            record = self._read_pet_house_record(obj, vtable)
+                            if record:
+                                houses.append(record)
+            houses.sort(key=lambda row: (row["x"], row["y"], row["address"]))
+            pets = self._scan_live_pets(base)
+            self._pet_house_runtime_cache = {"pid": pid, "base": base, "at": time.time(), "houses": houses, "pets": pets}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "houses": houses,
+                    "house_count": len(houses), "generated_house_count": sum(1 for row in houses if row.get("has_generated")),
+                    "pets": pets, "pet_count": len(pets),
+                    "pet_count_state": "已按宠物主对象与内部组件双重校验。"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "宠物屋扫描失败：%s" % exc}
+
+    def _pet_limit_query(self, house_address):
+        """Run one queued, game-thread GetMaxPetCount() read."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "请先连接游戏"}
+        controller, error = self._ensure_wave_portal_controller()
+        if not controller:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+        try:
+            data = int(controller["data"])
+            request = data + self.PET_LIMIT_QUERY_REQUEST_OFF
+            target_addr = data + self.PET_LIMIT_QUERY_TARGET_OFF
+            result_addr = data + self.PET_LIMIT_QUERY_RESULT_OFF
+            status_addr = data + self.PET_LIMIT_QUERY_STATUS_OFF
+            pending = (self.WAVE_PORTAL_END_REQUEST_OFF, self.LIBRARY_QUEUE_REQUEST_OFF,
+                       self.MAGIC_QUEUE_REQUEST_OFF, self.RECIPE_QUEUE_REQUEST_OFF,
+                       self.PERSONAL_SKILL_QUEUE_REQUEST_OFF, self.PET_DIRECT_QUEUE_REQUEST_OFF,
+                       self.PET_REMOVE_QUEUE_REQUEST_OFF)
+            if int(pm.read_int(request) or 0) or any(int(pm.read_int(data + off) or 0) for off in pending):
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "游戏主线程仍有其它请求，稍后再试"}
+            pm.write_int(target_addr, int(house_address)); pm.write_int(result_addr, 0); pm.write_int(status_addr, 0); pm.write_int(request, 1)
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline and int(pm.read_int(request) or 0): time.sleep(0.015)
+            if int(pm.read_int(request) or 0):
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "游戏更新线程没有响应宠物上限读取请求"}
+            if int(pm.read_int(status_addr) or 0) != 1:
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "PetHouseEntity::GetMaxPetCount 未返回有效结果"}
+            value = int(pm.read_int(result_addr) or 0)
+            if not (self.PET_MAX_OVERRIDE_MIN <= value <= self.PET_MAX_OVERRIDE_MAX):
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "读取到的宠物上限超出有效范围：%s" % value}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "value": value}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "读取宠物上限失败：%s" % exc}
+
+    def get_pet_limit_state(self):
+        """Read active pets and the native PetHouseEntity cap."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "未连接游戏"}
+        houses = self.get_pet_houses(refresh=False)
+        if not houses.get("ok"):
+            return {"ok": False, "state": houses.get("state", self.STATUS_FAILED), "error": houses.get("error", "宠物运行时数据读取失败")}
+        rows = houses.get("houses") or []
+        if not rows:
+            return {"ok": False, "state": self.STATUS_EMPTY, "active_count": int(houses.get("pet_count", 0) or 0), "error": "当前存档没有可用于读取宠物上限的宠物屋"}
+        query = self._pet_limit_query(int(rows[0].get("address", 0)))
+        if not query.get("ok"):
+            return {"ok": False, "state": query.get("state", self.STATUS_FAILED), "active_count": int(houses.get("pet_count", 0) or 0), "error": query.get("error")}
+        value = int(query["value"]); override = self._pet_limit_override_value
+        return {"ok": True, "state": self.STATUS_VERIFIED, "current_limit": value,
+                "active_count": int(houses.get("pet_count", 0) or 0), "house_count": int(houses.get("house_count", 0) or 0),
+                "override_enabled": override is not None, "override_value": int(override) if override is not None else None,
+                "message": ("本局覆盖：%d" % int(override)) if override is not None else "自动：由游戏原生规则计算"}
+
+    def set_pet_limit_override(self, value):
+        """Temporarily replace GetMaxPetCount with a bounded constant."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "未连接游戏"}
+        try: value = int(value)
+        except Exception: return {"ok": False, "state": self.STATUS_FAILED, "error": "宠物上限必须是整数"}
+        if not (self.PET_MAX_OVERRIDE_MIN <= value <= self.PET_MAX_OVERRIDE_MAX):
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "宠物上限范围为 %d-%d" % (self.PET_MAX_OVERRIDE_MIN, self.PET_MAX_OVERRIDE_MAX)}
+        try:
+            address = int(get_base()) + self.PET_MAX_COUNT_RVA; patch = b"\xB8" + struct.pack("<I", value) + b"\xC3"; current = pm.read_bytes(address, 6)
+            if self._pet_limit_override_original is None:
+                original = pm.read_bytes(address, len(self.PET_MAX_COUNT_PREFIX))
+                if original != self.PET_MAX_COUNT_PREFIX:
+                    return {"ok": False, "state": self.STATUS_UNSUPPORTED, "error": "当前版本的宠物上限函数字节不匹配"}
+                self._pet_limit_override_original = original
+            elif current not in (patch, self._pet_limit_override_original,
+                                 b"\xB8" + struct.pack("<I", int(self._pet_limit_override_value or 0)) + b"\xC3"):
+                return {"ok": False, "state": self.STATUS_STALE, "error": "宠物上限函数已被其它补丁改变，请重启游戏后再试"}
+            h = self._suspend(int(pm.process_id))
+            if not h: return {"ok": False, "state": self.STATUS_FAILED, "error": "无法暂停游戏以安全修改宠物上限"}
+            try:
+                pm.write_bytes(address, patch, len(patch))
+                if pm.read_bytes(address, len(patch)) != patch:
+                    pm.write_bytes(address, self._pet_limit_override_original, len(self._pet_limit_override_original))
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "宠物上限写入读回失败，已回滚"}
+            finally: self._resume(h)
+            self._pet_limit_override_value = value
+            live = self.get_pet_houses(refresh=True)
+            active_count = int(live.get("pet_count", 0)) if live.get("ok") else None
+            return {"ok": True, "state": self.STATUS_VERIFIED, "current_limit": value, "active_count": active_count,
+                    "override_enabled": True, "override_value": value,
+                    "message": "已设置本局宠物上限；不会自动删除超出上限的宠物"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "设置宠物上限失败：%s" % exc}
+
+    def _restore_pet_limit_override_internal(self):
+        if self._pet_limit_override_original is None or not pm or not connected: return True
+        try:
+            address = int(get_base()) + self.PET_MAX_COUNT_RVA; value = self._pet_limit_override_value
+            patch = b"\xB8" + struct.pack("<I", int(value)) + b"\xC3" if value is not None else None
+            if patch is not None and pm.read_bytes(address, 6) != patch: return False
+            h = self._suspend(int(pm.process_id))
+            if not h: return False
+            try:
+                pm.write_bytes(address, self._pet_limit_override_original, len(self._pet_limit_override_original)); ok = pm.read_bytes(address, len(self._pet_limit_override_original)) == self._pet_limit_override_original
+            finally: self._resume(h)
+            if ok: self._pet_limit_override_original = None; self._pet_limit_override_value = None
+            return bool(ok)
+        except Exception: return False
+
+    def clear_pet_limit_override(self):
+        if not connected or not pm: return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "未连接游戏"}
+        if self._pet_limit_override_original is None: return {"ok": True, "state": self.STATUS_VERIFIED, "override_enabled": False, "message": "当前已是自动上限"}
+        if not self._restore_pet_limit_override_internal(): return {"ok": False, "state": self.STATUS_FAILED, "error": "恢复自动宠物上限失败，未继续写入"}
+        return {"ok": True, "state": self.STATUS_VERIFIED, "override_enabled": False, "message": "已恢复游戏自动宠物上限"}
+
+    def _validate_direct_pet_spawner(self):
+        """Validate the one native factory path used by direct pet requests."""
+        if not connected or not pm:
+            return None, "请先连接游戏并进入已载入的存档"
+        if self._detect_v2():
+            return None, "自定义宠物生成目前仅验证了 Steam 原版"
+        try:
+            base = int(get_base())
+            factory = base + self.PET_DIRECT_FACTORY_RVA
+            if pm.read_bytes(factory, len(self.PET_DIRECT_FACTORY_PREFIX)) != self.PET_DIRECT_FACTORY_PREFIX:
+                return None, "宠物原生工厂代码与当前版本不一致，请重启游戏后再试"
+            manager = int(pm.read_int(base + self.PET_DIRECT_MANAGER_PTR_RVA) or 0)
+            anchor = int(pm.read_int(base + self.PET_DIRECT_SPAWN_ANCHOR_PTR_RVA) or 0)
+            if not self._pandora_pointer_ok(manager):
+                return None, "未找到实体管理器，请先进入实际地图"
+            if not self._pandora_pointer_ok(anchor):
+                return None, "未找到矮人传送门出生锚点，请先进入实际地图"
+            x = int(pm.read_int(anchor + 0x38))
+            y = int(pm.read_int(anchor + 0x3C))
+            if not (-100000 < x < 100000 and -100000 < y < 100000):
+                return None, "宠物出生锚点坐标无效，请重新进入存档后再试"
+            return {"base": base, "manager": manager, "anchor": anchor, "x": x, "y": y}, ""
+        except Exception as exc:
+            return None, "无法验证宠物原生生成链：%s" % exc
+
+    def spawn_direct_pet(self, pet_type):
+        """Spawn one verified pet through EntityFactory on the game update thread.
+
+        This intentionally does not touch PetHouseEntity timers, state strings,
+        owned-pet pointers, or object vectors.  The native EntityFactory owns
+        object creation, world registration, transform setup and later cleanup.
+        """
+        pet_type = str(pet_type or "").strip().lower()
+        if pet_type not in self.PET_DIRECT_QUEUE_TYPES:
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "请选择已确认的宠物类型"}
+        raw = pet_type.encode("ascii", "strict")
+        if not (1 <= len(raw) <= 15):
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "宠物类型长度无效"}
+        validated, error = self._validate_direct_pet_spawner()
+        if not validated:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+        controller, error = self._ensure_wave_portal_controller()
+        if not controller:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+        try:
+            data = int(controller["data"])
+            request = data + self.PET_DIRECT_QUEUE_REQUEST_OFF
+            name_addr = data + self.PET_DIRECT_QUEUE_NAME_OFF
+            length = data + self.PET_DIRECT_QUEUE_LENGTH_OFF
+            result = data + self.PET_DIRECT_QUEUE_RESULT_OFF
+            if int(pm.read_int(request) or 0):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "上一条宠物生成请求仍在等待游戏线程处理"}
+            # Publish the payload first and the request flag last. The injected
+            # main-thread code consumes the flag before reading this payload.
+            pm.write_bytes(name_addr, raw + b"\x00" * (16 - len(raw)), 16)
+            pm.write_int(length, len(raw))
+            pm.write_int(result, 0)
+            pm.write_int(request, 1)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if int(pm.read_int(request) or 0) == 0:
+                    break
+                time.sleep(0.015)
+            if int(pm.read_int(request) or 0) != 0:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "游戏更新线程没有响应宠物生成请求"}
+            pet = int(pm.read_int(result) or 0)
+            if not self._pandora_pointer_ok(pet):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "游戏拒绝了该宠物生成请求（没有返回实体）"}
+            expected_vtable = int(validated["base"]) + self.PET_DIRECT_VTABLE_RVA
+            if int(pm.read_int(pet) or 0) != expected_vtable:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "原生工厂返回的不是已确认的宠物实体，已停止后续操作"}
+            if pm.read_bytes(pet + self.PET_DIRECT_TYPE_OFF, len(raw)) != raw:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "宠物实体类型读回不一致，已停止后续操作"}
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "pet_type": pet_type, "address": pet,
+                    "spawn_x": int(validated["x"]), "spawn_y": int(validated["y"]),
+                    "message": "已通过游戏原生实体工厂生成 1 只宠物"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "宠物原生生成失败：%s" % exc}
+
+    def spawn_direct_pets(self, pet_type, count):
+        """Generate a bounded batch by repeating the verified single request."""
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "生成数量必须是整数"}
+        if count < 1 or count > 20:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "单次生成数量范围为 1 ～ 20"}
+        results = []
+        for index in range(count):
+            result = self.spawn_direct_pet(pet_type)
+            results.append(result)
+            if not result.get("ok"):
+                return {"ok": False, "state": result.get("state", self.STATUS_FAILED),
+                        "requested": count, "generated": index,
+                        "results": results, "error": "第 %d 只生成失败：%s" % (index + 1, result.get("error", "未知错误"))}
+        return {"ok": True, "state": self.STATUS_VERIFIED,
+                "pet_type": str(pet_type), "requested": count, "generated": count,
+                "addresses": [int(row.get("address", 0)) for row in results],
+                "message": "已通过游戏原生实体工厂生成 %d 只宠物" % count}
+
+    def _validate_live_pet_target(self, address):
+        """Return a fresh, strongly-checked live Pet record for one address."""
+        if not connected or not pm:
+            return None, "请先连接游戏并进入已载入的存档"
+        if self._detect_v2():
+            return None, "宠物原生移除目前仅验证了 Steam 原版"
+        try:
+            address = int(address)
+            base = int(get_base())
+            pet_vtable = base + self.PET_DIRECT_VTABLE_RVA
+            component_vtable = base + self.V1_PET_COMPONENT_VTABLE_RVA
+            death_callback = base + self.PET_DEATH_CALLBACK_RVA
+            if not self._pandora_pointer_ok(address):
+                return None, "目标宠物地址已失效，请刷新宠物列表"
+            if int(pm.read_int(address) or 0) != pet_vtable:
+                return None, "目标不是当前版本的宠物主对象"
+            raw = pm.read_bytes(address + self.PET_DIRECT_TYPE_OFF, 16) or b""
+            pet_type = bytes(raw).split(b"\0", 1)[0].decode("ascii", "ignore").strip().lower()
+            if pet_type not in self.PET_DIRECT_QUEUE_TYPES:
+                return None, "目标宠物类型未通过校验"
+            component = address + self.PET_COMPONENT_OFF
+            if int(pm.read_int(component) or 0) != component_vtable:
+                return None, "目标宠物的内部组件已失效"
+            kill = base + self.PET_KILL_RVA
+            if pm.read_bytes(kill, len(self.PET_KILL_PREFIX)) != self.PET_KILL_PREFIX:
+                return None, "当前版本的 Pet::Kill 原生入口不匹配"
+            return {"address": address, "pet_type": pet_type, "component": component,
+                    "base": base, "pet_vtable": pet_vtable,
+                    "component_vtable": component_vtable}, ""
+        except Exception as exc:
+            return None, "读取目标宠物失败：%s" % exc
+
+    def remove_pet(self, address):
+        """Ask the game thread to run the native death/cleanup callback once.
+
+        This is intentionally one-shot and non-reversible.  It never frees a
+        pointer or edits an entity container from Python; success is reported
+        only after a fresh live-pet scan no longer finds the same address.
+        """
+        if not self.PET_REMOVE_EXPERIMENTAL_ENABLED:
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "宠物原生移除当前未开放"}
+        target, error = self._validate_live_pet_target(address)
+        if not target:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+        controller, error = self._ensure_wave_portal_controller()
+        if not controller:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+        try:
+            data = int(controller["data"])
+            request = data + self.PET_REMOVE_QUEUE_REQUEST_OFF
+            target_addr = data + self.PET_REMOVE_QUEUE_TARGET_OFF
+            result_addr = data + self.PET_REMOVE_QUEUE_RESULT_OFF
+            pending_offsets = (
+                self.WAVE_PORTAL_END_REQUEST_OFF,
+                self.LIBRARY_QUEUE_REQUEST_OFF, self.MAGIC_QUEUE_REQUEST_OFF,
+                self.RECIPE_QUEUE_REQUEST_OFF, self.PERSONAL_SKILL_QUEUE_REQUEST_OFF,
+                self.PET_DIRECT_QUEUE_REQUEST_OFF, self.PET_LIMIT_QUERY_REQUEST_OFF,
+            )
+            if int(pm.read_int(request) or 0) or any(int(pm.read_int(data + off) or 0) for off in pending_offsets):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "游戏主线程仍有其它请求，稍后再试"}
+            pm.write_int(target_addr, int(target["address"]))
+            pm.write_int(result_addr, 0)
+            pm.write_int(request, 1)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and int(pm.read_int(request) or 0):
+                time.sleep(0.015)
+            if int(pm.read_int(request) or 0):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "游戏更新线程没有响应宠物移除请求"}
+            result_code = int(pm.read_int(result_addr) or 0)
+            if result_code == 2:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "宠物原生移除当前已暂停，未向游戏发送伤害或死亡调用"}
+            if result_code != 1:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "目标在游戏线程复核时已失效，未执行移除"}
+            # Pet::Kill finishes its manager/vector cleanup asynchronously on
+            # later game updates. The first live scan can still contain the
+            # old object, so poll with fresh scans for up to eight seconds.
+            # This loop only reads; Kill is never retried.
+            deadline = time.monotonic() + 8.0
+            after = None
+            still_live = True
+            while time.monotonic() < deadline:
+                after = self.get_pet_houses(refresh=True)
+                if not after.get("ok"):
+                    break
+                still_live = any(int(row.get("address", 0)) == int(target["address"])
+                                 for row in (after.get("pets") or []))
+                if not still_live:
+                    break
+                time.sleep(0.12)
+            if after is None:
+                after = self.get_pet_houses(refresh=True)
+            if not after.get("ok"):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "原生回调已执行，但移除后的宠物列表无法读回：%s" % after.get("error", "未知错误")}
+            still_live = any(int(row.get("address", 0)) == int(target["address"])
+                             for row in (after.get("pets") or []))
+            if still_live:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "原生死亡回调已执行，但目标仍在活动宠物列表；未判定为成功"}
+            history = self._record_operation(
+                "pet_native_death", "runtime",
+                {"address": int(target["address"]), "pet_type": target["pet_type"]},
+                "active_entity", "alive", "removed", True,
+                runtime_generation=self._runtime_session_generation,
+                runtime_pid=int(pm.process_id),
+                meta={"reversible": False, "note": "通过游戏原生死亡/清理链移除；不可撤销"},
+            )
+            with self._operation_history_lock:
+                for entry in self._operation_history:
+                    if int(entry.get("id", -1)) == int(history.get("id", -2)):
+                        entry["undo_available"] = False
+                        entry["undo_reason"] = "原生死亡/清理不可安全撤销"
+                        break
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "pet_type": target["pet_type"], "address": int(target["address"]),
+                    "before_count": int(after.get("pet_count", 0)) + 1,
+                    "after_count": int(after.get("pet_count", 0)),
+                    "message": "已通过游戏原生死亡/清理链移除 1 只宠物"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "宠物原生移除失败：%s" % exc}
+
+    def pet_house(self):
+        """切换宠物屋限制"""
+        try:
+            b=get_base(); is_v2=self._detect_v2()
+            off = V2_PET_LIMIT1_OFFSET if is_v2 else V1_PET_LIMIT1_OFFSET
+            if not self._pa1:
+                self._pet_house_original = pm.read_bytes(b + off, 2)
+                pm.write_bytes(b+off,bytes([0x90,0x90]),2)
+                self._pa1 = True
+            else:
+                if not self._pet_house_original:
+                    return False
+                pm.write_bytes(b + off, self._pet_house_original, 2)
+                self._pet_house_original = None
+                self._pa1 = False
+            return self._pa1
+        except: return False
+
+    def pet_infinite(self):
+        """切换宠物无限召唤"""
+        try:
+            b=get_base(); is_v2=self._detect_v2()
+            targets = ([(V2_PET_LIMIT2_ADDR1, 4), (V2_PET_LIMIT2_ADDR2, 6), (V2_PET_LIMIT2_ADDR3, 10)] if is_v2 else
+                       [(V1_PET_LIMIT1_OFFSET, 2), (V1_PET_LIMIT2_ADDR1, 4), (V1_PET_LIMIT2_ADDR2, 6),
+                        (V1_PET_LIMIT2_ADDR3, 6), (V1_PET_LIMIT2_ADDR4, 6), (V1_PET_LIMIT2_ADDR5, 2), (V1_PET_LIMIT2_ADDR6, 2)])
+            if not self._pa2:
+                self._pet_infinite_original = {}
+                for off, size in targets:
+                    self._pet_infinite_original[off] = pm.read_bytes(b + off, size)
+                    pm.write_bytes(b + off, bytes([0x90] * size), size)
+                self._pa2 = True
+                if not is_v2:
+                    pm.write_float(b+V1_PET_TIMER_OFFSET,0.0)
+            else:
+                if len(self._pet_infinite_original) != len(targets):
+                    return False
+                for off, size in targets:
+                    pm.write_bytes(b + off, self._pet_infinite_original[off], size)
+                self._pet_infinite_original = {}
+                self._pa2 = False
+            return self._pa2
+        except: return False
+
+    def pet_spawn(self):
+        """强制立即刷新宠物"""
+        try:
+            b=get_base(); is_v2=self._detect_v2()
+            if is_v2:
+                pm.write_float(b+V2_PET_FORCE_SPAWN_OFFSET,0.0)
+            else:
+                pm.write_float(b+V1_PET_TIMER_OFFSET,0.0)
+            return True
+        except: return False
+
+    # ==================== 其它功能（已验证代码补丁） ====================
+
+    def _other_feature_patches(self):
+        return V2_OTHER_FEATURE_PATCHES if self._detect_v2() else OTHER_FEATURE_PATCHES
+
+    def get_other_features(self):
+        """读取其它功能的实际开关状态，并校验当前游戏版本是否匹配。"""
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "未连接游戏", "features": None}
+        try:
+            b = get_base()
+            features = []
+            for key, spec in self._other_feature_patches().items():
+                original = True
+                enabled = True
+                for offset, off_bytes, on_bytes in spec["patches"]:
+                    current = pm.read_bytes(b + offset, len(off_bytes))
+                    original = original and current == off_bytes
+                    enabled = enabled and current == on_bytes
+                if enabled:
+                    status = "on"
+                elif original:
+                    status = "off"
+                else:
+                    status = "unsupported"
+                features.append({"key": key, "name": spec["name"], "status": status})
+            unsupported = [entry for entry in features if entry.get("status") == "unsupported"]
+            return {"ok": True,
+                    "state": self.STATUS_VERIFIED if not unsupported else self.STATUS_UNVERIFIED,
+                    "features": features,
+                    "reason": ("部分补丁原始字节与当前版本不一致，相关开关已拒绝写入。"
+                               if unsupported else "所有其它功能的补丁字节已读取并校验。")}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "读取其它功能状态失败：%s" % e, "features": None}
+
+    def relocate_other_feature_offsets(self):
+        """Revalidate legacy patch offsets for the current game process.
+
+        These patch entries are module-relative byte patches, not pointer
+        chains.  There is therefore no legitimate "automatic relocation" to
+        perform without a verified unique signature for each feature.  Older
+        UI code still exposed a relocation button but its backend method was
+        lost, leaving a dead button.  Make the action useful and truthful: it
+        performs a fresh per-patch read, reports matching entries, and keeps
+        non-matching ones protected instead of guessing a new code location.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "未连接游戏，无法校验其它功能偏移"}
+        try:
+            base = int(get_base())
+            resolved, unresolved = {}, {}
+            for key, spec in self._other_feature_patches().items():
+                rows, state = [], "off"
+                all_original, all_enabled = True, True
+                for offset, off_bytes, on_bytes in spec["patches"]:
+                    actual = pm.read_bytes(base + int(offset), len(off_bytes))
+                    is_original = actual == off_bytes
+                    is_enabled = actual == on_bytes
+                    all_original = all_original and is_original
+                    all_enabled = all_enabled and is_enabled
+                    rows.append({"offset": "+0x%X" % int(offset),
+                                 "matched_original": is_original,
+                                 "matched_enabled": is_enabled})
+                if all_enabled:
+                    state = "on"
+                elif all_original:
+                    state = "off"
+                else:
+                    unresolved[key] = {"name": spec.get("name") or key,
+                                       "reason": "当前代码字节与已验证原始/开启字节均不匹配",
+                                       "patches": rows}
+                    continue
+                resolved[key] = {"name": spec.get("name") or key,
+                                 "status": state, "patches": rows}
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "exe": "CraftWorld.exe", "count": len(resolved),
+                    "resolved": resolved, "unresolved": unresolved,
+                    "message": "已重新校验当前会话的模块相对补丁偏移；未猜测或写入未知地址。"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "其它功能偏移校验失败：%s" % exc}
+
+    def toggle_other_feature(self, key):
+        """切换一项已验证功能；字节不匹配时拒绝写入，防止误改其他游戏版本。"""
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "未连接游戏"}
+        spec = self._other_feature_patches().get(key)
+        if spec is None:
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "未知功能"}
+        try:
+            b = get_base()
+            current = []
+            all_original = True
+            all_enabled = True
+            for offset, off_bytes, on_bytes in spec["patches"]:
+                value = pm.read_bytes(b + offset, len(off_bytes))
+                current.append((offset, value, off_bytes, on_bytes))
+                all_original = all_original and value == off_bytes
+                all_enabled = all_enabled and value == on_bytes
+            if not all_original and not all_enabled:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前代码与已验证版本不匹配，未执行修改"}
+
+            target_enabled = not all_enabled
+            written = []
+            try:
+                for offset, value, off_bytes, on_bytes in current:
+                    target = on_bytes if target_enabled else off_bytes
+                    pm.write_bytes(b + offset, target, len(target))
+                    written.append((offset, value))
+                mismatched = []
+                for offset, _value, off_bytes, on_bytes in current:
+                    target = on_bytes if target_enabled else off_bytes
+                    actual = pm.read_bytes(b + offset, len(target))
+                    if actual != target:
+                        mismatched.append("+0x%X" % offset)
+                if mismatched:
+                    for offset, value in written:
+                        try:
+                            pm.write_bytes(b + offset, value, len(value))
+                        except Exception:
+                            pass
+                    return {"ok": False, "state": self.STATUS_FAILED,
+                            "error": "写后读回不一致，已回滚：%s" % "、".join(mismatched)}
+            except Exception:
+                for offset, value in written:
+                    try:
+                        pm.write_bytes(b + offset, value, len(value))
+                    except Exception:
+                        pass
+                raise
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "enabled": target_enabled, "name": spec["name"],
+                    "verified": True,
+                    "message": "写后读回校验通过"}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "其它功能写入失败：%s" % e}
+
+    _locked = set()
+    _locked_items = {}  # {name_en: {slot_addr, qty}}
+    _lock_restore_active = False
+    _fav = set()
+    _world = set()
+    _scrapped = set()
+    _proof = {}
+    _item_states_loaded = False
+    _dwarf_names = {}
+    _item_config_loaded = False
+    _translations = {}
+    _categories = []
+    _category_overrides = {}
+
+    def _load_item_states(self):
+        """_load_item_states"""
+        if self._item_states_loaded: return
+        self._item_states_loaded = True
+        try:
+            cfg = self._read_config()
+
+            self._fav = set(cfg.get("fav_items", []) or cfg.get("favorite_items", []))
+            self._world = set(cfg.get("world_specific", []))
+            self._scrapped = set(cfg.get("scrapped_items", []))
+            self._proof = cfg.get("proof_text", {}) or cfg.get("verified_notes", {})
+        except: pass
+
+    def _save_item_states(self):
+        """_save_item_states"""
+        try:
+            def update(cfg):
+                cfg["fav_items"] = sorted(self._fav)
+                cfg["world_specific"] = sorted(self._world)
+                cfg["scrapped_items"] = sorted(self._scrapped)
+                cfg["proof_text"] = dict(self._proof)
+            return self._update_config(update)
+        except Exception as e:
+            print("_save_item_states error:", e)
+            return False
+
+    def set_dwarf_name(self, idx, name):
+        """设置矮人名称"""
+        self._dwarf_names[str(idx)] = name
+        self._save_dwarf_names()
+        return True
+
+    def _load_dwarf_names(self):
+        """_load_dwarf_names"""
+        try:
+            self._dwarf_names = dict(self._read_config().get("dwarf_names", {}) or {})
+        except:
+            self._dwarf_names = {}
+
+    def _save_dwarf_names(self):
+        """_save_dwarf_names"""
+        try:
+            return self._update_config(lambda cfg: cfg.update({"dwarf_names": dict(self._dwarf_names)}))
+        except Exception as e:
+            print("_save_dwarf_names error:", e)
+            return False
+
+    def _load_item_config(self):
+        """_load_item_config"""
+        if self._item_config_loaded: return
+        self._item_config_loaded = True
+        # The mod CSV is only a fallback.  Entries in the trainer's own
+        # translation file below deliberately override it.
+        self._translations.update(GAME_RESOURCE_TRANSLATIONS)
+        try:
+            trans_path = _resource_path("item_translations.txt")
+            with open(trans_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        self._translations[k.strip().lower()] = v.strip()
+        except: pass
+        try:
+            cfg = self._read_config()
+            self._categories = cfg.get("categories", [])
+            self._category_overrides = cfg.get("category_overrides", {})
+            custom_translations = cfg.get("custom_translations", {})
+            if isinstance(custom_translations, dict):
+                self._translations.update({str(key).lower().strip(): str(value)
+                                           for key, value in custom_translations.items()
+                                           if str(key).strip() and str(value).strip()})
+        except:
+            self._categories = []
+
+    def get_translation(self, name_en):
+        """获取物品中文翻译"""
+        self._load_item_config()
+        return self._translations.get(name_en.lower().strip(), "")
+
+    def _recipe_item_label(self, item_id, memory_label=""):
+        """Choose a readable recipe label without showing corrupt memory text."""
+        item_id = str(item_id or "").strip()
+        translated = _clean_display_label(self.get_translation(item_id))
+        if translated and any("\u4e00" <= char <= "\u9fff" for char in translated):
+            return translated
+        memory_label = _clean_display_label(memory_label)
+        # Memory labels may be English, but a valid Chinese one is worth using
+        # for custom resources not listed in our translation files.
+        if memory_label and any("\u4e00" <= char <= "\u9fff" for char in memory_label):
+            return memory_label
+        return item_id.replace("_", " ") or "未命名物品"
+
+
+    def save_translation(self, name_en, name_cn):
+        """保存物品中文翻译"""
+        try:
+            key, value = str(name_en or "").lower().strip(), str(name_cn or "").strip()
+            if not key or not value:
+                return False
+            self._translations[key] = value
+            def update(cfg):
+                custom = cfg.get("custom_translations")
+                if not isinstance(custom, dict):
+                    custom = {}
+                custom[key] = value
+                cfg["custom_translations"] = custom
+            return bool(self._update_config(update))
+        except: return False
+
+    def save_item_category(self, name_en, category):
+        """保存物品自定义分类"""
+        try:
+            overrides = dict(self._category_overrides)
+            if category:
+                overrides[name_en] = category
+            elif name_en in overrides:
+                del overrides[name_en]
+            if not self._update_config(lambda cfg: cfg.update({"category_overrides": dict(overrides)})):
+                return False
+            # 同步刷新内存缓存
+            self._category_overrides = overrides
+            return True
+        except: return False
+
+    def get_categories(self):
+        """获取所有自定义分类"""
+        self._load_item_config()
+        return self._categories
+
+    def save_categories(self, cats):
+        """保存分类列表"""
+        try:
+            clean = list(cats) if isinstance(cats, (list, tuple)) else []
+            if not self._update_config(lambda cfg: cfg.update({"categories": clean})):
+                return False
+            self._categories = clean
+            print("save_categories OK:", cats)
+            return True
+        except Exception as e:
+            print("save_categories error:", e)
+            return False
+
+    def add_category(self, name):
+        """添加新分类"""
+        if name and name not in self._categories:
+            self._categories.append(name)
+            return self.save_categories(self._categories)
+        return False
+
+    def delete_category(self, name):
+        """删除分类"""
+        if name in self._categories:
+            self._categories.remove(name)
+            for item in item_cache:
+                if item.get("category", "") == name:
+                    item["category"] = "\u65e0"
+            return self.save_categories(self._categories)
+        return False
+
+    def rename_category(self, old_name, new_name):
+        """重命名分类"""
+        if old_name in self._categories and new_name and new_name not in self._categories:
+            idx = self._categories.index(old_name)
+            self._categories[idx] = new_name
+            return self.save_categories(self._categories)
+        return False
+
+
+    def get_shop_entry(self, name_en):
+        """Read one cached shop entry without conflating absence and failure."""
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_NOT_CONNECTED,
+                    "error": "尚未连接游戏"}
+        try:
+            if hasattr(self, "_shop_data") and name_en in self._shop_data:
+                row = dict(self._shop_data[name_en] or {})
+                price = row.get("price")
+                qty = row.get("qty")
+                if isinstance(price, bool) or isinstance(qty, bool):
+                    raise ValueError("商店数值类型无效")
+                price = int(price)
+                qty = int(qty)
+                if price < 0 or qty < 0:
+                    raise ValueError("商店数值范围无效")
+                return {"ok": True, "state": self.STATUS_OK, "exists": True,
+                        "price": price, "qty": qty}
+            return {"ok": True, "state": self.STATUS_NO_DATA, "exists": False,
+                    "price": None, "qty": None}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_RELOCATION_FAILED,
+                    "error": "商店条目读取失败：%s" % exc}
+
+    @staticmethod
+    def _procurement_category(item_id, raw_category=""):
+        raw = str(raw_category or _categorize_item(str(item_id or "")))
+        key = raw.lower()
+        if any(x in key for x in ("资源", "材料", "金属", "矿", "ingot")):
+            return "资源 / 矿物"
+        if any(x in key for x in ("武器", "防具", "装备", "工具")):
+            return "装备 / 工具"
+        if any(x in key for x in ("食物", "药水", "种子", "消耗")):
+            return "消耗品"
+        if any(x in key for x in ("家具", "建筑")):
+            return "家具 / 建筑"
+        if any(x in key for x in ("魔法", "弹药")):
+            return "魔法设施"
+        return "其它"
+
+    def _procurement_inventory_totals(self):
+        totals = {}
+        for row in item_cache:
+            key = str(row.get("name_en", "") or "").strip().lower()
+            if not key:
+                continue
+            try:
+                qty = int(row.get("qty", 0) or 0)
+            except Exception:
+                continue
+            if qty >= 0:
+                totals[key] = totals.get(key, 0) + qty
+        return totals
+
+    def _procurement_catalog_rows(self, refresh=False):
+        if refresh or not isinstance(getattr(self, "_shop_data", None), dict) or not self._shop_data:
+            self.scan_shop()
+        inventory = self._procurement_inventory_totals()
+        rows = []
+        for raw_id, raw in (self._shop_data or {}).items():
+            item_id = str(raw_id or "").strip()
+            # Corrupt heap bytes must never become a plausible shop product.
+            if not re.fullmatch(r"[a-z0-9_]{2,96}", item_id):
+                continue
+            try:
+                price, pack_qty = int(raw.get("price")), int(raw.get("qty"))
+            except Exception:
+                continue
+            # The resource table contains every known item. A zero price or
+            # pack count is not useful for a budget plan. Non-zero data is a
+            # *priced resource candidate*, not proof that the current shop UI
+            # is displaying the product; that still requires the native shop
+            # handler / purchase-chain verification.
+            if not (0 < price <= 100000000 and 0 < pack_qty <= 1000000):
+                continue
+            label = self.get_translation(item_id) or item_id
+            raw_category = self._category_overrides.get(item_id, "") or _categorize_item(item_id)
+            rows.append({
+                "id": item_id, "name": label, "category": self._procurement_category(item_id, raw_category),
+                "price": price, "pack_qty": pack_qty, "inventory": int(inventory.get(item_id.lower(), 0)),
+                "slot_idx": int(raw.get("slot_idx", -1) or -1),
+                "source": "运行时商店资源表",
+            })
+        rows.sort(key=lambda row: (row["category"], row["name"], row["id"]))
+        return rows
+
+    def get_procurement_catalog(self, query="", category="", page=0, page_size=80, refresh=False):
+        """Return a paged, read-only purchase catalog and live gold snapshot."""
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "请先连接游戏并进入存档"}
+        try:
+            page, page_size = max(0, int(page)), max(20, min(160, int(page_size)))
+            needle, wanted_category = str(query or "").strip().lower(), str(category or "").strip()
+            rows = self._procurement_catalog_rows(bool(refresh))
+            categories = sorted({r["category"] for r in rows})
+            if needle:
+                rows = [r for r in rows if needle in r["id"].lower() or needle in r["name"].lower()]
+            if wanted_category:
+                rows = [r for r in rows if r["category"] == wanted_category]
+            gold_raw = self.read_gold()
+            if gold_raw is None:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "金币读取失败；未展示可能过期的采购预算"}
+            start = page * page_size
+            return {"ok": True, "state": self.STATUS_VERIFIED, "gold": int(gold_raw),
+                    "categories": categories, "count": len(rows), "page": page, "page_size": page_size,
+                    "page_count": max(1, (len(rows) + page_size - 1) // page_size),
+                    "rows": rows[start:start + page_size],
+                    "note": "目录来自运行时资源价格表，用于搜索、预算和缺料计划；它不等同于当前商店页面的可见商品。原生购买调用尚未绑定前不会伪造扣钱或发物品。"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "采购目录读取失败：%s" % exc}
+
+    def get_procurement_recipe_catalog(self):
+        """Expose local recipes as targets for deficit calculation, without writing."""
+        try:
+            data = self._build_recipe_browser_data()
+            rows = [{"key": r["key"], "id": r["id"], "name": r["name"],
+                     "source": r.get("source_info", {}).get("label", r.get("source", "本体")),
+                     "ingredient_count": len(r.get("ingredients") or [])}
+                    for r in data.get("recipes", []) if r.get("ingredients")]
+            rows.sort(key=lambda row: (row["name"], row["id"], row["key"]))
+            return {"ok": True, "state": self.STATUS_UNVERIFIED, "count": len(rows), "rows": rows,
+                    "scope": "配方来自本地本体/模组定义；库存与商店价格来自当前运行时。"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "缺料配方目录读取失败：%s" % exc}
+
+    def get_procurement_recipe_deficit(self, recipe_key, crafts=1):
+        """Calculate one recipe's missing materials and purchasable subtotal."""
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "请先连接游戏并进入存档"}
+        try:
+            crafts = max(1, min(9999, int(crafts)))
+            detail = self.get_recipe_browser_detail(recipe_key)
+            if not detail.get("ok"):
+                return detail
+            recipe = detail.get("recipe") or {}
+            inventory = self._procurement_inventory_totals()
+            shop = {row["id"].lower(): row for row in self._procurement_catalog_rows(False)}
+            needs, subtotal = [], 0
+            for ingredient in recipe.get("ingredients") or []:
+                item_id = str(ingredient.get("id", "") or "").strip()
+                if not item_id:
+                    continue
+                required = max(0, int(ingredient.get("quantity", 0) or 0) * crafts)
+                have = int(inventory.get(item_id.lower(), 0)); missing = max(0, required - have); product = shop.get(item_id.lower())
+                unit_price = int(product["price"]) if product else None
+                pack_qty = int(product["pack_qty"]) if product else None
+                packs_needed = ((missing + pack_qty - 1) // pack_qty) if missing > 0 and pack_qty else 0
+                purchasable_qty = packs_needed * pack_qty if pack_qty else 0
+                cost = unit_price * packs_needed if unit_price is not None else None
+                if cost is not None: subtotal += cost
+                needs.append({"id": item_id, "name": ingredient.get("name") or self.get_translation(item_id) or item_id,
+                              "required": required, "inventory": have, "missing": missing,
+                              "shop_available": product is not None, "unit_price": unit_price,
+                              "pack_qty": pack_qty, "packs_needed": packs_needed,
+                              "purchasable_qty": purchasable_qty, "cost": cost})
+            gold = self.read_gold()
+            return {"ok": gold is not None, "state": self.STATUS_VERIFIED if gold is not None else self.STATUS_STALE,
+                    "recipe": {"key": recipe.get("key"), "id": recipe.get("id"), "name": recipe.get("name")},
+                    "crafts": crafts, "needs": needs, "purchasable_total": subtotal,
+                    "gold": int(gold) if gold is not None else None,
+                    "can_afford": bool(gold is not None and int(gold) >= subtotal),
+                    "error": None if gold is not None else "金币读取失败，未计算可用预算"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "缺料计算失败：%s" % exc}
+
+    def get_procurement_cart_summary(self, cart_items, refresh=False):
+        """Resolve a cart against the current runtime catalogue without writing.
+
+        Each native shop action buys a bundle, so the cart stores ``packs`` and
+        derives the received item count from the runtime ``qty`` field. This
+        avoids stale page data silently producing an incorrect budget.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "请先连接游戏并进入存档"}
+        try:
+            products = {row["id"].lower(): row for row in self._procurement_catalog_rows(bool(refresh))}
+            requested = cart_items if isinstance(cart_items, list) else []
+            resolved, unavailable, total = [], [], 0
+            for item in requested[:200]:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id", "") or "").strip()
+                try:
+                    packs = max(0, min(9999, int(item.get("packs", 0))))
+                except Exception:
+                    packs = 0
+                if not item_id or packs <= 0:
+                    continue
+                product = products.get(item_id.lower())
+                if product is None:
+                    unavailable.append(item_id)
+                    continue
+                cost = int(product["price"]) * packs
+                received = int(product["pack_qty"]) * packs
+                total += cost
+                resolved.append({**product, "packs": packs, "received": received, "cost": cost})
+            gold = self.read_gold()
+            if gold is None:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "金币读取失败；购物车预算未更新"}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "gold": int(gold),
+                    "items": resolved, "unavailable": unavailable, "total": total,
+                    "can_afford": int(gold) >= total,
+                    "note": "购物车只做原生购买前的数量与预算核对；尚未调用商店购买。"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "购物车核对失败：%s" % exc}
+
+    def _find_native_shop_buy_button(self, module_base):
+        """Return the live bottom-panel Buy source accepted by ShopDialog.
+
+        The address is intentionally discovered for every request.  Layout
+        objects are recreated whenever the dialog closes, so persisting a
+        previously clicked button pointer would be unsafe.
+        """
+        try:
+            expected_vtable = int(module_base) + self.V1_SHOP_BUTTON_VTABLE_RVA
+            hits = pymem.pattern.pattern_scan_all(
+                pm.process_handle, b"buy\x00", return_multiple=True
+            ) or []
+            candidates = []
+            for hit in hits:
+                # The visible bottom-panel button keeps its command token at
+                # +0x68.  ``item_butN`` lives at a different source offset and
+                # is only the product-selection path; using it makes OnEvent
+                # return before the native purchase branch.
+                source = int(hit) - 0x68
+                if source < 0x10000:
+                    continue
+                try:
+                    if int(pm.read_int(source)) != expected_vtable:
+                        continue
+                    group = (pm.read_bytes(source + 0x2C, 16) or b"").split(b"\x00", 1)[0]
+                    kind = (pm.read_bytes(source + 0x44, 16) or b"").split(b"\x00", 1)[0]
+                    token = (pm.read_bytes(source + 0x68, 16) or b"").split(b"\x00", 1)[0]
+                    if kind != b"button" or token != b"buy" or group.startswith(b"item_but"):
+                        continue
+                    candidates.append((group, source))
+                except Exception:
+                    continue
+            candidates = sorted(set(candidates))
+            for group, source in candidates:
+                if group.startswith(b"buttons"):
+                    return source, ""
+            if len(candidates) == 1:
+                return candidates[0][1], ""
+            if not candidates:
+                return 0, "当前哥布林商店没有识别到原生购买按钮"
+            return 0, "当前商店布局存在多个购买按钮，无法安全确定目标"
+        except Exception as exc:
+            return 0, "原生购买按钮定位失败：%s" % exc
+
+    def get_native_shop_selection(self):
+        """Read the item currently selected in the live ShopDialog.
+
+        This is deliberately separate from the resource-price catalogue.  A
+        price-table row can exist without being visible in the current shop
+        page; this probe follows the dialog's own category/index vectors and
+        resolves the same resource id used by ``ShopDialog::OnEvent``.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏并打开哥布林商店"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "当前商店选择定位只验证了 Steam 原版"}
+        try:
+            pid = int(pm.process_id)
+            module_base = int(get_base(pm))
+            vtable = module_base + self.V1_SHOP_DIALOG_VTABLE_RVA
+            with self._shop_dialog_probe_lock:
+                cached = dict(self._shop_dialog_probe_cache or {})
+            dialog = int(cached.get("address") or 0) if int(cached.get("pid") or 0) == pid else 0
+            def valid_dialog(address):
+                try:
+                    if not address or pm.read_int(address) != vtable:
+                        return False
+                    category = int(pm.read_int(address + self.SHOP_DIALOG_CATEGORY_OFF))
+                    index = int(pm.read_int(address + self.SHOP_DIALOG_ITEM_INDEX_OFF))
+                    return 0 <= category < self.SHOP_DIALOG_MAX_CATEGORY and 0 <= index < self.SHOP_DIALOG_MAX_ITEM_INDEX
+                except Exception:
+                    return False
+            if not valid_dialog(dialog):
+                hits = pymem.pattern.pattern_scan_all(
+                    pm.process_handle, struct.pack("<I", vtable), return_multiple=True) or []
+                dialog = next((int(address) for address in hits if valid_dialog(int(address))), 0)
+                with self._shop_dialog_probe_lock:
+                    self._shop_dialog_probe_cache = {"pid": pid, "address": dialog, "at": time.time()}
+            if not dialog:
+                return {"ok": False, "state": self.STATUS_NO_DATA,
+                        "error": "当前没有识别到已打开的哥布林商店窗口"}
+            category = int(pm.read_int(dialog + self.SHOP_DIALOG_CATEGORY_OFF))
+            index = int(pm.read_int(dialog + self.SHOP_DIALOG_ITEM_INDEX_OFF))
+            group_addr = dialog + self.SHOP_DIALOG_GROUPS_OFF + category * self.SHOP_DIALOG_GROUP_STRIDE
+            if not group_addr:
+                return {"ok": False, "state": self.STATUS_RELOCATION_FAILED,
+                        "error": "商店当前分类列表定位失败"}
+            # The category table stores an inline std::vector<int> triple:
+            # begin/end/capacity.  The old code dereferenced ``begin`` once
+            # more, so a valid list such as {0,1,2,...} was misread as an
+            # empty vector and the UI reported no current selection.
+            begin, end = pm.read_int(group_addr), pm.read_int(group_addr + 4)
+            if not begin or not end or end < begin or (end - begin) % 4 or index >= (end - begin) // 4:
+                return {"ok": False, "state": self.STATUS_NO_DATA,
+                        "error": "商店当前页没有有效商品选择"}
+            resource_id = int(pm.read_int(begin + index * 4))
+            if resource_id < 0 or resource_id > 100000:
+                return {"ok": False, "state": self.STATUS_RELOCATION_FAILED,
+                        "error": "商店商品资源 ID 无效"}
+            selected_id = ""
+            selected_name = ""
+            # The runtime resource vector is the same source used by the
+            # native FindResourceById call.  Prefer its slot index, then fall
+            # back to the already scanned shop table for price/translation.
+            arr_start, arr_end = _get_item_array(pm, is_v2=False)
+            if arr_start and arr_end and resource_id < (arr_end - arr_start) // SLOT_SIZE:
+                selected_id = _read_item_name(pm, arr_start + resource_id * SLOT_SIZE, OFF_NAME_EN, 16, 64) or ""
+            if not selected_id:
+                for item_id, row in (self._shop_data or {}).items():
+                    if int(row.get("slot_idx", -1)) == resource_id:
+                        selected_id = str(item_id)
+                        break
+            selected_name = self.get_translation(selected_id) or selected_id or ("资源 ID %d" % resource_id)
+            product = None
+            for row in self._procurement_catalog_rows(False):
+                if row["id"].lower() == selected_id.lower() or int(row.get("slot_idx", -1)) == resource_id:
+                    product = row
+                    break
+            return {"ok": True, "state": self.STATUS_VERIFIED, "dialog": hex(dialog),
+                    "category": category, "index": index, "resource_id": resource_id,
+                    "id": selected_id, "name": selected_name,
+                    "price": product.get("price") if product else None,
+                    "pack_qty": product.get("pack_qty") if product else None,
+                    "note": "已沿用 ShopDialog::OnEvent 的分类、索引和资源 ID 解析；尚未执行原生购买。"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "商店当前选择读取失败：%s" % exc}
+
+    def native_shop_purchase_one(self, item_id):
+        """Buy exactly one package through the live game's ShopDialog.
+
+        This endpoint intentionally refuses cart loops and automatic selection.
+        The requested entry must already be selected in the visible game shop;
+        native UI code then performs the price check, money change and item
+        delivery exactly as if its own Buy button had been pressed.
+        """
+        # 暂停原因见“待完善功能/哥布林商店原生购买分析笔记.md”。
+        # 保留接口与采购目录，避免丢失已有功能；但在真实点击分发链完整
+        # 还原前，绝不能再提交合成 UI 事件或窗口鼠标消息。
+        return {
+            "ok": False,
+            "state": "已锁定",
+            "error": "原生购买正在排查崩溃风险，已临时锁定；目录、购物车和预算核对仍可使用。",
+            "reason": "真实购买事件的完整 UI 分发链尚未可靠复现。",
+        }
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏、进入存档并打开哥布林商店"}
+        if self._detect_v2():
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "原生商店购买目前只验证 Steam 原版"}
+        wanted = str(item_id or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9_]{2,96}", wanted):
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "商品 ID 无效"}
+        selected = self.get_native_shop_selection()
+        if not selected.get("ok"):
+            return selected
+        selected_id = str(selected.get("id") or "").strip().lower()
+        if not selected_id or selected_id != wanted:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "请先在游戏商店选中“%s”；当前选中的是“%s”" % (wanted, selected_id or "未知")}
+        try:
+            price = int(selected.get("price"))
+            pack_qty = int(selected.get("pack_qty"))
+        except Exception:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "当前商品的原生价格或每包数量读取失败"}
+        if not (0 < price <= 100000000 and 0 < pack_qty <= 1000000):
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "当前商品的原生价格或每包数量无效"}
+        gold_before = self.read_gold()
+        if gold_before is None:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "购买前金币读取失败"}
+        gold_before = int(gold_before)
+        if gold_before < price:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "金币不足：当前 %d，需要 %d" % (gold_before, price)}
+        try:
+            module_base = int(get_base(pm))
+        except Exception:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "游戏模块基址读取失败"}
+        button, button_error = self._find_native_shop_buy_button(module_base)
+        if not button:
+            return {"ok": False, "state": self.STATUS_STALE, "error": button_error}
+        controller, error = self._ensure_wave_portal_controller()
+        if not controller:
+            return {"ok": False, "state": self.STATUS_STALE, "error": error}
+        data = int(controller.get("data") or 0)
+        dialog = int(selected.get("dialog"), 16)
+        if not data or not dialog:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "原生购买队列未准备好"}
+        handle = self._suspend(int(pm.process_id))
+        if not handle:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "无法暂停游戏以安全提交购买请求"}
+        try:
+            # Write immutable payload first and the request flag last so the
+            # update thread can never observe a half-written UI event.
+            pm.write_int(data + self.SHOP_NATIVE_QUEUE_REQUEST_OFF, 0)
+            pm.write_int(data + self.SHOP_NATIVE_QUEUE_RESULT_OFF, 0)
+            pm.write_int(data + self.SHOP_NATIVE_QUEUE_DONE_OFF, 0)
+            pm.write_int(data + self.SHOP_NATIVE_QUEUE_DIALOG_OFF, dialog)
+            pm.write_int(data + self.SHOP_NATIVE_QUEUE_SOURCE_OFF, int(button))
+            pm.write_int(data + self.SHOP_NATIVE_QUEUE_REQUEST_OFF, 1)
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "提交原生购买请求失败：%s" % exc}
+        finally:
+            self._resume(handle)
+        deadline = time.time() + 2.0
+        executed = False
+        while time.time() < deadline:
+            try:
+                executed = int(pm.read_int(data + self.SHOP_NATIVE_QUEUE_DONE_OFF)) == 1
+            except Exception:
+                executed = False
+            if executed:
+                break
+            time.sleep(0.04)
+        if not executed:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "原生购买请求未在游戏更新线程执行；未修改金币或库存"}
+        try:
+            native_result = int(pm.read_int(data + self.SHOP_NATIVE_QUEUE_RESULT_OFF))
+        except Exception:
+            native_result = None
+        gold_after = self.read_gold()
+        if gold_after is None:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "原生购买已调用，但购买后金币读回失败；请不要重复点击"}
+        gold_after = int(gold_after)
+        spent = gold_before - gold_after
+        if spent != price:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "原生购买调用已返回，但金币变化为 %d（预期 %d）；未把结果标记为成功" % (spent, price),
+                    "before": gold_before, "after": gold_after, "expected_cost": price,
+                    "native_result": native_result}
+        return {"ok": True, "state": self.STATUS_VERIFIED, "id": selected_id,
+                "name": selected.get("name") or selected_id, "price": price,
+                "pack_qty": pack_qty, "before": gold_before, "after": gold_after,
+                "native_result": native_result,
+                "note": "已通过游戏原生商店购买链完成一包购买；商品由游戏正常生成和搬运。"}
+
+    def modify_shop_entry(self, name_en, new_price=None, new_qty=None):
+        """修改商店条目价格和数量"""
+        try:
+            if not hasattr(self, "_shop_data") or name_en not in self._shop_data:
+                return False
+            sd = self._shop_data[name_en]
+            addr = sd.get("addr")
+            if not addr:
+                return False
+            is_v2 = sd.get("is_v2", False)
+            ok, err = modify_shop_entry(pm, addr, new_price, new_qty, is_v2)
+            if ok:
+                if new_price is not None:
+                    sd["price"] = new_price
+                if new_qty is not None:
+                    sd["qty"] = new_qty
+                self._shop_data[name_en] = sd
+            return ok
+        except:
+            return False
+
+    def _scan_recipes(self):
+        """Populate the recipe cache without turning a failed scan into empty data."""
+        if self._recipe_scanned:
+            return True
+        if not connected or pm is None:
+            self._recipe_scan_error = "尚未连接游戏"
+            return False
+        try:
+            cache = scan_v2_recipes(pm) if self._detect_v2() else scan_all_recipe_names(pm)
+            if not isinstance(cache, dict):
+                raise ValueError("配方扫描结果格式无效")
+            self._recipe_cache = cache
+            self._recipe_scanned = True
+            self._recipe_scan_error = ""
+            return True
+        except Exception as exc:
+            self._recipe_cache = {}
+            self._recipe_scanned = False
+            self._recipe_scan_error = "配方扫描失败：%s" % str(exc)[:120]
+            return False
+
+    def scan_recipes(self):
+        """Scan recipes and report failure separately from an empty save."""
+        self._recipe_scanned = False
+        if not connected or pm is None:
+            self._recipe_cache = {}
+            self._recipe_scan_error = "尚未连接游戏"
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": self._recipe_scan_error, "count": None}
+        if not self._scan_recipes():
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": getattr(self, "_recipe_scan_error", "配方扫描失败"), "count": None}
+        return {"ok": True, "state": self.STATUS_VERIFIED,
+                "count": len(self._recipe_cache)}
+
+    def get_recipe_state(self, name_en):
+        """Read recipe state with an explicit failure state for the UI."""
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_NOT_CONNECTED,
+                    "error": "尚未连接游戏", "addr": 0}
+        try:
+            if not self._scan_recipes():
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": getattr(self, "_recipe_scan_error", "配方扫描失败"), "addr": 0}
+            key = name_en.lower().strip()
+            if key in self._recipe_cache:
+                addr = self._recipe_cache[key]
+                state = get_recipe_unlock_state(pm, addr)
+                return {"ok": True, "state": "\u5df2\u89e3\u9501" if state else "\u672a\u89e3\u9501", "addr": addr}
+            return {"ok": True, "state": "\u5f53\u524d\u5b58\u6863\u6ca1\u6709\u6570\u636e", "addr": 0}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_RELOCATION_FAILED,
+                    "error": "配方状态读取失败：%s" % str(e)[:80], "addr": 0}
+
+    def unlock_recipe(self, name_en):
+        """解锁指定配方"""
+        try:
+            self._scan_recipes()
+            key = name_en.lower().strip()
+            if key in self._recipe_cache:
+                addr = self._recipe_cache[key]
+                set_recipe_unlock_state(pm, addr, True)
+                return True
+            return False
+        except:
+            return False
+
+    def _live_recipe_vector(self):
+        """Return the current map's authoritative ``std::vector<Recipe>``.
+
+        Recipe addresses are allocated per loaded map, so neither the editor
+        nor its writes may reuse a value cached before a restart or a save
+        reload.  The World vector is the same source used by
+        ``World::FindRecipeById``.
+        """
+        if not connected or not pm:
+            return None, "请先连接游戏"
+        if self._detect_v2():
+            return None, "配方编辑器目前仅验证了 Steam 原版"
+        try:
+            module_base = int(get_base())
+            world = int(pm.read_int(module_base + ITEM_BASE_OFFSET) or 0)
+            if not (0x10000 <= world < 0x80000000):
+                raise ValueError("World 指针无效")
+            begin = int(pm.read_int(world + RECIPE_WORLD_BEGIN_OFF) or 0)
+            end = int(pm.read_int(world + RECIPE_WORLD_END_OFF) or 0)
+            span = end - begin
+            if begin < 0x10000 or span < 0 or span % RECIPE_SLOT_SIZE:
+                raise ValueError("配方数组边界无效")
+            count = span // RECIPE_SLOT_SIZE
+            if not 1 <= count <= 10000:
+                raise ValueError("配方数量异常: %d" % count)
+            return {
+                "base": module_base,
+                "world": world,
+                "begin": begin,
+                "end": end,
+                "count": int(count),
+            }, ""
+        except Exception as e:
+            return None, "无法读取当前地图的配方表: %s" % e
+
+    def _recipe_resource_catalog(self):
+        """Build a live map between resource names and ResourceSlot indices."""
+        try:
+            arr_start, arr_end = _get_item_array(pm, is_v2=False)
+            arr_start, arr_end = int(arr_start or 0), int(arr_end or 0)
+            span = arr_end - arr_start
+            if arr_start < 0x10000 or span < 0 or span % SLOT_SIZE:
+                raise ValueError("物品资源表边界无效")
+            count = span // SLOT_SIZE
+            if not 1 <= count <= 10000:
+                raise ValueError("物品资源数量异常")
+
+            cached_by_slot = {
+                int(item.get("slot_addr", 0) or 0): item
+                for item in item_cache
+                if item.get("slot_addr")
+            }
+            by_name, by_index, materials = {}, {}, []
+            for index in range(count):
+                address = arr_start + index * SLOT_SIZE
+                cached = cached_by_slot.get(address) or {}
+                name_en = str(cached.get("name_en", "") or "")
+                if not name_en:
+                    name_en = _read_item_name(pm, address, OFF_NAME_EN, 16, 48) or ""
+                name_en = name_en.strip()
+                if not name_en:
+                    continue
+                # Item cache labels come from a legacy in-memory text field and
+                # may be UTF-8 replacement garbage.  Prefer our translation
+                # sources and only use a valid Chinese cache label as fallback.
+                name_cn = self._recipe_item_label(name_en, cached.get("name_cn", ""))
+                entry = {
+                    "id": name_en,
+                    "name": name_cn,
+                    "index": int(index),
+                    "category": self._category_overrides.get(name_en, "") or cached.get("category", ""),
+                }
+                by_name.setdefault(name_en.lower(), entry)
+                by_index[int(index)] = entry
+                materials.append(entry)
+            # Keep the selector in the same resource-slot order as the item
+            # panel.  Local-only IDs are placed after live game resources.
+            materials.sort(key=lambda entry: (int(entry.get("index")) if entry.get("index") is not None else 1 << 30, str(entry["id"])))
+            return {"by_name": by_name, "by_index": by_index, "materials": materials}, ""
+        except Exception as e:
+            return None, "无法读取物品资源表: %s" % e
+
+    def _find_live_recipe(self, recipe_name, vector=None):
+        """Find one Recipe by its exact ASCII key in the active vector."""
+        if vector is None:
+            vector, error = self._live_recipe_vector()
+            if not vector:
+                return None, error
+        key = str(recipe_name or "").strip().lower()
+        if not key:
+            return None, "请选择一个配方"
+        for index in range(int(vector["count"])):
+            address = int(vector["begin"]) + index * RECIPE_SLOT_SIZE
+            if (read_recipe_name(pm, address) or "").lower() == key:
+                return address, ""
+        return None, "当前地图中找不到配方: %s" % recipe_name
+
+    def _read_recipe_editor_payload(self, recipe_name, vector=None, resources=None):
+        """Read a Recipe's 3×3 ingredient cells without trusting old caches."""
+        if vector is None:
+            vector, error = self._live_recipe_vector()
+            if not vector:
+                return None, error
+        if resources is None:
+            resources, error = self._recipe_resource_catalog()
+            if not resources:
+                return None, error
+        recipe_addr, error = self._find_live_recipe(recipe_name, vector)
+        if not recipe_addr:
+            return None, error
+        try:
+            start = int(pm.read_int(recipe_addr + RECIPE_OFF_MATERIAL_PTR) or 0)
+            end = int(pm.read_int(recipe_addr + RECIPE_OFF_MATERIAL_END) or 0)
+            cap = int(pm.read_int(recipe_addr + RECIPE_OFF_MATERIAL_CAP) or 0)
+            span = end - start
+            empty_vector = start == 0 and end == 0 and cap == 0
+            if (not empty_vector and (start < 0x10000 or end < start or cap < end)) or span % MATERIAL_ENTRY_SIZE:
+                raise ValueError("材料数组边界无效")
+            ingredient_count = span // MATERIAL_ENTRY_SIZE
+            if ingredient_count > 9:
+                raise ValueError("材料数量异常: %d" % ingredient_count)
+            grid = [""] * 9
+            for address in range(start, end, MATERIAL_ENTRY_SIZE):
+                resource_index = int(pm.read_int(address + MATERIAL_OFF_TYPE) or 0)
+                position = int(pm.read_int(address + MATERIAL_OFF_POS) or 0)
+                if not 1 <= position <= 9:
+                    raise ValueError("材料格位置无效: %d" % position)
+                resource = resources["by_index"].get(resource_index)
+                if not resource:
+                    raise ValueError("材料资源索引无效: %d" % resource_index)
+                grid[position - 1] = resource["id"]
+            output_index = int(pm.read_int(recipe_addr + RECIPE_OFF_PRODUCE_RES_ID) or 0)
+            output = resources["by_index"].get(output_index) or {
+                "id": "resource_%d" % output_index,
+                "name": "资源 #%d" % output_index,
+                "index": output_index,
+            }
+            return {
+                "ok": True,
+                "recipe": read_recipe_name(pm, recipe_addr) or str(recipe_name),
+                "recipe_id": int(pm.read_int(recipe_addr + RECIPE_OFF_ID) or 0),
+                "enabled": get_recipe_unlock_state(pm, recipe_addr),
+                "output": output,
+                "grid": grid,
+                "ingredient_count": int(ingredient_count),
+            }, ""
+        except Exception as e:
+            return None, "无法读取配方材料: %s" % e
+
+    @staticmethod
+    def _recipe_grid_from_text(ingredients):
+        """Decode a local XML ``ingredients`` attribute into the 3×3 UI grid."""
+        grid = [""] * 9
+        for token in str(ingredients or "").split(","):
+            item_id, separator, position_text = token.strip().rpartition("-")
+            if not separator:
+                continue
+            try:
+                position = int(position_text)
+            except ValueError:
+                continue
+            item_id = item_id.strip()
+            if item_id and 1 <= position <= 9:
+                grid[position - 1] = item_id
+        return grid
+
+    @staticmethod
+    def _recipe_ingredients_from_grid(grid):
+        if not isinstance(grid, (list, tuple)) or len(grid) != 9:
+            raise ValueError("配方必须包含完整的 3×3 九宫格")
+        values = []
+        for position, raw_item_id in enumerate(grid, 1):
+            item_id = str(raw_item_id or "").strip()
+            if not item_id:
+                continue
+            # Recipe resource IDs are ASCII keys.  Restricting the file write
+            # to these keys keeps the XML attribute safe and unambiguous.
+            if not re.fullmatch(r"[A-Za-z0-9_]+", item_id):
+                raise ValueError("第 %d 格物品 ID 无效" % position)
+            values.append("%s-%d" % (item_id, position))
+        return ",".join(values)
+
+    def _local_recipe_records(self):
+        """Read every recipes*.xml file without depending on map memory."""
+        records = {}
+        if not os.path.isdir(GAME_DATA_DIR):
+            return records
+        try:
+            filenames = sorted(
+                name for name in os.listdir(GAME_DATA_DIR)
+                if re.fullmatch(r"recipes(?:_\d+)?\.xml", name, flags=re.IGNORECASE)
+            )
+        except OSError:
+            return records
+        for filename in filenames:
+            path = os.path.join(GAME_DATA_DIR, filename)
+            try:
+                root = ET.parse(path).getroot()
+            except (OSError, ET.ParseError):
+                continue
+            for element in root.iter("recipe"):
+                recipe_id = str(element.get("name") or "").strip()
+                if not recipe_id:
+                    continue
+                produce = str(element.get("produce") or "").split("=", 1)[0].strip()
+                record = {
+                    "id": recipe_id,
+                    "file": filename,
+                    "path": path,
+                    "produce": produce,
+                    "ingredients": str(element.get("ingredients") or ""),
+                    "grid": self._recipe_grid_from_text(element.get("ingredients") or ""),
+                }
+                records.setdefault(recipe_id.lower(), []).append(record)
+        return records
+
+    @staticmethod
+    def _replace_local_recipe_ingredients(text, recipe_id, ingredients):
+        """Change only matching ``<recipe>`` start tags, preserving all XML layout."""
+        changed = 0
+        safe_ingredients = str(ingredients).replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+
+        def replace_tag(match):
+            nonlocal changed
+            tag = match.group(0)
+            name_match = re.search(r"\bname\s*=\s*(['\"])(.*?)\1", tag, flags=re.IGNORECASE)
+            if not name_match or name_match.group(2).strip().lower() != recipe_id.lower():
+                return tag
+            ingredients_pattern = re.compile(r"(\bingredients\s*=\s*)(['\"])(.*?)(\2)", flags=re.IGNORECASE)
+            if ingredients_pattern.search(tag):
+                changed += 1
+                return ingredients_pattern.sub(
+                    lambda item: item.group(1) + item.group(2) + safe_ingredients + item.group(2), tag, count=1
+                )
+            changed += 1
+            suffix = "/>" if tag.endswith("/>") else ">"
+            return tag[:-len(suffix)] + ' ingredients="' + safe_ingredients + '"' + suffix
+
+        return re.sub(r"<recipe\b[^>]*>", replace_tag, text, flags=re.IGNORECASE), changed
+
+    def _write_local_recipe_file(self, path, recipe_id, ingredients):
+        """Atomically update one local recipe XML and keep a recoverable backup."""
+        try:
+            with open(path, "rb") as handle:
+                original = handle.read()
+            encoding = "utf-8-sig" if original.startswith(b"\xef\xbb\xbf") else "utf-8"
+            text = original.decode(encoding)
+            updated, changed = self._replace_local_recipe_ingredients(text, recipe_id, ingredients)
+            if not changed:
+                return 0, "本地文件中未找到同名配方"
+            data = updated.encode(encoding)
+            backup_path = path + ".trainer.bak"
+            temporary_path = "%s.%s.%s.tmp" % (path, os.getpid(), threading.get_ident())
+            with open(backup_path, "wb") as backup:
+                backup.write(original)
+            with open(temporary_path, "wb") as temporary:
+                temporary.write(data)
+            os.replace(temporary_path, path)
+            return changed, ""
+        except Exception as e:
+            try:
+                if 'temporary_path' in locals() and os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+            return 0, str(e)
+
+    def _record_recipe_edit(self, recipe_id, grid, target, files=None):
+        entry = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "recipe": str(recipe_id),
+            "ingredients": self._recipe_ingredients_from_grid(grid),
+            "target": str(target),
+            "files": list(files or []),
+        }
+
+        def update(config):
+            log = config.get("recipe_edit_log", [])
+            log = list(log) if isinstance(log, list) else []
+            log.insert(0, entry)
+            config["recipe_edit_log"] = log[:100]
+        self._update_config(update)
+
+    def get_recipe_edit_log(self):
+        """Return the most recent persistent recipe edits for the UI."""
+        try:
+            log = self._read_config().get("recipe_edit_log", [])
+            return list(log)[:100] if isinstance(log, list) else []
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Read-only recipe / technology browser
+    # ------------------------------------------------------------------
+    # The editor above intentionally follows the live game's recipe vector.
+    # The browser has a different job: it must remain useful when no map is
+    # loaded and it must include installed mods.  Keep this model completely
+    # separate from the editor and never call a mutating endpoint from it.
+
+    @staticmethod
+    def _browser_source(source_type, label, path, mod=""):
+        return {
+            "type": str(source_type or "unknown"),
+            "label": str(label or "\u6682\u4e0d\u652f\u6301"),
+            "file": os.path.basename(path) if path else "",
+            "path": str(path or ""),
+            "mod": str(mod or ""),
+        }
+
+    def _browser_local_files(self, pattern):
+        """Yield (path, source) for base-game and installed-mod data files."""
+        found = []
+        try:
+            for filename in sorted(os.listdir(GAME_DATA_DIR)):
+                if re.fullmatch(pattern, filename, flags=re.IGNORECASE):
+                    found.append((os.path.join(GAME_DATA_DIR, filename),
+                                  self._browser_source("base", "\u672c\u4f53", os.path.join(GAME_DATA_DIR, filename))))
+        except OSError:
+            pass
+        mods_dir = os.path.join(GAME_ROOT, "mods")
+        if os.path.isdir(mods_dir):
+            try:
+                for root, _dirs, files in os.walk(mods_dir):
+                    mod_rel = os.path.relpath(root, mods_dir)
+                    mod_name = mod_rel.split(os.sep, 1)[0] if mod_rel != "." else ""
+                    if not mod_name:
+                        continue
+                    for filename in sorted(files):
+                        if re.fullmatch(pattern, filename, flags=re.IGNORECASE):
+                            path = os.path.join(root, filename)
+                            found.append((path, self._browser_source(
+                                "mod", "\u6a21\u7ec4\uff1a" + mod_name, path, mod_name)))
+            except OSError:
+                pass
+        return found
+
+    @staticmethod
+    def _browser_parse_amount(value, default=1):
+        try:
+            number = int(str(value).strip())
+            return number if number > 0 else default
+        except Exception:
+            return default
+
+    def _browser_item_category(self, definition):
+        definition = definition or {}
+        raw = str(definition.get("class") or definition.get("application") or "").strip().lower()
+        labels = {
+            "weapon": "\u6b66\u5668", "helmet": "\u5934\u76d4", "armor": "\u62a4\u7532",
+            "boots": "\u9774\u5b50", "tool": "\u5de5\u5177", "equip": "\u88c5\u5907",
+            "furniture": "\u5bb6\u5177", "block": "\u5efa\u7b51", "mining": "\u91c7\u96c6",
+            "creature": "\u751f\u7269", "halfstuff": "\u534a\u6210\u54c1",
+        }
+        if raw in labels:
+            return labels[raw]
+        if raw:
+            return raw
+        return "\u672a\u5206\u7c7b"
+
+    def _browser_item_label(self, item_id, definition=None):
+        item_id = str(item_id or "").strip()
+        definition = definition or {}
+        title = str(definition.get("title") or "").strip()
+        if title.startswith("%"):
+            title = ""
+        translated = _clean_display_label(self.get_translation(item_id))
+        if translated:
+            return translated
+        translated = _clean_display_label(GAME_RESOURCE_TRANSLATIONS.get(item_id.lower(), ""))
+        if translated:
+            return translated
+        if title:
+            return title
+        return item_id.replace("_", " ") or "\u672a\u547d\u540d\u7269\u54c1"
+
+    @staticmethod
+    def _browser_parse_resource_attrs(tag):
+        attrs = {}
+        pattern = r"([A-Za-z_][\w:.-]*)\s*=\s*(\".*?\"|'[^']*')"
+        for match in re.finditer(pattern, tag, flags=re.S):
+            value = match.group(2)
+            attrs[match.group(1)] = value[1:-1]
+        return attrs
+
+    def _browser_load_resources(self):
+        resources = {}
+        errors = []
+
+        def add_definition(definition, source):
+            item_id = str(definition.get("name") or "").strip()
+            if not item_id:
+                return False
+            # Base-game definitions win over a mod definition with the same ID;
+            # a mod-only ID is still fully searchable.
+            if item_id.lower() in resources and source["type"] == "mod":
+                return False
+            resources[item_id.lower()] = {
+                "id": item_id,
+                "name": self._browser_item_label(item_id, definition),
+                "category": self._browser_item_category(definition),
+                "application": str(definition.get("application") or ""),
+                "resource_class": str(definition.get("class") or ""),
+                "properties_raw": str(definition.get("properties") or ""),
+                "attributes": dict(definition),
+                "source": source,
+                "definition": {
+                    "file": source["file"],
+                    "path": source["path"],
+                    "mod": source["mod"],
+                },
+            }
+            return True
+
+        for path, source in self._browser_local_files(r"craft_resources(?:_\d+)?\.xml"):
+            try:
+                root = ET.parse(path).getroot()
+                for element in root.iter("resource"):
+                    add_definition(dict(element.attrib), source)
+                continue
+            except (OSError, ET.ParseError, UnicodeError) as exc:
+                # Some installed mods contain loose XML accepted by the game
+                # loader but rejected by ElementTree. Keep the error visible
+                # while recovering valid resource starts below.
+                errors.append({"file": path, "error": "\u6807\u51c6 XML \u8bfb\u53d6\u5931\u8d25\uff1a" + str(exc)})
+
+            try:
+                raw = Path(path).read_text(encoding="utf-8-sig")
+                recovered = 0
+                for match in re.finditer(r"<resource\b[\s\S]*?>", raw, flags=re.I):
+                    line_start = raw.rfind("\n", 0, match.start()) + 1
+                    line_prefix = raw[line_start:match.start()]
+                    # Do not resurrect an explicitly commented resource on
+                    # the same line; continue after malformed comment blocks.
+                    if "<!--" in line_prefix:
+                        continue
+                    definition = self._browser_parse_resource_attrs(match.group(0))
+                    if add_definition(definition, source):
+                        recovered += 1
+                if recovered:
+                    errors.append({"file": path, "error": "\u5df2\u517c\u5bb9\u8bfb\u53d6 %d \u4e2a resource\uff1b\u539f\u59cb\u6587\u4ef6\u4ecd\u5b58\u5728 XML \u683c\u5f0f\u95ee\u9898" % recovered})
+                else:
+                    errors.append({"file": path, "error": "\u8bfb\u53d6\u5931\u8d25\uff1a\u672a\u6062\u590d\u5230\u6709\u6548 resource \u8282\u70b9"})
+            except (OSError, UnicodeError) as fallback_exc:
+                errors.append({"file": path, "error": "\u517c\u5bb9\u8bfb\u53d6\u5931\u8d25\uff1a" + str(fallback_exc)})
+        return resources, errors
+    def _browser_parse_recipe_file(self, path, source, resources):
+        records = []
+        try:
+            root = ET.parse(path).getroot()
+        except (OSError, ET.ParseError, UnicodeError):
+            return records
+        for element in root.iter("recipe"):
+            recipe_id = str(element.get("name") or "").strip()
+            if not recipe_id:
+                continue
+            output_raw = str(element.get("produce") or "").strip()
+            output_parts = output_raw.split("=", 1)
+            output_id = output_parts[0].strip()
+            if not output_id:
+                output_id = recipe_id
+            output_qty = self._browser_parse_amount(output_parts[1], 1) if len(output_parts) > 1 else 1
+            counts, slots = {}, []
+            ingredients_raw = str(element.get("ingredients") or "").strip()
+            ingredient_status = "ok"
+            if ingredients_raw:
+                for token in ingredients_raw.split(","):
+                    token = token.strip()
+                    if not token:
+                        continue
+                    parts = token.rsplit("-", 1)
+                    item_id = parts[0].strip()
+                    if not item_id:
+                        ingredient_status = "\u8bfb\u53d6\u5931\u8d25"
+                        continue
+                    position = self._browser_parse_amount(parts[1], 0) if len(parts) > 1 else 0
+                    if not position:
+                        position = len(slots) + 1
+                    counts[item_id.lower()] = counts.get(item_id.lower(), 0) + 1
+                    slots.append({"position": position, "id": item_id})
+            category_def = resources.get(output_id.lower()) or {}
+            category = category_def.get("category") or ("\u7b2c" + str(element.get("group") or "?") + "\u7ec4")
+            ingredient_items = []
+            for item_key, quantity in counts.items():
+                item = resources.get(item_key)
+                item_id = item.get("id") if item else next((x["id"] for x in slots if x["id"].lower() == item_key), item_key)
+                ingredient_items.append(self._browser_item_ref(item_id, resources, source, quantity))
+            output = self._browser_item_ref(output_id, resources, source, output_qty)
+            for slot in slots:
+                ref = self._browser_item_ref(slot["id"], resources, source, 1)
+                slot.update({"name": ref["name"], "source": ref["source"]})
+            records.append({
+                "id": recipe_id,
+                "key": source["type"] + ":" + source.get("mod", "") + ":" + recipe_id.lower() + ":" + source["file"].lower(),
+                "name": self._browser_item_label(recipe_id, category_def),
+                "output": output,
+                "ingredients": ingredient_items,
+                "ingredient_slots": slots,
+                "category": category,
+                "group": str(element.get("group") or ""),
+                "craft_need": str(element.get("craft_need") or "").strip(),
+                "require": str(element.get("require") or "").strip(),
+                "source": source["label"],
+                "source_info": source,
+                "unlock": "\u8bfb\u53d6\u4e0d\u5230",
+                "unlock_status": "\u672c\u5730\u8d44\u6599\u672a\u8fde\u63a5\u6e38\u620f",
+                "read_status": ingredient_status if ingredient_status != "ok" else "ok",
+            })
+        return records
+
+    def _browser_item_ref(self, item_id, resources, fallback_source, quantity=1):
+        definition = resources.get(str(item_id or "").lower())
+        if definition:
+            source = definition["source"]
+            return {
+                "id": definition["id"], "name": definition["name"], "quantity": int(quantity),
+                "category": definition["category"], "application": definition["application"],
+                "source": source["label"], "source_info": source,
+                "definition": definition.get("definition"), "read_status": "ok",
+            }
+        return {
+            "id": str(item_id or ""), "name": self._browser_item_label(item_id), "quantity": int(quantity),
+            "category": "\u672a\u77e5", "application": "", "source": "\u6682\u4e0d\u652f\u6301",
+            "source_info": self._browser_source("unknown", "\u6682\u4e0d\u652f\u6301", ""),
+            "definition": None, "read_status": "\u8bfb\u53d6\u5931\u8d25",
+        }
+
+    def _browser_live_recipe_states(self):
+        states = {}
+        if not connected or not pm:
+            return states, "\u8bfb\u53d6\u4e0d\u5230"
+        try:
+            vector, error = self._live_recipe_vector()
+            if not vector:
+                return states, "\u8bfb\u53d6\u4e0d\u5230"
+            for index in range(int(vector["count"])):
+                address = int(vector["begin"]) + index * RECIPE_SLOT_SIZE
+                recipe_id = read_recipe_name(pm, address)
+                if recipe_id:
+                    states[recipe_id.lower()] = bool(get_recipe_unlock_state(pm, address))
+            return states, "\u5df2\u4ece\u6e38\u620f\u5185\u5b58\u8bfb\u53d6"
+        except Exception:
+            return {}, "\u8bfb\u53d6\u4e0d\u5230"
+
+    def _browser_tech_files(self):
+        return self._browser_local_files(r".*techtree\.csv")
+
+    def _browser_parse_tech_file(self, path, source):
+        nodes = []
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                text = handle.read()
+        except (OSError, UnicodeError):
+            return nodes
+        for row_index, line in enumerate(text.replace("\r", "").split("\n")):
+            for column_index, raw_segment in enumerate(line.split(";")):
+                segment = raw_segment.strip()
+                if not segment:
+                    continue
+                level_match = re.search(r"level:(\d+)\|", segment, flags=re.I)
+                level = int(level_match.group(1)) if level_match else None
+                if level_match:
+                    segment = segment[:level_match.start()] + segment[level_match.end():]
+                if "|" in segment:
+                    prefix, payload = segment.split("|", 1)
+                else:
+                    prefix, payload = "", segment
+                marker = "".join(ch for ch in prefix if ch in "<>!")
+                tokens = [token.strip() for token in payload.split(",") if token.strip()]
+                if not tokens:
+                    continue
+                nodes.append({
+                    "id": tokens[0], "recipes": list(dict.fromkeys(tokens[1:])),
+                    "source": source, "row": row_index, "column": column_index,
+                    "marker": marker, "level": level,
+                })
+        return nodes
+    def _browser_tech_model(self, live_states=None):
+        live_states = live_states or {}
+        merged = {}
+        order = []
+        files = self._browser_tech_files()
+        live_keys = set(live_states)
+        scored = []
+        for path, source in files:
+            parsed = self._browser_parse_tech_file(path, source)
+            scored.append((len({n["id"].lower() for n in parsed} & live_keys), path, source, parsed))
+        if live_keys and scored:
+            best_score = max(x[0] for x in scored)
+            selected = [x for x in scored if x[0] == best_score and best_score > 0]
+            if selected:
+                scored = selected
+
+        for _score, _path, source, parsed in scored:
+            # The CSV is a visual four-column tree. Link only the previous
+            # node in the same visible column; do not chain unrelated routes.
+            previous_by_column = {}
+            for raw in parsed:
+                key = raw["id"].lower()
+                if key not in merged:
+                    merged[key] = {
+                        "id": raw["id"], "key": key, "title": self._tech_title(raw["id"]),
+                        "recipes": [], "source": source, "prerequisites": [], "next_nodes": [],
+                    }
+                    order.append(key)
+                node = merged[key]
+                node["recipes"] = list(dict.fromkeys(node["recipes"] + raw["recipes"]))
+                if node["source"]["type"] == "base" and source["type"] == "mod":
+                    node["source"] = source
+                previous = previous_by_column.get(raw["column"])
+                if previous and previous != key:
+                    if previous not in node["prerequisites"]:
+                        node["prerequisites"].append(previous)
+                    if key not in merged[previous]["next_nodes"]:
+                        merged[previous]["next_nodes"].append(key)
+                previous_by_column[raw["column"]] = key
+
+        for node in merged.values():
+            state = live_states.get(node["id"].lower())
+            if state is None:
+                node["state"] = "\u8bfb\u53d6\u4e0d\u5230"
+                node["state_status"] = "\u672a\u8fde\u63a5\u6e38\u620f\u6216\u5f53\u524d\u5730\u56fe\u672a\u8bfb\u53d6"
+            elif int(state) == 2:
+                node["state"] = "\u5df2\u89e3\u9501"
+                node["state_status"] = "\u5df2\u4ece\u6e38\u620f\u5185\u5b58\u8bfb\u53d6"
+            elif int(state) == 1:
+                node["state"] = "\u53ef\u7814\u7a76"
+                node["state_status"] = "\u5df2\u4ece\u6e38\u620f\u5185\u5b58\u8bfb\u53d6"
+            else:
+                node["state"] = "\u6761\u4ef6\u4e0d\u8db3"
+                node["state_status"] = "\u5df2\u4ece\u6e38\u620f\u5185\u5b58\u8bfb\u53d6"
+            node["relationship_status"] = (
+                "\u5df2\u4ece\u672c\u5730\u79d1\u6280\u6811\u5206\u8def\u7ebf\u5e03\u5c40\u8bfb\u53d6" if node["prerequisites"] or node["next_nodes"]
+                else "\u672a\u627e\u5230\u660e\u786e\u524d\u540e\u7f6e\u5173\u7cfb\uff08\u4e0d\u662f\u8bfb\u53d6\u5931\u8d25\uff09"
+            )
+        return merged, order
+    def _tech_title(self, node_id):
+        locale = {}
+        candidates = [os.path.join(GAME_ROOT, "lang", "tech_locale.csv"),
+                      os.path.join(_tech_game_dir(), "lang", "tech_locale.csv")]
+        for path in candidates:
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                    for row in csv.DictReader(handle, delimiter=";"):
+                        key = str(row.get("key") or "").strip()
+                        if key:
+                            locale[key] = str(row.get("chinese") or "").strip() or key
+                break
+            except Exception:
+                continue
+        title = _clean_display_label(locale.get(node_id, ""))
+        return title or node_id
+
+    def _build_recipe_browser_data(self):
+        resources, resource_errors = self._browser_load_resources()
+        records = []
+        recipe_errors = []
+        for path, source in self._browser_local_files(r"recipes(?:_\d+)?\.xml"):
+            before = len(records)
+            records.extend(self._browser_parse_recipe_file(path, source, resources))
+            if len(records) == before:
+                recipe_errors.append({"file": path, "error": "\u6ca1\u6709\u53ef\u8bfb\u53d6\u7684 recipe \u8282\u70b9"})
+        live_recipe_states, recipe_state_status = self._browser_live_recipe_states()
+        live_tech_states = {}
+        if connected and pm:
+            try:
+                live_nodes = _read_live_tech_nodes(pm, self._detect_v2())
+                live_tech_states = {str(n["id"]).lower(): int(n["state"]) for n in live_nodes}
+            except Exception:
+                live_tech_states = {}
+        tech_nodes, tech_order = self._browser_tech_model(live_tech_states)
+        recipe_to_tech = {}
+        for key, node in tech_nodes.items():
+            for recipe_id in node["recipes"]:
+                recipe_to_tech.setdefault(recipe_id.lower(), []).append(node)
+        for recipe in records:
+            recipe["unlock"] = ("\u5df2\u89e3\u9501" if live_recipe_states.get(recipe["id"].lower())
+                                else "\u6761\u4ef6\u4e0d\u8db3" if recipe["id"].lower() in live_recipe_states
+                                else "\u8bfb\u53d6\u4e0d\u5230")
+            recipe["unlock_status"] = recipe_state_status
+            related_nodes = []
+            for lookup in (recipe["id"], recipe["output"]["id"]):
+                for node in recipe_to_tech.get(str(lookup).lower(), []):
+                    if node not in related_nodes:
+                        related_nodes.append(node)
+            recipe["tech_nodes"] = [{"id": n["id"], "key": n["key"], "title": n["title"], "state": n["state"], "source": n["source"]["label"]}
+                                     for n in related_nodes]
+        # A duplicate ID can legitimately exist in a mod; retain all records
+        # and let the source/file key disambiguate them.
+        categories = sorted({str(r.get("category") or "\u672a\u5206\u7c7b") for r in records})
+        sources = sorted({str(r.get("source") or "\u6682\u4e0d\u652f\持") for r in records})
+        return {
+            "recipes": records, "resources": resources, "tech_nodes": tech_nodes,
+            "tech_order": tech_order, "sources": sources, "categories": categories,
+            "errors": resource_errors + recipe_errors,
+            "tech_read_status": "\u5df2\u8bfb\u53d6\u672c\u5730\u79d1\u6280\u5173\u8054" if tech_nodes else "\u6682\u4e0d\u652f\u6301",
+        }
+
+    def get_recipe_browser_catalog(self):
+        """Read-only local recipe catalog including base game and installed mods."""
+        try:
+            data = self._build_recipe_browser_data()
+            return {"ok": True, "state": self.STATUS_UNVERIFIED,
+                    "scope": "本地游戏/模组定义（非当前存档运行时状态）",
+                    "count": len(data["recipes"]), "recipes": data["recipes"],
+                    "sources": data["sources"], "categories": data["categories"],
+                    "tech_read_status": data["tech_read_status"], "read_errors": data["errors"]}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "\u914d\u65b9\u8d44\u6599\u8bfb\u53d6\u5931\u8d25: " + str(exc)}
+
+    def get_recipe_browser_detail(self, recipe_key):
+        try:
+            data = self._build_recipe_browser_data()
+            key = str(recipe_key or "").strip()
+            recipe = next((r for r in data["recipes"] if r["key"] == key or r["id"].lower() == key.lower()), None)
+            if not recipe:
+                return {"ok": False, "state": self.STATUS_EMPTY,
+                        "error": "本地游戏与模组定义中找不到该配方"}
+            return {"ok": True, "state": self.STATUS_UNVERIFIED,
+                    "scope": "本地游戏/模组定义（非当前存档运行时状态）", "recipe": recipe}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "\u914d\u65b9\u8be6\u60c5\u8bfb\u53d6\u5931\u8d25: " + str(exc)}
+
+    def get_item_detail(self, item_id):
+        """Read-only item detail with producing and consuming recipe links."""
+        try:
+            data = self._build_recipe_browser_data()
+            wanted = str(item_id or "").strip()
+            if not wanted:
+                return {"ok": False, "state": self.STATUS_EMPTY, "error": "物品 ID 为空"}
+            item = data["resources"].get(wanted.lower()) or self._browser_item_ref(wanted, data["resources"], self._browser_source("unknown", "\u6682\u4e0d\u652f\u6301", ""))
+            related = []
+            for recipe in data["recipes"]:
+                if recipe["output"]["id"].lower() == wanted.lower():
+                    related.append({"role": "\u751f\u4ea7", "id": recipe["id"], "recipe_key": recipe["key"], "output_id": recipe["output"]["id"], "output_name": recipe["output"]["name"], "craft_need": recipe["craft_need"], "source": recipe["source_info"], "unlock": recipe["unlock"]})
+                if any(x["id"].lower() == wanted.lower() for x in recipe["ingredients"]):
+                    related.append({"role": "\u6d88\u8017", "id": recipe["id"], "recipe_key": recipe["key"], "output_id": recipe["output"]["id"], "output_name": recipe["output"]["name"], "craft_need": recipe["craft_need"], "source": recipe["source_info"], "unlock": recipe["unlock"]})
+            wanted_key = wanted.lower()
+            runtime_rows = [row for row in item_cache
+                            if str(row.get("name_en") or "").lower() == wanted_key]
+            runtime_qty = None
+            if runtime_rows:
+                # The live inventory has one ResourceSlot per resource in the
+                # supported build.  Still sum defensively rather than hiding
+                # an unexpected duplicate as an arbitrary first value.
+                runtime_qty = sum(max(0, int(row.get("qty") or 0)) for row in runtime_rows)
+            self._load_item_states()
+            states = {
+                "locked": wanted in self._locked,
+                "favorite": wanted in self._fav,
+                "world": wanted in self._world,
+                "scrap": wanted in self._scrapped,
+            }
+            attrs = dict(item.get("attributes") or {})
+            basic_properties = []
+            ignored_attrs = {"name", "title", "class", "application", "properties"}
+            for key, value in attrs.items():
+                if key.lower() in ignored_attrs or value in (None, ""):
+                    continue
+                basic_properties.append({"key": key, "label": key, "value": value})
+            for prop in str(item.get("properties_raw") or "").split(","):
+                prop = prop.strip()
+                if prop:
+                    basic_properties.append({"key": "property", "label": "属性", "value": prop})
+            basic_properties = basic_properties[:24]
+
+            equip_slots, equipped_by = [], []
+            runtime_index = None
+            equipper_note = "该物品不是已识别的矮人装备，未读取装备占用。"
+            resource_class = str(item.get("resource_class") or "").strip().lower()
+            if connected and pm and not self._detect_v2():
+                catalog, catalog_error = self._v1_equipment_catalog()
+                if catalog:
+                    for index, candidate in catalog.get("all_by_index", {}).items():
+                        if str(candidate.get("id") or "").lower() == wanted_key:
+                            runtime_index = int(index)
+                            resource_class = str(candidate.get("class") or resource_class).lower()
+                            break
+                    if resource_class in V1_DWARF_EQUIPMENT_CLASSES:
+                        equip_slots = [{"key": slot["key"], "title": slot["title"], "icon": slot["icon"]}
+                                       for slot in V1_DWARF_EQUIPMENT_SLOTS
+                                       if slot["class"] == resource_class]
+                        dwarves = self.get_dwarves()
+                        if runtime_index is None:
+                            equipper_note = "已识别为 %s，但当前资源表没有该物品的运行时索引。" % resource_class
+                        elif not dwarves:
+                            equipper_note = "当前没有已读取的矮人，无法检查装备占用。"
+                        else:
+                            for dwarf in dwarves:
+                                edi = int(dwarf.get("edi") or 0)
+                                if not self._validate_dwarf(edi, False):
+                                    continue
+                                for slot in V1_DWARF_EQUIPMENT_SLOTS:
+                                    if slot["class"] != resource_class:
+                                        continue
+                                    raw = pm.read_int(edi + int(slot["offset"]))
+                                    value = -1 if raw is None or (int(raw) & 0xFFFFFFFF) == 0xFFFFFFFF else int(raw)
+                                    if value == runtime_index:
+                                        equipped_by.append({"idx": dwarf.get("idx"), "name": dwarf.get("name"),
+                                                            "slot": slot["title"], "slot_key": slot["key"]})
+                            equipper_note = ("当前未由已读取矮人装备。" if not equipped_by else
+                                             "已匹配 %d 个已读取装备槽。" % len(equipped_by))
+                    elif resource_class:
+                        equipper_note = "本地定义类别为 %s，当前不属于可装备的八个矮人槽位。" % resource_class
+                else:
+                    equipper_note = "装备目录读取失败：%s" % (catalog_error or "未知原因")
+            elif self._detect_v2():
+                equipper_note = "当前版本尚未验证矮人装备目录读取。"
+            else:
+                equipper_note = "未连接游戏，无法读取当前库存与装备占用。"
+            return {"ok": True, "state": self.STATUS_UNVERIFIED,
+                    "scope": "本地游戏/模组定义与配方关联（非当前存档运行时状态）",
+                    "known": item.get("read_status") == "ok", "id": item["id"], "name": item["name"],
+                    "category": item.get("category"), "application": item.get("application"), "source": item.get("source_info"),
+                    "definition": item.get("definition"), "basic_properties": basic_properties,
+                    "runtime_quantity": runtime_qty,
+                    "runtime_inventory_state": (self.STATUS_VERIFIED if runtime_qty is not None else
+                                                (self.STATUS_DISCONNECTED if not connected else self.STATUS_EMPTY)),
+                    "runtime_index": runtime_index, "slot_class": resource_class,
+                    "equip_slots": equip_slots, "equipped_by": equipped_by, "equipper_note": equipper_note,
+                    "states": states, "related_recipes": related, "related_recipe_count": len(related),
+                    "recipe_read_status": "ok" if related else "\u672a\u627e\u5230\u5173\u8054\u914d\u65b9"}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "\u7269\u54c1\u8be6\u60c5\u8bfb\u53d6\u5931\u8d25: " + str(exc)}
+
+    def get_tech_node_detail(self, node_key):
+        try:
+            data = self._build_recipe_browser_data()
+            wanted = str(node_key or "").strip().lower()
+            node = data["tech_nodes"].get(wanted)
+            if not node:
+                return {"ok": False, "state": self.STATUS_EMPTY,
+                        "error": "本地科技定义中找不到该节点"}
+            recipes = []
+            items = []
+            for recipe in data["recipes"]:
+                if recipe["output"]["id"].lower() in {x.lower() for x in node["recipes"]} or recipe["id"].lower() in {x.lower() for x in node["recipes"]}:
+                    recipes.append({"id": recipe["id"], "key": recipe["key"], "name": recipe["name"], "source": recipe["source_info"], "unlock": recipe["unlock"]})
+                    items.append(recipe["output"])
+            node_copy = dict(node)
+            def related_node(node_id):
+                related = data["tech_nodes"].get(str(node_id).lower())
+                if not related:
+                    return {"id": node_id, "key": str(node_id).lower(), "title": node_id,
+                            "state": "????", "state_status": "?????????????"}
+                return {"id": related["id"], "key": related["key"], "title": related["title"],
+                        "state": related["state"], "state_status": related["state_status"],
+                        "source": related["source"]["label"]}
+            node_copy["prerequisites"] = [related_node(x) for x in node.get("prerequisites", [])]
+            node_copy["next_nodes"] = [related_node(x) for x in node.get("next_nodes", [])]
+            return {"ok": True, "state": self.STATUS_UNVERIFIED,
+                    "scope": "本地科技定义（非当前存档解锁状态）",
+                    "node": node_copy, "recipes": recipes,
+                    "items": list({x["id"]: x for x in items}.values())}
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "\u79d1\u6280\u8be6\u60c5\u8bfb\u53d6\u5931\u8d25: " + str(exc)}
+
+    def sync_recipe_grid_to_local(self, recipe_name, grid):
+        """Persist one editor grid into the matching official/mod recipe XMLs."""
+        try:
+            recipe_id = str(recipe_name or "").strip()
+            if not recipe_id:
+                return {"ok": False, "error": "请选择一个配方"}
+            ingredients = self._recipe_ingredients_from_grid(grid)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        records = self._local_recipe_records().get(recipe_id.lower(), [])
+        if not records:
+            return {"ok": False, "error": "本地 recipes.xml 与 recipes_1~15.xml 中没有此配方，未创建未知的配方记录"}
+        changed_files, failures = [], []
+        for path in sorted({record["path"] for record in records}):
+            changed, error = self._write_local_recipe_file(path, recipe_id, ingredients)
+            if changed:
+                changed_files.append(os.path.basename(path))
+            elif error:
+                failures.append("%s: %s" % (os.path.basename(path), error))
+        if not changed_files:
+            return {"ok": False, "error": "同步本地失败：" + ("；".join(failures) or "没有改动")}
+        self._record_recipe_edit(recipe_id, grid, "本地文件", changed_files)
+        message = "已同步到 %d 个本地文件，并创建 .trainer.bak 备份" % len(changed_files)
+        if failures:
+            message += "；部分失败：" + "；".join(failures)
+        return {"ok": True, "recipe": recipe_id, "grid": list(grid), "files": changed_files, "message": message}
+
+    def get_recipe_editor_catalog(self, sync_local=True):
+        """Return map recipes and, when requested, recipes declared in local XML."""
+        vector, error = self._live_recipe_vector()
+        if not vector:
+            state, detail = self._runtime_read_unavailable_state()
+            return {"ok": False, "state": state, "error": error or detail}
+        resources, error = self._recipe_resource_catalog()
+        if not resources:
+            # The live recipe vector is valid, but the companion resource table
+            # no longer matches it.  This is not an empty catalog.
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": error or "配方资源表定位失效，请重新连接或检查版本"}
+        recipes = []
+        local_records = self._local_recipe_records() if bool(sync_local) else {}
+        memory_recipe_ids = set()
+        try:
+            for index in range(int(vector["count"])):
+                address = int(vector["begin"]) + index * RECIPE_SLOT_SIZE
+                name_en = read_recipe_name(pm, address)
+                if not name_en:
+                    continue
+                key = name_en.lower()
+                memory_recipe_ids.add(key)
+                output_index = int(pm.read_int(address + RECIPE_OFF_PRODUCE_RES_ID) or 0)
+                output = resources["by_index"].get(output_index) or {}
+                local_rows = local_records.get(key, [])
+
+                # The active vector also contains non-crafting placeholders
+                # (empty ingredient vectors).  They cannot be edited as a
+                # recipe and only bury real entries in the list, so omit them.
+                start = int(pm.read_int(address + RECIPE_OFF_MATERIAL_PTR) or 0)
+                end = int(pm.read_int(address + RECIPE_OFF_MATERIAL_END) or 0)
+                span = end - start
+                live_ingredient_count = span // MATERIAL_ENTRY_SIZE if (
+                    start >= 0x10000 and end >= start and span % MATERIAL_ENTRY_SIZE == 0
+                ) else 0
+                has_live_ingredients = 1 <= live_ingredient_count <= 9
+                has_local_ingredients = any(any(row.get("grid") or []) for row in local_rows)
+                if not has_live_ingredients and not has_local_ingredients:
+                    continue
+                recipes.append({
+                    "id": name_en,
+                    "name": self._recipe_item_label(name_en, output.get("name", "")),
+                    "output_id": str(output.get("id") or ""),
+                    "sort_index": output.get("index"),
+                    "enabled": get_recipe_unlock_state(pm, address),
+                    "source": "内存 + 本地" if local_rows else "内存",
+                    "local_files": [row["file"] for row in local_rows],
+                })
+
+            # A world does not necessarily load all DLC/mod recipes.  Show
+            # these XML-only records too, so the editor can keep their layout
+            # for the next map/load even though they have no live address now.
+            for key, rows in local_records.items():
+                if key in memory_recipe_ids or not rows:
+                    continue
+                row = rows[0]
+                if not any(row.get("grid") or []):
+                    continue
+                recipes.append({
+                    "id": row["id"],
+                    "name": self._recipe_item_label(row["produce"] or row["id"]),
+                    "output_id": row["produce"],
+                    "sort_index": resources["by_name"].get(str(row["produce"] or "").lower(), {}).get("index"),
+                    "enabled": False,
+                    "source": "仅本地",
+                    "local_files": [entry["file"] for entry in rows],
+                })
+
+            # Keep XML-only material IDs selectable for persistent edits.  They
+            # have no live ResourceSlot index and therefore cannot be saved to
+            # the running map until the corresponding content is loaded.
+            known_materials = {str(entry["id"]).lower() for entry in resources["materials"]}
+            for rows in local_records.values():
+                for row in rows:
+                    for item_id in row["grid"]:
+                        key = str(item_id or "").lower()
+                        if not key or key in known_materials:
+                            continue
+                        entry = {"id": item_id, "name": self._recipe_item_label(item_id), "index": None, "local_only": True}
+                        resources["materials"].append(entry)
+                        known_materials.add(key)
+            resources["materials"].sort(key=lambda entry: (int(entry.get("index")) if entry.get("index") is not None else 1 << 30, str(entry["id"])))
+            recipes.sort(key=lambda entry: (int(entry.get("sort_index")) if entry.get("sort_index") is not None else 1 << 30, str(entry["id"])))
+            return {
+                "ok": True,
+                "state": self.STATUS_VERIFIED,
+                "scope": "当前存档运行时配方表；“仅本地”行只来自 XML 定义",
+                "count": len(recipes),
+                "recipes": recipes,
+                "materials": resources["materials"],
+                "local_count": sum(len(rows) for rows in local_records.values()),
+                "local_recipe_count": len(local_records),
+            }
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "无法读取配方目录: %s" % e}
+
+    def get_recipe_editor_recipe(self, recipe_name):
+        """Return a live grid when available, otherwise its local XML grid."""
+        recipe_id = str(recipe_name or "").strip()
+        local_rows = self._local_recipe_records().get(recipe_id.lower(), [])
+        payload, error = self._read_recipe_editor_payload(recipe_id)
+        if payload:
+            payload["state"] = self.STATUS_VERIFIED
+            payload["scope"] = "当前存档运行时配方；本地文件仅用于比对或同步"
+            payload["source"] = "内存 + 本地" if local_rows else "内存"
+            payload["local_files"] = [row["file"] for row in local_rows]
+            payload["local_grid"] = list(local_rows[0]["grid"]) if local_rows else None
+            payload["local_matches_memory"] = bool(local_rows) and all(row["grid"] == payload["grid"] for row in local_rows)
+            return payload
+        if not local_rows:
+            state, detail = self._runtime_read_unavailable_state()
+            return {"ok": False, "state": state, "error": error or detail}
+        row = local_rows[0]
+        return {
+            "ok": True,
+            "state": self.STATUS_UNVERIFIED,
+            "scope": "仅本地 XML 定义；当前存档尚未加载该配方",
+            "recipe": row["id"],
+            "recipe_id": None,
+            "enabled": False,
+            "output": {"id": row["produce"], "name": self._recipe_item_label(row["produce"] or row["id"]), "index": None},
+            "grid": list(row["grid"]),
+            "ingredient_count": sum(1 for item_id in row["grid"] if item_id),
+            "source": "仅本地",
+            "local_files": [entry["file"] for entry in local_rows],
+            "local_grid": list(row["grid"]),
+            "local_matches_memory": False,
+        }
+
+    def save_recipe_grid(self, recipe_name, grid):
+        """Safely replace a recipe's 3×3 ingredient layout on the game thread."""
+        if not isinstance(grid, (list, tuple)) or len(grid) != 9:
+            return {"ok": False, "error": "配方必须包含完整的 3×3 九宫格"}
+        vector, error = self._live_recipe_vector()
+        if not vector:
+            return {"ok": False, "error": error}
+        resources, error = self._recipe_resource_catalog()
+        if not resources:
+            return {"ok": False, "error": error}
+        recipe_addr, error = self._find_live_recipe(recipe_name, vector)
+        if not recipe_addr:
+            return {"ok": False, "error": error}
+
+        entries = []
+        for position, raw_name in enumerate(grid, 1):
+            name_en = str(raw_name or "").strip()
+            if not name_en:
+                continue
+            resource = resources["by_name"].get(name_en.lower())
+            if not resource:
+                return {"ok": False, "error": "第 %d 格的物品无效，请重新选择" % position}
+            entries.append((int(resource["index"]), int(position)))
+
+        try:
+            start = int(pm.read_int(recipe_addr + RECIPE_OFF_MATERIAL_PTR) or 0)
+            end = int(pm.read_int(recipe_addr + RECIPE_OFF_MATERIAL_END) or 0)
+            cap = int(pm.read_int(recipe_addr + RECIPE_OFF_MATERIAL_CAP) or 0)
+            empty_vector = start == 0 and end == 0 and cap == 0
+            if (not empty_vector and (start < 0x10000 or end < start or cap < end)) or (end - start) % MATERIAL_ENTRY_SIZE:
+                raise ValueError("目标配方的材料数组已失效")
+            if pm.read_bytes(
+                int(vector["base"]) + self.RECIPE_VECTOR_EMPLACE_RVA,
+                len(self.RECIPE_VECTOR_EMPLACE_PREFIX),
+            ) != self.RECIPE_VECTOR_EMPLACE_PREFIX:
+                raise ValueError("配方数组扩容函数与当前游戏版本不匹配")
+        except Exception as e:
+            return {"ok": False, "error": "保存前校验失败: %s" % e}
+
+        with self._wave_portal_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            try:
+                data = int(controller["data"])
+                request = data + self.RECIPE_QUEUE_REQUEST_OFF
+                result = data + self.RECIPE_QUEUE_RESULT_OFF
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "error": "上一条配方保存请求仍在等待游戏处理"}
+                # The controller sees a complete immutable payload because the
+                # request flag is written last.
+                pm.write_int(result, -1)
+                pm.write_int(data + self.RECIPE_QUEUE_ADDRESS_OFF, int(recipe_addr))
+                pm.write_int(data + self.RECIPE_QUEUE_COUNT_OFF, len(entries))
+                for offset in range(9):
+                    resource_index, position = entries[offset] if offset < len(entries) else (0, 0)
+                    entry_addr = data + self.RECIPE_QUEUE_ENTRIES_OFF + offset * MATERIAL_ENTRY_SIZE
+                    pm.write_int(entry_addr, resource_index)
+                    pm.write_int(entry_addr + 4, position)
+                pm.write_int(request, 1)
+            except Exception as e:
+                return {"ok": False, "error": "无法提交配方保存请求: %s" % e}
+
+            deadline = time.monotonic() + 2.0
+            native_result = -1
+            while time.monotonic() < deadline:
+                try:
+                    native_result = int(pm.read_int(result))
+                    if native_result != -1:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.03)
+
+        if native_result != 1:
+            return {"ok": False, "error": "游戏更新线程没有确认配方保存，请重新进入存档后再试"}
+        payload, error = self._read_recipe_editor_payload(recipe_name)
+        if not payload:
+            return {"ok": False, "error": "配方已提交，但回读失败: %s" % error}
+        local_rows = self._local_recipe_records().get(str(recipe_name).strip().lower(), [])
+        self._record_recipe_edit(recipe_name, payload["grid"], "游戏内存")
+        payload["source"] = "内存 + 本地" if local_rows else "内存"
+        payload["local_files"] = [row["file"] for row in local_rows]
+        payload["local_sync_needed"] = bool(local_rows)
+        payload["message"] = "配方已保存；若制作界面已打开，请关闭后重新打开以刷新材料图标。"
+        return payload
+
+    def get_tech_tree(self):
+        """读取当前地图实际加载的科技树（而非固定地图配置）。"""
+        try:
+            if not connected or not pm:
+                return {"ok": False, "error": "请先连接游戏"}
+            nodes = _read_live_tech_nodes(pm, self._detect_v2())
+            locale = _load_tech_locale()
+            recipe_map = _load_active_tech_recipes({node["id"] for node in nodes})
+            group_titles = ["路线 1", "路线 2", "路线 3", "路线 4"]
+            for node in nodes:
+                recipes = recipe_map.get(node["id"], [])
+                node["title"] = node.get("mem_title") or locale.get(node["id"], node["id"])
+                node["state_text"] = TECH_STATE_LABELS[node["state"]]
+                node["recipes"] = recipes
+                node["recipe_titles"] = [self.get_translation(name) or name for name in recipes]
+                if node["index"] == 0 and node.get("mem_title"):
+                    group_titles[node["group"]] = node["mem_title"]
+            return {
+                "ok": True,
+                "nodes": nodes,
+                "group_titles": group_titles,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_tech_node_state(self, node_id, state):
+        """设置科技节点为锁定(0)、可研究(1)或完成并解锁配方(2)。"""
+        try:
+            if not connected or not pm:
+                return {"ok": False, "error": "请先连接游戏"}
+            node_id = str(node_id or "").strip()
+            state = int(state)
+            if not node_id or state not in TECH_STATE_LABELS:
+                return {"ok": False, "error": "节点或状态无效"}
+            is_v2 = self._detect_v2()
+            target = next((node for node in _read_live_tech_nodes(pm, is_v2) if node["id"] == node_id), None)
+            if not target:
+                return {"ok": False, "error": "当前地图中找不到该节点"}
+
+            address = target["address"]
+            old_state = target["state"]
+            pm.write_int(address + TECH_NODE_PREVIOUS_STATE_OFF, old_state)
+            pm.write_float(address + TECH_NODE_PROGRESS_OFF, 1.0 if state == 2 else 0.0)
+            pm.write_int(address + TECH_NODE_STATE_OFF, state)
+
+            # Both "可研究" and "直接完成" unlock the node's recipes so the
+            # items appear in the crafting list; the modifier intentionally
+            # skips the research wait.  Locking never reverses shared unlocks.
+            recipes_updated = 0
+            if state >= 1:
+                active_map = _load_active_tech_recipes({node["id"] for node in _read_live_tech_nodes(pm, is_v2)})
+                self._scan_recipes()
+                for recipe_name in active_map.get(node_id, []):
+                    recipe_addr = self._recipe_cache.get(recipe_name.lower())
+                    if recipe_addr and set_recipe_unlock_state(pm, recipe_addr, True):
+                        recipes_updated += 1
+            return {
+                "ok": True,
+                "id": node_id,
+                "state": state,
+                "state_text": TECH_STATE_LABELS[state],
+                "recipes_updated": recipes_updated,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ==================== 魔法道具（连接时批量定位并缓存） ====================
+    def _start_magic_scan(self):
+        if not connected or not pm:
+            return
+        pm_obj = pm
+        process_id = pm_obj.process_id
+        with self._runtime_session_lock:
+            if self._runtime_shutdown or self._magic_scan_running:
+                return
+            generation = self._runtime_session_generation
+            self._magic_scan_token += 1
+            scan_token = self._magic_scan_token
+            self._magic_scan_running = True
+            self._magic_scan_error = ""
+
+        def worker():
+            try:
+                def cancelled():
+                    with self._runtime_session_lock:
+                        return (not self._runtime_session_current(generation, pm_obj) or
+                                scan_token != self._magic_scan_token)
+
+                cache, elapsed = _scan_magic_items(pm_obj, cancelled=cancelled)
+                if self._runtime_session_current(generation, pm_obj):
+                    with self._runtime_session_lock:
+                        if scan_token == self._magic_scan_token:
+                            self._magic_cache = cache
+                            self._magic_scan_ms = elapsed
+                            self._magic_process_id = process_id
+                            self._magic_scan_completed = True
+            except Exception as e:
+                if self._runtime_session_current(generation, pm_obj):
+                    with self._runtime_session_lock:
+                        if scan_token == self._magic_scan_token:
+                            self._magic_scan_error = str(e)
+                            self._magic_process_id = process_id
+                            self._magic_scan_completed = True
+            finally:
+                with self._runtime_session_lock:
+                    if scan_token == self._magic_scan_token:
+                        self._magic_scan_running = False
+
+        self._spawn_runtime_worker(worker, name="ctw-magic-scan")
+
+    def _ensure_magic_cache(self, force=False):
+        if not connected or not pm:
+            return False, "请先连接游戏"
+        if force:
+            self._magic_cache = {}
+            self._magic_scan_error = ""
+            self._magic_scan_completed = False
+        if self._magic_scan_running:
+            return False, "正在定位魔法数据，请稍候"
+        if self._magic_process_id != pm.process_id:
+            self._magic_cache = {}
+            self._magic_scan_completed = False
+        if not self._magic_cache and self._magic_scan_completed:
+            return False, self._magic_scan_error or "当前版本未定位到可用的魔法参数结构"
+        if not self._magic_cache:
+            self._start_magic_scan()
+            return False, self._magic_scan_error or "正在定位魔法数据，请稍候"
+        return True, ""
+
+    def get_magic_items(self, force=False):
+        """Return cached magic parameters; scan only once per connected process."""
+        ok, error = self._ensure_magic_cache(bool(force))
+        if not ok:
+            if not connected or pm is None:
+                state = self.STATUS_DISCONNECTED
+            elif self._magic_scan_running:
+                state = self.STATUS_UNVERIFIED
+            else:
+                state = self.STATUS_STALE
+            return {"ok": False, "state": state, "scanning": self._magic_scan_running,
+                    "error": error or "魔法参数定位失败", "items": None}
+        items = []
+        for definition in MAGIC_DEFS:
+            entry = self._magic_cache.get(definition["id"])
+            if not entry:
+                continue
+            fields = []
+            valid = True
+            for field_name, field in entry["fields"].items():
+                field_title = field["title"]
+                value_type = field["type"]
+                original = field["original"]
+                try:
+                    value = _read_magic_value(pm, field["address"], value_type)
+                    field["value"] = value
+                except Exception:
+                    valid = False
+                    break
+                fields.append({"id": field_name, "title": field_title, "type": value_type, "value": value, "original": original})
+            if not valid:
+                # The game may have reloaded its config objects; repair the cache once.
+                self._magic_cache = {}
+                return self.get_magic_items(force=True)
+            items.append({"id": definition["id"], "title": definition["title"], "fields": fields})
+        if not items:
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "items": None, "scan_ms": self._magic_scan_ms, "cached": True,
+                    "error": "当前版本未定位到受支持的魔法参数；未将该结果显示为空白功能"}
+        return {"ok": True, "state": self.STATUS_VERIFIED,
+                "items": items, "scan_ms": self._magic_scan_ms, "cached": True}
+
+    def set_magic_value(self, magic_id, field_name, value):
+        ok, error = self._ensure_magic_cache()
+        if not ok:
+            return {"ok": False, "error": error}
+        magic_id = str(magic_id or "").strip()
+        field_name = str(field_name or "").strip()
+        entry = self._magic_cache.get(magic_id)
+        field = entry and entry["fields"].get(field_name)
+        if not field:
+            return {"ok": False, "error": "未找到该魔法参数，请刷新定位"}
+        try:
+            if field["type"] == "float":
+                numeric = float(value)
+                if not math.isfinite(numeric) or abs(numeric) > 100000:
+                    raise ValueError("数值超出范围")
+                pm.write_float(field["address"], numeric)
+            else:
+                numeric = int(float(value))
+                if abs(numeric) > 100000:
+                    raise ValueError("数值超出范围")
+                pm.write_int(field["address"], numeric)
+            current = _read_magic_value(pm, field["address"], field["type"])
+            field["value"] = current
+            return {"ok": True, "value": current}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _magic_values_equal(value_type, actual, expected):
+        if value_type == "float":
+            return abs(float(actual) - float(expected)) <= 0.001
+        return int(actual) == int(expected)
+
+    def _magic_profile_requests(self, profile_kind, profile_id):
+        """Resolve a UI-whitelisted quick preset or scene profile to field writes."""
+        profile_kind = str(profile_kind or "").strip().lower()
+        profile_id = str(profile_id or "").strip()
+        if profile_kind == "quick":
+            magic_id = profile_id.split(":", 1)[0]
+            preset_id = profile_id.split(":", 1)[1] if ":" in profile_id else ""
+            for item_id, presets in MAGIC_QUICK_PRESETS.items():
+                if item_id != magic_id:
+                    continue
+                for key, title, changes in presets:
+                    if key == preset_id:
+                        return {"title": title, "kind": "quick", "id": profile_id,
+                                "changes": {magic_id: dict(changes)}}, ""
+            return None, "未找到该魔法快捷档位"
+        return None, "未知魔法方案类型"
+
+    def _magic_profile_snapshot(self, profile_kind, profile_id):
+        ok, error = self._ensure_magic_cache()
+        if not ok:
+            return None, error
+        definition, error = self._magic_profile_requests(profile_kind, profile_id)
+        if not definition:
+            return None, error
+        requested = definition.get("changes") or {}
+        if definition.get("restore_all"):
+            requested = {magic_id: {"__restore__": True}
+                         for magic_id in self._magic_cache.keys()}
+        rows = []
+        for magic_id, raw_fields in requested.items():
+            entry = self._magic_cache.get(str(magic_id))
+            if not entry:
+                return None, "当前版本未定位到 %s；没有执行任何写入" % magic_id
+            restore = bool(isinstance(raw_fields, dict) and raw_fields.get("__restore__"))
+            fields = entry.get("fields") or {}
+            field_names = tuple(fields.keys()) if restore else tuple((raw_fields or {}).keys())
+            for field_name in field_names:
+                field = fields.get(str(field_name))
+                if not field:
+                    return None, "%s 未定位参数 %s；没有执行任何写入" % (magic_id, field_name)
+                try:
+                    before = _read_magic_value(pm, field["address"], field["type"])
+                except Exception:
+                    return None, "%s 的 %s 读取失败；没有执行任何写入" % (magic_id, field_name)
+                target = field["original"] if restore else raw_fields[field_name]
+                try:
+                    target = float(target) if field["type"] == "float" else int(float(target))
+                except (TypeError, ValueError, OverflowError):
+                    return None, "%s 的 %s 目标数值无效" % (magic_id, field_name)
+                if not math.isfinite(float(target)) or abs(float(target)) > 100000:
+                    return None, "%s 的 %s 超出安全范围" % (magic_id, field_name)
+                rows.append({"magic_id": str(magic_id), "magic_title": entry.get("title") or magic_id,
+                             "field": str(field_name), "field_title": field.get("title") or field_name,
+                             "type": field["type"], "address": int(field["address"]),
+                             "before": before, "after": target})
+        changed = [row for row in rows if not self._magic_values_equal(row["type"], row["before"], row["after"])]
+        return {"definition": definition, "rows": changed, "all_rows": rows}, ""
+
+    @staticmethod
+    def _magic_rows_to_snapshot(rows, value_key):
+        snapshot = {}
+        for row in rows or []:
+            snapshot.setdefault(str(row["magic_id"]), {})[str(row["field"])] = row.get(value_key)
+        return snapshot
+
+    def _verify_magic_snapshot(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return False, "魔法快照格式无效"
+        ok, error = self._ensure_magic_cache()
+        if not ok:
+            return False, error
+        for magic_id, fields in snapshot.items():
+            entry = self._magic_cache.get(str(magic_id))
+            if not entry or not isinstance(fields, dict):
+                return False, "魔法快照缺少已定位条目"
+            for field_name, expected in fields.items():
+                field = (entry.get("fields") or {}).get(str(field_name))
+                if not field:
+                    return False, "魔法快照字段已失效"
+                try:
+                    actual = _read_magic_value(pm, field["address"], field["type"])
+                except Exception:
+                    return False, "魔法字段读回失败"
+                if not self._magic_values_equal(field["type"], actual, expected):
+                    return False, "%s · %s 与记录值不一致" % (entry.get("title") or magic_id,
+                                                           field.get("title") or field_name)
+        return True, ""
+
+    def _apply_magic_rows_transaction(self, rows, source, expected_before=None,
+                                      record_history=True, target_meta=None):
+        guard = self._require_safe_write("法术方案")
+        if guard:
+            return {"ok": False, "error": guard}
+        if not rows:
+            return {"ok": True, "changed": 0, "message": "所有字段已是目标值", "readback_ok": True}
+        expected_before = expected_before or {}
+
+        def operation(snapshot):
+            actual_before = []
+            for row in rows:
+                entry = self._magic_cache.get(row["magic_id"])
+                field = entry and (entry.get("fields") or {}).get(row["field"])
+                if not field:
+                    raise RuntimeError("魔法定位在写入前失效")
+                current = _read_magic_value(pm, field["address"], field["type"])
+                wanted = expected_before.get(row["magic_id"], {}).get(row["field"])
+                if wanted is not None and not self._magic_values_equal(field["type"], current, wanted):
+                    raise RuntimeError("%s · %s 已被游戏或其它操作改动" % (row["magic_title"], row["field_title"]))
+                snapshot(field["address"], 4)
+                actual_before.append(dict(row, before=current))
+            for row in actual_before:
+                if row["type"] == "float":
+                    pm.write_float(row["address"], float(row["after"]))
+                else:
+                    pm.write_int(row["address"], int(row["after"]))
+            actual_after = []
+            for row in actual_before:
+                current = _read_magic_value(pm, row["address"], row["type"])
+                if not self._magic_values_equal(row["type"], current, row["after"]):
+                    raise RuntimeError("%s · %s 写后读回不一致" % (row["magic_title"], row["field_title"]))
+                actual_after.append(dict(row, after=current))
+            return actual_before, actual_after
+
+        success, result, error = self._paused_memory_transaction(operation)
+        if not success:
+            return {"ok": False, "error": error}
+        before_rows, after_rows = result
+        for row in after_rows:
+            try:
+                self._magic_cache[row["magic_id"]]["fields"][row["field"]]["value"] = row["after"]
+            except Exception:
+                pass
+        response = {"ok": True, "changed": len(after_rows), "readback_ok": True,
+                    "before": self._magic_rows_to_snapshot(before_rows, "before"),
+                    "after": self._magic_rows_to_snapshot(after_rows, "after")}
+        if record_history:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            history = self._record_operation(
+                "magic_profile", "runtime", target_meta or {"source": source}, source,
+                response["before"], response["after"], True, generation,
+                getattr(pm_obj, "process_id", None), {"count": len(after_rows)})
+            response["operation_id"] = history.get("id")
+        return response
+
+    def _apply_magic_snapshot_transaction(self, target_snapshot, expected_current,
+                                          source="魔法快照恢复", record_history=False):
+        """Restore a previously recorded magic snapshot through the same guard."""
+        ok, error = self._ensure_magic_cache()
+        if not ok:
+            return {"ok": False, "error": error}
+        rows = []
+        for magic_id, fields in (target_snapshot or {}).items():
+            entry = self._magic_cache.get(str(magic_id))
+            if not entry or not isinstance(fields, dict):
+                return {"ok": False, "error": "魔法撤销快照已失效"}
+            for field_name, target in fields.items():
+                field = (entry.get("fields") or {}).get(str(field_name))
+                if not field:
+                    return {"ok": False, "error": "魔法撤销字段已失效"}
+                rows.append({"magic_id": str(magic_id), "magic_title": entry.get("title") or str(magic_id),
+                             "field": str(field_name), "field_title": field.get("title") or str(field_name),
+                             "type": field["type"], "address": int(field["address"]),
+                             "before": expected_current.get(magic_id, {}).get(field_name),
+                             "after": target})
+        return self._apply_magic_rows_transaction(
+            rows, source, expected_before=expected_current, record_history=record_history)
+
+    def get_magic_profile_preview(self, profile_kind, profile_id):
+        snapshot, error = self._magic_profile_snapshot(profile_kind, profile_id)
+        if not snapshot:
+            return {"ok": False, "error": error}
+        definition = snapshot["definition"]
+        return {"ok": True, "title": definition.get("title"), "note": definition.get("note", ""),
+                "changed": len(snapshot["rows"]), "rows": snapshot["rows"]}
+
+    def apply_magic_profile(self, profile_kind, profile_id):
+        snapshot, error = self._magic_profile_snapshot(profile_kind, profile_id)
+        if not snapshot:
+            return {"ok": False, "error": error}
+        definition = snapshot["definition"]
+        return self._apply_magic_rows_transaction(
+            snapshot["rows"], definition.get("title") or "法术方案", record_history=True,
+            target_meta={"profile_kind": definition.get("kind"), "profile_id": definition.get("id"),
+                         "profile_name": definition.get("title")})
+
+    def _native_magic_resource_valid(self, address, item_name, module_base):
+        """Validate the original V1 ResourceSlot used by World::UseResourceAt."""
+        try:
+            address = int(address)
+            arr_start, arr_end = _get_item_array(pm, is_v2=False)
+            if not arr_start or not arr_end or not (int(arr_start) <= address < int(arr_end)):
+                return False
+            if (address - int(arr_start)) % SLOT_SIZE != 0:
+                return False
+            raw = pm.read_bytes(address, 0x70)
+            if not raw or len(raw) < 0x70:
+                return False
+            if raw[0x5C:0x5C + len(item_name) + 1] != item_name.encode("ascii") + b"\x00":
+                return False
+            slot_index = struct.unpack_from("<I", raw, 0x50)[0]
+            return int(slot_index) == (address - int(arr_start)) // SLOT_SIZE
+        except Exception:
+            return False
+
+    def _resolve_native_magic_resource(self, item_name):
+        """Resolve the exact ResourceSlot consumed by the native dispatcher."""
+        try:
+            module_base = int(get_base())
+            process_id = int(pm.process_id)
+        except Exception:
+            return None
+        cache_key = str(item_name)
+        cached = self._native_magic_resources.get(cache_key)
+        if cached and cached.get("pid") == process_id:
+            address = int(cached.get("address", 0) or 0)
+            if self._native_magic_resource_valid(address, cache_key, module_base):
+                return address
+
+        # The modifier's resource cache records the original V1 slot address.
+        # Do not accept heap objects that merely embed the same text: the
+        # dispatcher expects a 0x290-byte slot from World's resource array.
+        for entry in item_cache:
+            if str(entry.get("name_en", "")) != cache_key:
+                continue
+            address = int(entry.get("slot_addr", 0) or 0)
+            if self._native_magic_resource_valid(address, cache_key, module_base):
+                self._native_magic_resources[cache_key] = {"pid": process_id, "address": address}
+                return address
+
+        # A stale UI cache is possible immediately after connecting.  Fall
+        # back to a bounded scan of the authoritative slot array only.
+        try:
+            arr_start, arr_end = _get_item_array(pm, is_v2=False)
+            if not arr_start or not arr_end:
+                return None
+            needle = cache_key.encode("ascii") + b"\x00"
+            for address in range(int(arr_start), int(arr_end), SLOT_SIZE):
+                try:
+                    if pm.read_bytes(address + 0x5C, len(needle)) != needle:
+                        continue
+                except Exception:
+                    continue
+                if self._native_magic_resource_valid(address, cache_key, module_base):
+                    self._native_magic_resources[cache_key] = {"pid": process_id, "address": address}
+                    return address
+        except Exception:
+            return None
+        return None
+
+    def _validate_magic_collect_dispatcher(self):
+        """Check the stable native entry and its controller before queuing."""
+        try:
+            module_base = int(get_base())
+            if pm.read_bytes(module_base + self.MAGIC_COLLECT_DISPATCH_RVA, len(self.MAGIC_COLLECT_DISPATCH_PREFIX)) != self.MAGIC_COLLECT_DISPATCH_PREFIX:
+                return False, "收集魔法原生代码与当前版本不一致，请重启游戏后再试"
+            # The dispatcher is a FastPanel/controller method.  Its World
+            # reference must agree with the resource-manager global; otherwise
+            # it would decode unrelated bytes as the current mana value.
+            fast_panel = int(pm.read_int(module_base + V1_MANA_BASE) or 0)
+            world = int(pm.read_int(module_base + ITEM_BASE_OFFSET) or 0)
+            if not (0x10000 <= fast_panel < 0x80000000) or not (0x10000 <= world < 0x80000000):
+                return False, "未找到原生收集魔法所需的游戏控制器，请重启游戏后再试"
+            if int(pm.read_int(fast_panel + 0x30) or 0) != world:
+                return False, "原生收集控制器与当前地图不匹配，请重启游戏后再试"
+            return True, ""
+        except Exception as e:
+            return False, "无法验证收集魔法代码：%s" % e
+
+    def _magic_collect_runtime_fields(self):
+        """Return the validated dynamic config fields used during a cast."""
+        ok, error = self._ensure_magic_cache()
+        if not ok:
+            return None, error
+        entry = self._magic_cache.get("magic_collect") or {}
+        fields = entry.get("fields") or {}
+        mana = fields.get("use_mana") or {}
+        radius = fields.get("radius") or {}
+        try:
+            mana_addr = int(mana.get("address", 0) or 0)
+            radius_addr = int(radius.get("address", 0) or 0)
+            if mana.get("type") != "int" or radius.get("type") != "int":
+                raise ValueError("参数类型不匹配")
+            if not (0x10000 <= mana_addr < 0x80000000 and 0x10000 <= radius_addr < 0x80000000):
+                raise ValueError("参数地址无效")
+            # A direct read validates that the cached heap records are still live.
+            pm.read_int(mana_addr)
+            pm.read_int(radius_addr)
+            return {"mana_addr": mana_addr, "radius_addr": radius_addr}, ""
+        except Exception as e:
+            self._magic_cache = {}
+            return None, "收集魔法参数已失效，请重新定位：%s" % e
+
+    def _find_magic_collect_target(self, data, width, height):
+        """Find a safe empty target cell nearest the map centre.
+
+        MCollect rejects a solid/flagged target before creating its native
+        effect.  Read the live payload once and expand from the centre so the
+        shortcut remains automatic even when the exact centre is underground.
+        """
+        try:
+            width, height = int(width), int(height)
+            stride = self._map_row_stride(width)
+            payload = pm.read_bytes(int(data), stride * height)
+            if not payload or len(payload) != stride * height:
+                return None, "读取地图目标区域失败"
+
+            def is_empty(col, row):
+                off = row * stride + col * self.MAP_COL_W
+                front = struct.unpack_from("<I", payload, off)[0] & 0xFFFF
+                inner = struct.unpack_from("<H", payload, off + 2)[0]
+                flags = struct.unpack_from("<I", payload, off + 8)[0]
+                return front == 0xFFFF and inner == 0xFFFF and not (flags & 0x10002)
+
+            center_col, center_row = (width - 1) // 2, (height - 1) // 2
+            if is_empty(center_col, center_row):
+                return (center_col, center_row), ""
+            for distance in range(1, max(width, height)):
+                left, right = max(0, center_col - distance), min(width - 1, center_col + distance)
+                top, bottom = max(0, center_row - distance), min(height - 1, center_row + distance)
+                for col in range(left, right + 1):
+                    if is_empty(col, top):
+                        return (col, top), ""
+                    if bottom != top and is_empty(col, bottom):
+                        return (col, bottom), ""
+                for row in range(top + 1, bottom):
+                    if is_empty(left, row):
+                        return (left, row), ""
+                    if right != left and is_empty(right, row):
+                        return (right, row), ""
+            return None, "地图中没有可用于施放收集魔法的空格"
+        except Exception as e:
+            return None, "无法确定全图收集施放位置：%s" % e
+
+    def _queue_magic_collect(self, col, row, flags=0, mana_addr=0, radius_addr=0, radius_value=0):
+        """Submit one complete magic request and wait only for game-thread acknowledgement."""
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            resource = self._resolve_native_magic_resource(self.MAGIC_COLLECT_ITEM_NAME)
+            if not resource:
+                return {"ok": False, "error": "未定位到游戏自身的 mcollect 原始资源槽"}
+            try:
+                data = int(controller["data"])
+                request = data + self.MAGIC_QUEUE_REQUEST_OFF
+                result = data + self.MAGIC_QUEUE_RESULT_OFF
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "error": "上一条魔法请求仍在等待游戏处理"}
+                # All payload values are written before request=1.  The game
+                # update sees either a complete request or none at all.
+                pm.write_int(result, -1)
+                pm.write_int(data + self.MAGIC_QUEUE_ITEM_OFF, int(resource))
+                pm.write_int(data + self.MAGIC_QUEUE_X_OFF, int(col))
+                pm.write_int(data + self.MAGIC_QUEUE_Y_OFF, int(row))
+                pm.write_int(data + self.MAGIC_QUEUE_FLAGS_OFF, int(flags))
+                pm.write_int(data + self.MAGIC_QUEUE_MANA_ADDR_OFF, int(mana_addr))
+                pm.write_int(data + self.MAGIC_QUEUE_RADIUS_ADDR_OFF, int(radius_addr))
+                pm.write_int(data + self.MAGIC_QUEUE_RADIUS_VALUE_OFF, int(radius_value))
+                pm.write_int(data + self.MAGIC_QUEUE_MANA_SAVED_OFF, 0)
+                pm.write_int(data + self.MAGIC_QUEUE_RADIUS_SAVED_OFF, 0)
+                pm.write_int(request, 1)
+            except Exception as e:
+                return {"ok": False, "error": "提交原生收集魔法失败：%s" % e}
+
+            deadline = time.time() + 1.5
+            native_result = -1
+            while time.time() < deadline:
+                try:
+                    native_result = int(pm.read_int(result))
+                    if native_result != -1:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.03)
+        if native_result == -1:
+            return {"ok": False, "error": "请求已提交，但游戏更新线程没有在规定时间内响应"}
+        if not (native_result & 0xFF):
+            return {"ok": False, "error": "游戏拒绝了该位置的收集魔法"}
+        return {"ok": True, "col": int(col), "row": int(row), "resource": self.MAGIC_COLLECT_ITEM_NAME}
+
+    def cast_magic_collect(self, col, row):
+        """Queue the full native fast-panel resource-use dispatcher at one map cell."""
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "原生收集魔法目前只验证了 Steam 原版"}
+        try:
+            col, row = int(float(col)), int(float(row))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "坐标必须是整数"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "error": "当前没有可用地图"}
+        _, width, height, _, _ = resolved
+        if not (0 <= col < int(width) and 0 <= row < int(height)):
+            return {"ok": False, "error": "坐标超出当前地图范围"}
+        ok, error = self._validate_magic_collect_dispatcher()
+        if not ok:
+            return {"ok": False, "error": error}
+        return self._queue_magic_collect(col, row)
+
+    def cast_magic_collect_full_map(self):
+        """Cast one native MCollect effect that covers the current map.
+
+        The controller changes ``use_mana`` and ``radius`` only for the
+        synchronous native dispatcher call, then restores both game values on
+        the update thread before acknowledging the request.
+        """
+        if not connected or not pm:
+            return {"ok": False, "error": "请先连接游戏"}
+        if self._detect_v2():
+            return {"ok": False, "error": "无耗蓝全图收集目前只验证了 Steam 原版"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "error": "当前没有可用地图"}
+        data, width, height, _, _ = resolved
+        try:
+            width, height = int(width), int(height)
+            if width < 1 or height < 1:
+                raise ValueError("地图尺寸无效")
+        except (TypeError, ValueError) as e:
+            return {"ok": False, "error": "无法读取地图尺寸：%s" % e}
+
+        target, error = self._find_magic_collect_target(data, width, height)
+        if not target:
+            return {"ok": False, "error": error}
+        col, row = target
+        far_x = max(col, width - 1 - col)
+        far_y = max(row, height - 1 - row)
+        radius = int(math.ceil(math.hypot(far_x, far_y))) + 2
+        if radius > self.MAGIC_COLLECT_FULL_MAP_MAX_RADIUS:
+            return {"ok": False, "error": "当前地图需要半径 %d，超过安全上限 %d" % (radius, self.MAGIC_COLLECT_FULL_MAP_MAX_RADIUS)}
+
+        ok, error = self._validate_magic_collect_dispatcher()
+        if not ok:
+            return {"ok": False, "error": error}
+        fields, error = self._magic_collect_runtime_fields()
+        if not fields:
+            return {"ok": False, "error": error}
+        result = self._queue_magic_collect(
+            col, row,
+            flags=self.MAGIC_COLLECT_FLAG_NO_MANA | self.MAGIC_COLLECT_FLAG_RADIUS_OVERRIDE,
+            mana_addr=fields["mana_addr"],
+            radius_addr=fields["radius_addr"],
+            radius_value=radius,
+        )
+        if result.get("ok"):
+            result.update({"width": width, "height": height, "radius": radius, "no_mana": True})
+        return result
+
+    def export_translations(self):
+        """导出翻译到文件"""
+        try:
+            path = os.path.join(_config_dir(), "export_translations.txt")
+            os.makedirs(_config_dir(), exist_ok=True)
+            count = 0; seen = set()
+            with open(path, "w", encoding="utf-8") as f:
+                for item in item_cache:
+                    name_en = item.get("name_en", "")
+                    name_cn = item.get("name_cn", "") or self.get_translation(name_en) or name_en
+                    if name_en and name_en not in seen:
+                        f.write(f"{name_en}={name_cn}\n")
+                        seen.add(name_en)
+                        count += 1
+            return f"导出成功: {count}条 -> export_translations.txt"
+        except Exception as e:
+            return f"导出失败: {e}"
+
+    def import_translations(self):
+        """从文件导入翻译"""
+        try:
+            path = os.path.join(_config_dir(), "export_translations.txt")
+            if not os.path.exists(path):
+                return "没有找到 export_translations.txt"
+            count = 0
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        self._translations[k.strip().lower()] = v.strip()
+                        count += 1
+            imported = {}
+            with open(path, "r", encoding="utf-8") as src:
+                for line in src:
+                    line = line.strip()
+                    if "=" not in line or line.startswith("#"):
+                        continue
+                    key, value = line.split("=", 1)
+                    key, value = key.strip().lower(), value.strip()
+                    if key and value:
+                        imported[key] = value
+            def update(cfg):
+                custom = cfg.get("custom_translations")
+                if not isinstance(custom, dict):
+                    custom = {}
+                custom.update(imported)
+                cfg["custom_translations"] = custom
+            if imported and not self._update_config(update):
+                return "导入失败：无法保存用户翻译"
+            self._translations.update(imported)
+            return f"导入成功: {count}条"
+        except Exception as e:
+            return f"导入失败: {e}"
+
+    # Lock/state toggles
+    def toggle_lock(self, name_en):
+        """切换物品锁定状态"""
+        self._load_item_states()
+        if name_en in self._locked:
+            self._locked.discard(name_en)
+            if name_en in self._locked_items:
+                del self._locked_items[name_en]
+            self._save_item_states()
+            return "off"
+        else:
+            self._locked.add(name_en)
+            for it in item_cache:
+                if it.get("name_en") == name_en:
+                    self._locked_items[name_en] = {
+                        "slot_addr": it.get("slot_addr"),
+                        "qty": it.get("qty", 0)
+                    }
+                    break
+            self._ensure_item_lock_restore_worker()
+            self._save_item_states()
+            return "on"
+
+    def _lock_restore_loop(self, session_generation, pm_obj):
+        """Restore locked item stacks only while their original session exists."""
+        try:
+            while (self._lock_restore_active and self._locked_items and
+                   self._runtime_session_current(session_generation, pm_obj)):
+                if self._require_safe_write("物品数量锁定"):
+                    return
+                hnd = self._suspend(pm_obj.process_id)
+                if not hnd:
+                    return
+                try:
+                    # Suspension holds the write gate. Recheck after acquiring it
+                    # so reconnect/close cannot redirect this old worker.
+                    if not self._runtime_session_current(session_generation, pm_obj):
+                        return
+                    is_v2 = self._detect_v2()
+                    for name_en, info in list(self._locked_items.items()):
+                        if not self._runtime_session_current(session_generation, pm_obj):
+                            return
+                        slot_addr = info.get("slot_addr")
+                        target_qty = info.get("qty", 0)
+                        if (not slot_addr or
+                                not self._validate_item_slot(slot_addr, name_en, is_v2)):
+                            continue
+                        modify_item_quantity(pm_obj, slot_addr, target_qty, is_v2)
+                finally:
+                    self._resume(hnd)
+                time.sleep(1.0)
+        finally:
+            # A stale worker must not clear the flag belonging to a newly
+            # connected session (or cause it to spawn duplicates).
+            if self._runtime_session_current(session_generation, pm_obj):
+                self._lock_restore_active = False
+
+    def toggle_fav(self, name_en):
+        """切换收藏状态"""
+        self._load_item_states()
+        if name_en in self._fav: self._fav.discard(name_en); self._save_item_states(); return "off"
+        else: self._fav.add(name_en); self._save_item_states(); return "on"
+
+    def toggle_world(self, name_en):
+        """切换世界专属标记"""
+        self._load_item_states()
+        if name_en in self._world: self._world.discard(name_en); self._save_item_states(); return "off"
+        else: self._world.add(name_en); self._save_item_states(); return "on"
+
+    def toggle_scrap(self, name_en):
+        """切换报废标记"""
+        self._load_item_states()
+        if name_en in self._scrapped: self._scrapped.discard(name_en); self._save_item_states(); return "off"
+        else: self._scrapped.add(name_en); self._save_item_states(); return "on"
+
+    def set_item_state(self, name_en, col, val):
+        """直接设置物品状态 (lock/fav/world/scrap = on/off)"""
+        self._load_item_states()
+        target = {"lock": self._locked, "fav": self._fav, "world": self._world, "scrap": self._scrapped}.get(col)
+        if target is None:
+            return False
+        if val == "on":
+            target.add(name_en)
+            if col == "lock":
+                for it in item_cache:
+                    if it.get("name_en") == name_en:
+                        self._locked_items[name_en] = {"slot_addr": it.get("slot_addr"), "qty": it.get("qty", 0)}
+                        break
+                self._ensure_item_lock_restore_worker()
+        else:
+            target.discard(name_en)
+            if col == "lock" and name_en in self._locked_items:
+                del self._locked_items[name_en]
+        self._save_item_states()
+        return val
+
+    def get_item_states(self, name_en):
+        """获取物品所有状态标记"""
+        lk="on" if name_en in self._locked else "off"
+        fv="on" if name_en in self._fav else "off"
+        ws="on" if name_en in self._world else "off"
+        sc="on" if name_en in self._scrapped else "off"
+        return {"lock":lk,"fav":fv,"world":ws,"scrap":sc}
+    def set_proof(self, name_en, text):
+        """设置备注文本"""
+        self._load_item_states()
+        if text:
+            self._proof[name_en] = text
+        elif name_en in self._proof:
+            del self._proof[name_en]
+        self._save_item_states()
+        return True
+    def get_proof(self, name_en):
+        """获取备注文本"""
+        self._load_item_states()
+        return self._proof.get(name_en, "")
+
+    def _suspend(self, pid):
+        """_suspend"""
+        memory_acquired = False
+        pause_acquired = False
+        try:
+            self._memory_write_lock.acquire()
+            memory_acquired = True
+            self._process_pause_lock.acquire()
+            pause_acquired = True
+            h=ctypes.windll.kernel32.OpenProcess(0x1F0FFF,0,pid)
+            if h:ctypes.windll.ntdll.NtSuspendProcess(h);return h
+        except:
+            pass
+        if pause_acquired:
+            self._process_pause_lock.release()
+        if memory_acquired:
+            self._memory_write_lock.release()
+        return None
+
+    def _resume(self, h):
+        """_resume"""
+        if h:
+            try:
+                ctypes.windll.ntdll.NtResumeProcess(h)
+            except:
+                pass
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+                self._process_pause_lock.release()
+                self._memory_write_lock.release()
+
+    def _paused_memory_transaction(self, operation):
+        """Run one direct-memory update with snapshot, verify and rollback.
+
+        ``operation`` receives a ``snapshot(address, size)`` callback.  It
+        must snapshot all fields before writing, and raise if a post-write
+        validation fails.  Every saved byte is restored in reverse order
+        before the game resumes, so a partial write cannot remain live.
+        """
+        if not pm or not getattr(pm, "process_id", 0):
+            return False, None, "未连接游戏"
+        hnd = self._suspend(pm.process_id)
+        if not hnd:
+            return False, None, "无法暂停游戏以安全写入"
+        journal = []
+        seen = set()
+
+        def snapshot(address, size):
+            key = (int(address), int(size))
+            if key in seen:
+                return
+            raw = pm.read_bytes(key[0], key[1])
+            if raw is None or len(raw) != key[1]:
+                raise RuntimeError("写前读取失败")
+            seen.add(key)
+            journal.append((key[0], bytes(raw)))
+
+        try:
+            result = operation(snapshot)
+            return True, result, ""
+        except Exception as exc:
+            for address, raw in reversed(journal):
+                try:
+                    pm.write_bytes(address, raw, len(raw))
+                except Exception:
+                    pass
+            return False, None, "写入校验失败，已回滚：%s" % exc
+        finally:
+            self._resume(hnd)
+
+    def toggle_gold_lock(self):
+        """切换金币锁定，并让工作线程绑定当前游戏会话。"""
+        self.locks["gold"] = not self.locks["gold"]
+        if self.locks["gold"]:
+            self._start_lock_worker("gold", self._gold_lock_loop)
+        return self.locks["gold"]
+
+    def _gold_lock_loop(self, session_generation, pm_obj):
+        amount = None
+        try:
+            if self._runtime_lock_worker_current("gold", session_generation, pm_obj):
+                value = self.read_gold()
+                if value is not None:
+                    amount = int(value)
+        except Exception:
+            amount = None
+        if amount is None:
+            if self._runtime_session_current(session_generation, pm_obj):
+                self.locks["gold"] = False
+            return
+        while self._runtime_lock_worker_current("gold", session_generation, pm_obj):
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self.locks["gold"] = False
+                return
+            try:
+                if not self._runtime_lock_worker_current("gold", session_generation, pm_obj):
+                    return
+                if not self.write_gold(amount):
+                    raise RuntimeError("金币对象已失效")
+            except Exception:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self.locks["gold"] = False
+                return
+            finally:
+                self._resume(hnd)
+            time.sleep(0.3)
+
+    def _mana_lock_loop(self, session_generation, pm_obj):
+        """Lock mana only in the process session that started this worker."""
+        while self._runtime_lock_worker_current("mana", session_generation, pm_obj):
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self.locks["mana"] = False
+                return
+            try:
+                if not self._runtime_lock_worker_current("mana", session_generation, pm_obj):
+                    return
+                base = int(get_base())
+                if self._detect_v2():
+                    mana_obj = pm_obj.read_int(base + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX)
+                    if not mana_obj or not (0x10000 < mana_obj < 0x7FFFFFFF):
+                        raise RuntimeError("法力对象已失效")
+                    current_addr = mana_obj + V2_MANA_CUR_OFF
+                    key1 = pm_obj.read_int(current_addr + 8)
+                    key2 = pm_obj.read_int(current_addr + 12)
+                    if key1 is None or key2 is None:
+                        raise RuntimeError("法力密钥读取失败")
+                    encoded = struct.unpack("<I", struct.pack("<f", 9999.0))[0]
+                    pm_obj.write_int(current_addr, encoded ^ key1)
+                    pm_obj.write_int(current_addr + 4, encoded ^ key2)
+                    try:
+                        pm_obj.write_float(base + V2_MANA_DISPLAY, 9999.0)
+                    except Exception:
+                        pass
+                else:
+                    ui = pm_obj.read_int(base + 0xDC3628)
+                    if not ui or not (0x10000 < ui < 0x7FFFFFFF):
+                        raise RuntimeError("法力界面对象已失效")
+                    current_addr = ui + 0x64
+                    key1 = pm_obj.read_int(current_addr + 8)
+                    key2 = pm_obj.read_int(current_addr + 12)
+                    if key1 is None or key2 is None:
+                        raise RuntimeError("法力密钥读取失败")
+                    encoded = struct.unpack("<I", struct.pack("<f", 9999.0))[0]
+                    pm_obj.write_int(current_addr, encoded ^ key1)
+                    pm_obj.write_int(current_addr + 4, encoded ^ key2)
+            except Exception:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self.locks["mana"] = False
+                return
+            finally:
+                self._resume(hnd)
+            time.sleep(0.5)
+
+    def toggle_mana_lock(self):
+        """切换法力锁定。"""
+        self.locks["mana"] = not self.locks["mana"]
+        if self.locks["mana"]:
+            self._start_lock_worker("mana", self._mana_lock_loop)
+        return self.locks["mana"]
+
+    def _xp_lock_loop(self, session_generation, pm_obj):
+        amount = None
+        try:
+            if self._runtime_lock_worker_current("xp", session_generation, pm_obj):
+                parts = str(self.read_xp()).split("|")
+                if parts and parts[0] and parts[0] != "0":
+                    amount = int(parts[0])
+        except Exception:
+            amount = None
+        if amount is None:
+            if self._runtime_session_current(session_generation, pm_obj):
+                self.locks["xp"] = False
+            return
+        while self._runtime_lock_worker_current("xp", session_generation, pm_obj):
+            hnd = self._suspend(pm_obj.process_id)
+            if not hnd:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self.locks["xp"] = False
+                return
+            try:
+                if not self._runtime_lock_worker_current("xp", session_generation, pm_obj):
+                    return
+                if not self.write_xp(amount):
+                    raise RuntimeError("经验对象已失效")
+            except Exception:
+                if self._runtime_session_current(session_generation, pm_obj):
+                    self.locks["xp"] = False
+                return
+            finally:
+                self._resume(hnd)
+            time.sleep(0.3)
+
+    def toggle_xp_lock(self):
+        """切换经验锁定。"""
+        self.locks["xp"] = not self.locks["xp"]
+        if self.locks["xp"]:
+            self._start_lock_worker("xp", self._xp_lock_loop)
+        return self.locks["xp"]
+
+    # Offline save safety V0.  Scope is strictly slot files: never marks.json
+    # or any shared Steam profile.  Steam Cloud is only warned about, never changed.
+    _save_manager_lock = threading.RLock()
+    _save_restore_tokens = {}
+    _offline_save_edit_tokens = {}
+    _offline_save_edit_history_context = {}
+    # Session-only user confirmation for the special case where CraftWorld is
+    # intentionally left at its main menu.  It is bound to the live PID set
+    # and is discarded as soon as that process set changes.
+    _save_main_menu_override = None
+    SAVE_APP_ID = "248390"
+
+    @staticmethod
+    def _save_backup_root():
+        return os.path.join(_application_dir(), "save_backups")
+
+    @staticmethod
+    def _save_allowed(name):
+        return bool(re.fullmatch(r"(?:game\d+\.sav(?:\.bak)?|info(?:\.bak)?)", str(name or ""), re.I))
+
+    @staticmethod
+    def _save_hash(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                part = handle.read(1024 * 1024)
+                if not part:
+                    return digest.hexdigest()
+                digest.update(part)
+
+    @staticmethod
+    def _save_time(value=None):
+        moment = datetime.fromtimestamp(value, timezone.utc) if value is not None else datetime.now(timezone.utc)
+        return moment.isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _save_header(cls, path):
+        if not str(path).lower().endswith(".sav"):
+            return {"status": "\u6682\u4e0d\u652f\u6301", "reason": "\u4ec5\u5bf9 .sav \u8bfb\u53d6\u6587\u4ef6\u5934"}
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read(32)
+            if len(raw) < 8:
+                return {"status": "\u8bfb\u53d6\u5931\u8d25", "reason": "\u6587\u4ef6\u5c0f\u4e8e 8 \u5b57\u8282"}
+            magic, version = struct.unpack_from("<II", raw, 0)
+            return {"status": "ok", "magic_hex": "0x%08X" % magic, "version": int(version), "header_hex": raw[:16].hex().upper()}
+        except OSError as exc:
+            return {"status": "\u8bfb\u53d6\u5931\u8d25", "reason": str(exc)}
+
+    @classmethod
+    def _save_file_info(cls, path):
+        stat = os.stat(path)
+        return {"name": os.path.basename(path), "size": int(stat.st_size), "modified_utc": cls._save_time(stat.st_mtime), "sha256": cls._save_hash(path), "save_header": cls._save_header(path)}
+
+    @staticmethod
+    def _save_game_state():
+        try:
+            import psutil
+            processes = []
+            for process in psutil.process_iter(["pid", "name", "exe"]):
+                info = process.info or {}
+                name, exe = str(info.get("name") or ""), str(info.get("exe") or "")
+                if name.lower() == MODULE_NAME.lower() or os.path.basename(exe).lower() == MODULE_NAME.lower():
+                    processes.append({"pid": int(info.get("pid") or process.pid), "name": name or MODULE_NAME, "path": exe})
+            return ("running" if processes else "stopped"), processes, ""
+        except Exception as exc:
+            return "unknown", [], str(exc)
+
+    @classmethod
+    def _save_running_process_ids(cls, processes):
+        return tuple(sorted(int(row.get("pid") or 0) for row in (processes or []) if row.get("pid") is not None))
+
+    @classmethod
+    def _save_main_menu_override_active(cls, state=None, processes=None):
+        grant = cls._save_main_menu_override or {}
+        if not grant.get("enabled"):
+            return False
+        if state is None or processes is None:
+            state, processes, _ = cls._save_game_state()
+        if state != "running" or tuple(grant.get("process_ids") or ()) != cls._save_running_process_ids(processes):
+            cls._save_main_menu_override = None
+            return False
+        return True
+
+    @classmethod
+    def _save_require_offline(cls):
+        state, processes, error = cls._save_game_state()
+        if state == "stopped":
+            cls._save_main_menu_override = None
+            return True, ""
+        if state == "running" and cls._save_main_menu_override_active(state, processes):
+            return True, ""
+        if state == "running":
+            return False, "\u68c0\u6d4b\u5230 CraftWorld.exe \u8fd0\u884c\u4e2d\uff08PID " + ", ".join(str(row["pid"]) for row in processes) + "\uff09\uff0c\u8bf7\u5173\u95ed\u6e38\u620f\u6216\u624b\u52a8\u786e\u8ba4\u5176\u5df2\u5904\u4e8e\u4e3b\u83dc\u5355"
+        return False, "\u65e0\u6cd5\u786e\u8ba4 CraftWorld.exe \u662f\u5426\u5df2\u5173\u95ed\uff0c\u4e3a\u5b89\u5168\u5df2\u7981\u7528\u5b58\u6863\u64cd\u4f5c\uff1a" + error
+
+    @classmethod
+    def _save_require_game_stopped(cls):
+        """Strict write guard: a main-menu allowance never permits save writes."""
+        state, processes, error = cls._save_game_state()
+        if state == "stopped":
+            return True, ""
+        if state == "running":
+            return False, "\u68c0\u6d4b\u5230 CraftWorld.exe \u8fd0\u884c\u4e2d\uff08PID " + ", ".join(str(row["pid"]) for row in processes) + "\uff09\uff0c\u79bb\u7ebf\u5b58\u6863\u5199\u5165\u5fc5\u987b\u5148\u5173\u95ed\u6e38\u620f\u3002\u4e3b\u83dc\u5355\u8bb8\u53ef\u4e0d\u9002\u7528\u4e8e\u5199\u5165\u3002"
+        return False, "\u65e0\u6cd5\u786e\u8ba4 CraftWorld.exe \u662f\u5426\u5df2\u5173\u95ed\uff0c\u4e3a\u5b89\u5168\u5df2\u7981\u7528\u79bb\u7ebf\u5b58\u6863\u5199\u5165\uff1a" + error
+
+    @classmethod
+    def _save_roots(cls):
+        roots, seen = [], set()
+        steam_roots = [os.path.abspath(os.path.join(GAME_ROOT, os.pardir, os.pardir, os.pardir)), r"D:\\Steam"]
+        for steam_root in steam_roots:
+            userdata = os.path.join(steam_root, "userdata")
+            if not os.path.isdir(userdata):
+                continue
+            try:
+                accounts = sorted(os.listdir(userdata))
+            except OSError:
+                continue
+            for account in accounts:
+                if not re.fullmatch(r"\d+", account):
+                    continue
+                folder = os.path.join(userdata, account, cls.SAVE_APP_ID, "ac", "WinAppDataRoaming", "dekovir", "CraftTheWorld", "saves")
+                key = os.path.normcase(os.path.abspath(folder))
+                if not os.path.isdir(folder) or key in seen:
+                    continue
+                seen.add(key)
+                roots.append({"path": os.path.abspath(folder), "root_id": hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:16], "label": "Steam Cloud \u672c\u5730\u955c\u50cf\uff1a" + account})
+        return roots
+
+    @classmethod
+    def _save_slot_files(cls, folder):
+        rows = []
+        try:
+            names = sorted(os.listdir(folder), key=str.lower)
+        except OSError:
+            return rows
+        for name in names:
+            path = os.path.join(folder, name)
+            if cls._save_allowed(name) and os.path.isfile(path):
+                try:
+                    rows.append(cls._save_file_info(path))
+                except OSError as exc:
+                    rows.append({"name": name, "status": "\u8bfb\u53d6\u5931\u8d25", "reason": str(exc)})
+        return rows
+
+    @classmethod
+    def _save_summary(cls, folder, files):
+        primary = next((row for row in files if str(row.get("name") or "").lower() == "game1.sav"), next((row for row in files if str(row.get("name") or "").lower().endswith(".sav")), None))
+        unsupported = {"state": "\u6682\u4e0d\u652f\u6301", "reason": "V0 \u672a\u63d0\u4f9b\u672a\u9a8c\u8bc1\u7684\u4e8c\u8fdb\u5236\u5b58\u6863\u5b57\u6bb5\u89e3\u6790"}
+        result = {"primary_file": primary.get("name") if primary else None, "dwarves": dict(unsupported), "inventory_entries": dict(unsupported), "tech_recipe_progress": dict(unsupported), "tasks": dict(unsupported), "blackboard": dict(unsupported), "world": dict(unsupported)}
+        if not primary:
+            result["world"] = {"state": "\u8bfb\u53d6\u5931\u8d25", "reason": "\u672a\u627e\u5230 gameN.sav"}
+            return result
+        try:
+            with open(os.path.join(folder, primary["name"]), "rb") as handle:
+                head = handle.read(4096)
+            match = re.search(rb"levels/[A-Za-z0-9_./-]+\.xml", head)
+            if match:
+                result["world"] = {"state": "\u5df2\u8bfb\u53d6", "level_template": match.group(0).decode("ascii", "replace"), "scope": "\u5b58\u6863\u6587\u4ef6\u5934\u5b57\u7b26\u4e32"}
+        except OSError as exc:
+            result["world"] = {"state": "\u8bfb\u53d6\u5931\u8d25", "reason": str(exc)}
+        return result
+
+    @classmethod
+    def _save_slot_from_key(cls, key):
+        match = re.fullmatch(r"([a-f0-9]{16})\|(slot\d+)", str(key or ""), re.I)
+        if not match:
+            return None, "\u5b58\u6863\u69fd\u53c2\u6570\u65e0\u6548"
+        root_id, name = match.groups()
+        for root in cls._save_roots():
+            if root["root_id"] == root_id.lower():
+                path = os.path.join(root["path"], name)
+                if os.path.isdir(path):
+                    return {"root": root, "slot": name, "path": path, "slot_key": root_id.lower() + "|" + name}, ""
+        return None, "\u672a\u627e\u5230\u8be5\u5b58\u6863\u69fd"
+
+    @classmethod
+    def _save_snapshot_dir(cls, root_id, slot):
+        return os.path.join(cls._save_backup_root(), root_id, slot)
+
+    @classmethod
+    def _save_list_snapshots(cls, root_id, slot):
+        base, rows = cls._save_snapshot_dir(root_id, slot), []
+        if not os.path.isdir(base):
+            return rows
+        for folder in sorted(os.listdir(base), reverse=True):
+            if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z_[a-z0-9_-]+", folder):
+                continue
+            try:
+                with open(os.path.join(base, folder, "manifest.json"), "r", encoding="utf-8") as handle:
+                    manifest = json.load(handle)
+                rows.append({"snapshot_id": manifest.get("snapshot_id", ""), "created_at": manifest.get("created_at"), "kind": manifest.get("kind"), "file_count": len(manifest.get("files") or []), "folder": folder})
+            except Exception as exc:
+                rows.append({"snapshot_id": "", "folder": folder, "state": "\u8bfb\u53d6\u5931\u8d25", "error": str(exc)})
+        return rows
+
+    @classmethod
+    def _save_create_snapshot(cls, slot, kind):
+        files = [row for row in cls._save_slot_files(slot["path"]) if row.get("sha256")]
+        if not files:
+            raise RuntimeError("\u5f53\u524d\u69fd\u4f4d\u6ca1\u6709\u53ef\u5907\u4efd\u7684 game*.sav / info / .bak \u6587\u4ef6")
+        folder = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + re.sub(r"[^a-z0-9_-]", "_", str(kind).lower()) + "_" + uuid.uuid4().hex[:6]
+        base = cls._save_snapshot_dir(slot["root"]["root_id"], slot["slot"])
+        final, temporary = os.path.join(base, folder), os.path.join(base, folder + ".tmp")
+        os.makedirs(os.path.join(temporary, "files"), exist_ok=False)
+        try:
+            for row in files:
+                shutil.copy2(os.path.join(slot["path"], row["name"]), os.path.join(temporary, "files", row["name"]))
+            snapshot_id = slot["root"]["root_id"] + ":" + slot["slot"] + ":" + folder
+            manifest = {"schema": 1, "snapshot_id": snapshot_id, "created_at": cls._save_time(), "kind": kind, "source": {"slot_key": slot["slot_key"], "slot": slot["slot"], "profile_label": slot["root"]["label"]}, "files": files, "steam_cloud_warning": "Steam Cloud \u53ef\u80fd\u5728\u540e\u7eed\u540c\u6b65\u65f6\u8986\u76d6\u672c\u5730\u5b58\u6863\uff1b\u672c\u5de5\u5177\u4e0d\u4fee\u6539\u4e91\u540c\u6b65\u8bbe\u7f6e\u3002"}
+            with open(os.path.join(temporary, "manifest.json"), "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(manifest, handle, ensure_ascii=False, indent=2)
+                handle.flush(); os.fsync(handle.fileno())
+            os.makedirs(base, exist_ok=True)
+            os.replace(temporary, final)
+            return {"snapshot_id": snapshot_id, "created_at": manifest["created_at"], "kind": kind, "file_count": len(files)}
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+
+    @classmethod
+    def _save_find_snapshot(cls, snapshot_id):
+        match = re.fullmatch(r"([a-f0-9]{16}):(slot\d+):([0-9]{8}T[0-9]{6}Z_[a-z0-9_-]+)", str(snapshot_id or ""), re.I)
+        if not match:
+            return None, "\u5907\u4efd ID \u65e0\u6548"
+        root_id, slot_name, folder = match.groups()
+        base, files_dir = cls._save_snapshot_dir(root_id.lower(), slot_name), os.path.join(cls._save_snapshot_dir(root_id.lower(), slot_name), folder, "files")
+        try:
+            with open(os.path.join(base, folder, "manifest.json"), "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            slot, error = cls._save_slot_from_key((manifest.get("source") or {}).get("slot_key"))
+            if not slot:
+                return None, error
+            if manifest.get("snapshot_id") != snapshot_id or not isinstance(manifest.get("files"), list) or not os.path.isdir(files_dir):
+                return None, "manifest \u4e0d\u5b8c\u6574\u6216\u4e0d\u5339\u914d"
+            return {"manifest": manifest, "files_dir": files_dir, "slot": slot}, ""
+        except Exception as exc:
+            return None, "\u65e0\u6cd5\u8bfb\u53d6 manifest\uff1a" + str(exc)
+
+    @staticmethod
+    def _offline_save_id_record(data, offset, minimum_tail=0):
+        """Read the save's length-prefixed UTF-8 ID, without trusting it yet."""
+        if offset < 0 or offset + 4 > len(data):
+            return None
+        length = struct.unpack_from("<I", data, offset)[0]
+        end = offset + 4 + int(length)
+        if length < 2 or length > 512 or end + minimum_tail > len(data) or data[end - 1] != 0:
+            return None
+        raw = data[offset + 4:end - 1]
+        try:
+            value = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_./:-]+", value or ""):
+            return None
+        return {"id": value, "length": int(length), "offset": int(offset), "payload_offset": int(end)}
+
+    def _offline_save_indexes(self):
+        """Build local-only item and technology labels for an offline read."""
+        resources, resource_errors = self._browser_load_resources()
+        tech_nodes, _tech_order = self._browser_tech_model({})
+        tech_keys = set(tech_nodes)
+        # The save table also contains library records which are locale-only in
+        # some versions and therefore do not necessarily appear in a tree CSV.
+        tech_keys.update(("library_craft", "library_healt", "library_mana", "library_skill"))
+        locale_paths = [
+            os.path.join(GAME_ROOT, "lang", "tech_locale.csv"),
+            os.path.join(_tech_game_dir(), "lang", "tech_locale.csv"),
+        ]
+        mods_dir = os.path.join(GAME_ROOT, "mods")
+        if os.path.isdir(mods_dir):
+            try:
+                for root, _dirs, names in os.walk(mods_dir):
+                    if "tech_locale.csv" in names:
+                        locale_paths.append(os.path.join(root, "tech_locale.csv"))
+            except OSError:
+                pass
+        for locale_path in dict.fromkeys(locale_paths):
+            if not os.path.isfile(locale_path):
+                continue
+            try:
+                with open(locale_path, "r", encoding="utf-8-sig", newline="") as handle:
+                    for row in csv.DictReader(handle, delimiter=";"):
+                        node_id = str(row.get("key") or "").strip()
+                        if node_id:
+                            tech_keys.add(node_id.lower())
+            except (OSError, UnicodeError, csv.Error):
+                # A bad optional locale must not turn a verified binary parse
+                # into a false empty result.
+                continue
+        return resources, tech_nodes, tech_keys, resource_errors
+
+    @classmethod
+    def _offline_save_parse_inventory(cls, data, resources):
+        anchors = ("dirt", "sand", "stone", "wood", "coal", "iron", "water")
+        candidates = []
+        for anchor in anchors:
+            encoded = anchor.encode("ascii") + b"\0"
+            needle = struct.pack("<I", len(encoded)) + encoded
+            search_at = 0
+            while True:
+                found = data.find(needle, search_at)
+                if found < 0:
+                    break
+                candidates.append(found)
+                search_at = found + 1
+        best = []
+        for start in candidates:
+            rows, cursor = [], start
+            while len(rows) < 10000:
+                record = cls._offline_save_id_record(data, cursor, 14)
+                if not record:
+                    break
+                quantity = struct.unpack_from("<i", data, record["payload_offset"])[0]
+                # Quantities are signed int32 in this save version.  Negative
+                # or wildly invalid values are not a valid inventory chain.
+                if quantity < 0 or quantity > 2000000000:
+                    break
+                item_id = record["id"]
+                known = resources.get(item_id.lower())
+                rows.append({
+                    "id": item_id,
+                    "raw_name": item_id,
+                    "name": known.get("name") if known else item_id,
+                    "quantity": int(quantity),
+                    "recognized": bool(known),
+                    "source": (known.get("source") or {}).get("label") if known else "\u672a\u8bc6\u522b\u7269\u54c1\uff08\u4fdd\u7559\u539f\u59cb ID\uff09",
+                    "category": known.get("category") if known else "\u672a\u8bc6\u522b",
+                    "diagnostic_offset": "0x%X" % record["offset"],
+                    "quantity_offset": int(record["payload_offset"]),
+                    "verified": True,
+                })
+                cursor = record["payload_offset"] + 14
+            if len(rows) > len(best):
+                best = rows
+        if len(best) < 50:
+            return {"state": "\u8bfb\u53d6\u5931\u8d25", "reason": "\u672a\u627e\u5230\u7ecf\u8fde\u7eed\u8bb0\u5f55\u6821\u9a8c\u7684\u5e93\u5b58\u8868\uff08\u9700\u81f3\u5c11 50 \u6761\uff09", "entries": [], "count": None, "nonzero_count": None}
+        return {
+            "state": "\u5df2\u8bfb\u53d6", "entries": best, "count": len(best),
+            "nonzero_count": sum(1 for row in best if row["quantity"] != 0),
+            "table_start": best[0]["diagnostic_offset"], "table_end": "0x%X" % (best[-1]["quantity_offset"] + 14),
+            "diagnostic_note": "\u89e3\u6790\u4f4d\u7f6e\u4ec5\u7528\u4e8e\u5f53\u524d\u6587\u4ef6\u8bca\u65ad\uff0c\u4e0d\u662f\u56fa\u5b9a\u504f\u79fb\u3002",
+        }
+
+    @classmethod
+    def _offline_save_parse_technology(cls, data, tech_nodes, tech_keys):
+        candidates = []
+        for node_id in tech_keys:
+            if not node_id or len(node_id) > 256:
+                continue
+            try:
+                encoded = node_id.encode("utf-8") + b"\0"
+            except UnicodeEncodeError:
+                continue
+            needle = struct.pack("<I", len(encoded)) + encoded
+            search_at = 0
+            while True:
+                found = data.find(needle, search_at)
+                if found < 0:
+                    break
+                candidates.append(found)
+                search_at = found + 1
+        best = []
+        for start in candidates:
+            rows, cursor = [], start
+            while len(rows) < 2048:
+                record = cls._offline_save_id_record(data, cursor, 22)
+                if not record or record["id"].lower() not in tech_keys:
+                    break
+                progress, state, previous_state, node_index, group_index, flags = struct.unpack_from("<fIIIIH", data, record["payload_offset"])
+                if not (math.isfinite(progress) and -0.001 <= progress <= 1.001 and state <= 2 and previous_state <= 1024 and node_index < 512 and group_index < 64):
+                    break
+                node = tech_nodes.get(record["id"].lower()) or {}
+                rows.append({
+                    "id": record["id"],
+                    "name": node.get("title") or record["id"],
+                    "progress": float(progress), "state": int(state), "previous_state": int(previous_state),
+                    "state_label": ("\u672a\u89e3\u9501", "\u53ef\u7814\u7a76", "\u5df2\u89e3\u9501")[int(state)],
+                    "source": (node.get("source") or {}).get("label") or "\u672c\u5730\u79d1\u6280\u8bed\u8a00\u8868",
+                    "node_index": int(node_index), "group_index": int(group_index), "flags": int(flags),
+                    "diagnostic_offset": "0x%X" % record["offset"],
+                    "state_offset": int(record["payload_offset"] + 4), "verified": True,
+                })
+                cursor = record["payload_offset"] + 22
+            if len(rows) > len(best):
+                best = rows
+        if len(best) < 10:
+            return {"state": "\u8bfb\u53d6\u5931\u8d25", "reason": "\u672a\u627e\u5230\u7ecf\u8fde\u7eed\u8bb0\u5f55\u6821\u9a8c\u7684\u79d1\u6280\u8868\uff08\u9700\u81f3\u5c11 10 \u6761\uff09", "nodes": [], "count": None}
+        return {
+            "state": "\u5df2\u8bfb\u53d6", "nodes": best, "count": len(best),
+            "table_start": best[0]["diagnostic_offset"], "table_end": "0x%X" % (best[-1]["state_offset"] + 18),
+            "diagnostic_note": "\u89e3\u6790\u4f4d\u7f6e\u4ec5\u7528\u4e8e\u5f53\u524d\u6587\u4ef6\u8bca\u65ad\uff0c\u4e0d\u662f\u56fa\u5b9a\u504f\u79fb\u3002",
+        }
+
+    def _offline_save_live_tech_states(self):
+        """Best-effort comparison only; failure never changes offline states."""
+        if not connected or not pm:
+            return {}, "\u5b9e\u65f6\u672a\u8bfb\u53d6\uff08\u672a\u8fde\u63a5\u6e38\u620f\uff09"
+        try:
+            nodes = _read_live_tech_nodes(pm, self._detect_v2())
+            return {str(node.get("id") or "").lower(): int(node.get("state")) for node in nodes if node.get("id") is not None}, "\u5df2\u4ece\u5b9e\u65f6\u6e38\u620f\u5185\u5b58\u8bfb\u53d6"
+        except Exception as exc:
+            return {}, "\u5b9e\u65f6\u8bfb\u53d6\u5931\u8d25\uff1a" + str(exc)
+
+    def _offline_save_parse_file(self, path):
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            return {"ok": False, "error": "\u65e0\u6cd5\u8bfb\u53d6\u5b58\u6863\uff1a" + str(exc)}
+        header = self._save_header(path)
+        if header.get("status") != "ok":
+            return {"ok": False, "error": "\u5b58\u6863\u6587\u4ef6\u5934\u8bfb\u53d6\u5931\u8d25", "header": header}
+        if header.get("magic_hex") != "0x0000026D" or header.get("version") != 1:
+            return {"ok": False, "error": "\u5f53\u524d\u5b58\u6863\u9b54\u6570\u6216\u7248\u672c\u6682\u4e0d\u652f\u6301", "header": header}
+        try:
+            resources, tech_nodes, tech_keys, resource_errors = self._offline_save_indexes()
+            inventory = self._offline_save_parse_inventory(data, resources)
+            technology = self._offline_save_parse_technology(data, tech_nodes, tech_keys)
+            return {
+                "ok": True, "header": header, "file_size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                "inventory": inventory, "technology": technology, "resource_read_errors": resource_errors,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": "\u5b58\u6863\u4e8c\u8fdb\u5236\u89e3\u6790\u5931\u8d25\uff1a" + str(exc), "header": header}
+
+    def get_offline_save_data(self, slot_key, include_zero=False):
+        """Read an offline save only.  It never needs a main-menu allowance."""
+        with self._save_manager_lock:
+            slot, error = self._save_slot_from_key(slot_key)
+            if not slot:
+                return {"ok": False, "error": error}
+            files = self._save_slot_files(slot["path"])
+            primary = next((row for row in files if str(row.get("name") or "").lower() == "game1.sav"), next((row for row in files if str(row.get("name") or "").lower().endswith(".sav")), None))
+            if not primary:
+                return {"ok": False, "error": "\u672a\u627e\u5230 gameN.sav"}
+            path = os.path.join(slot["path"], primary["name"])
+            parsed = self._offline_save_parse_file(path)
+            if not parsed.get("ok"):
+                return parsed
+            inventory = parsed["inventory"]
+            if inventory.get("state") == "\u5df2\u8bfb\u53d6" and not bool(include_zero):
+                inventory = dict(inventory)
+                inventory["entries"] = [row for row in inventory["entries"] if row["quantity"] != 0]
+                inventory["display_count"] = len(inventory["entries"])
+            technology = parsed["technology"]
+            live_states, live_status = self._offline_save_live_tech_states()
+            if technology.get("state") == "\u5df2\u8bfb\u53d6":
+                technology = dict(technology)
+                compared = []
+                for row in technology["nodes"]:
+                    copy = dict(row)
+                    live = live_states.get(str(row["id"]).lower())
+                    if live is None:
+                        copy["live_compare"] = "\u5b9e\u65f6\u672a\u8bfb\u53d6"
+                    elif int(live) == int(row["state"]):
+                        copy["live_compare"] = "\u4e00\u81f4"
+                    else:
+                        copy["live_compare"] = "\u4e0d\u4e00\u81f4"
+                        copy["live_state"] = int(live)
+                    compared.append(copy)
+                technology["nodes"] = compared
+                technology["live_status"] = live_status
+                technology["consistency_warning"] = "\u82e5\u5b58\u6863\u72b6\u6001\u4e0e\u5b9e\u65f6\u6e38\u620f\u4e0d\u4e00\u81f4\uff0c\u53ef\u80fd\u662f\u6e38\u620f\u5c1a\u672a\u4fdd\u5b58\u3001\u7248\u672c\u5dee\u5f02\u6216\u5b58\u6863\u89e3\u6790\u4e0d\u5b8c\u6574\u3002"
+            return {
+                "ok": True, "slot_key": slot["slot_key"], "slot": slot["slot"], "profile_label": slot["root"]["label"],
+                "file": {"name": primary["name"], "size": primary["size"], "modified_utc": primary["modified_utc"], "sha256": parsed["sha256"], "header": parsed["header"]},
+                "read_at": self._save_time(), "game_state": self._save_game_state()[0], "inventory": inventory, "technology": technology,
+                "resource_read_errors": parsed.get("resource_read_errors") or [],
+                "read_only": True, "cache_note": "\u8fd9\u662f\u78c1\u76d8\u4e0a\u5df2\u843d\u76d8\u7684\u5b58\u6863\u6570\u636e\uff0c\u4e0d\u662f\u5b9e\u65f6\u5185\u5b58\u3002\u6e38\u620f\u8fd0\u884c\u65f6\u53ef\u80fd\u5c1a\u672a\u4fdd\u5b58\u3002",
+            }
+
+    @staticmethod
+    def _offline_save_integer(value, field):
+        try:
+            result = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(field + "\u5fc5\u987b\u662f\u6574\u6570")
+        if result < 0 or result > 2000000000:
+            raise ValueError(field + "\u8d85\u51fa\u5b89\u5168\u8303\u56f4")
+        return result
+
+    @classmethod
+    def _offline_save_staging_root(cls):
+        path = os.path.join(cls._save_backup_root(), "save_edit_staging")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _offline_save_discard_candidate(self, candidate_path):
+        '''Remove one disposable offline-edit stage without touching a save.'''
+        candidate_text = str(candidate_path or '').strip()
+        if not candidate_text:
+            return
+        candidate_path = os.path.abspath(candidate_text)
+        self._offline_save_edit_history_context.pop(candidate_path, None)
+        try:
+            root = os.path.abspath(self._offline_save_staging_root())
+            stage_dir = os.path.abspath(os.path.dirname(candidate_path))
+            if os.path.commonpath((root, stage_dir)) != root:
+                return
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        except (OSError, ValueError):
+            # The candidate is only a convenience copy. A failed cleanup must
+            # never affect the actual save or make a verified write fail.
+            pass
+
+    def _offline_save_prune_edit_tokens(self):
+        '''Expire abandoned confirmation candidates and their history context.'''
+        now = time.time()
+        expired = []
+        for token, grant in list(self._offline_save_edit_tokens.items()):
+            if float(grant.get('expires', 0) or 0) < now:
+                expired.append(self._offline_save_edit_tokens.pop(token, None))
+        for grant in expired:
+            if grant:
+                self._offline_save_discard_candidate(grant.get('candidate_path'))
+        active_paths = {
+            os.path.abspath(str(grant.get('candidate_path') or ''))
+            for grant in self._offline_save_edit_tokens.values()
+            if grant and grant.get('candidate_path')
+        }
+        orphan_paths = [
+            path for path in self._offline_save_edit_history_context
+            if os.path.abspath(str(path or '')) not in active_paths
+        ]
+        for path in orphan_paths:
+            self._offline_save_discard_candidate(path)
+
+    def _offline_save_prepare_edit(self, slot_key, target_kind, target_id, target_value,
+                                   history_context=None):
+        """Write one verified field to a private candidate file, never the save."""
+        self._offline_save_prune_edit_tokens()
+        ok, error = self._save_require_game_stopped()
+        if not ok:
+            return {"ok": False, "error": error}
+        slot, error = self._save_slot_from_key(slot_key)
+        if not slot:
+            return {"ok": False, "error": error}
+        files = self._save_slot_files(slot["path"])
+        primary = next((row for row in files if str(row.get("name") or "").lower() == "game1.sav"), next((row for row in files if str(row.get("name") or "").lower().endswith(".sav")), None))
+        if not primary:
+            return {"ok": False, "error": "\u672a\u627e\u5230 gameN.sav"}
+        source_path = os.path.join(slot["path"], primary["name"])
+        parsed = self._offline_save_parse_file(source_path)
+        if not parsed.get("ok"):
+            return {"ok": False, "error": parsed.get("error") or "\u5b58\u6863\u89e3\u6790\u5931\u8d25"}
+        table = parsed["inventory"] if target_kind == "inventory" else parsed["technology"]
+        rows = table.get("entries") if target_kind == "inventory" else table.get("nodes")
+        if table.get("state") != "\u5df2\u8bfb\u53d6" or not rows:
+            return {"ok": False, "error": "\u76ee\u6807\u8868\u672a\u901a\u8fc7\u8bfb\u53d6\u6821\u9a8c\uff0c\u5df2\u7981\u6b62\u5199\u5165"}
+        matches = [row for row in rows if str(row.get("id") or "").lower() == str(target_id or "").strip().lower() and row.get("verified")]
+        if len(matches) != 1:
+            return {"ok": False, "error": "\u672a\u627e\u5230\u552f\u4e00\u7684\u5df2\u9a8c\u8bc1\u76ee\u6807\u8bb0\u5f55\uff0c\u5df2\u7981\u6b62\u5199\u5165"}
+        target = matches[0]
+        if target_kind == "inventory":
+            value = self._offline_save_integer(target_value, "\u5e93\u5b58\u6570\u91cf")
+            offset, original = target["quantity_offset"], target["quantity"]
+        else:
+            value = self._offline_save_integer(target_value, "\u79d1\u6280\u72b6\u6001")
+            if value not in (0, 1, 2):
+                return {"ok": False, "error": "\u79d1\u6280\u72b6\u6001\u4ec5\u5141\u8bb8 0\uff08\u672a\u89e3\u9501\uff09\u30011\uff08\u53ef\u7814\u7a76\uff09\u30012\uff08\u5df2\u89e3\u9501\uff09"}
+            offset, original = target["state_offset"], target["state"]
+        pre_edit = self._save_create_snapshot(slot, "pre_offline_edit")
+        original_sha = parsed["sha256"]
+        stage_dir = os.path.join(self._offline_save_staging_root(), datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:10])
+        os.makedirs(stage_dir, exist_ok=False)
+        candidate_path = os.path.join(stage_dir, "candidate.sav")
+        try:
+            raw = bytearray(Path(source_path).read_bytes())
+            if hashlib.sha256(raw).hexdigest() != original_sha:
+                raise RuntimeError("\u539f\u5b58\u6863\u5728\u51c6\u5907\u8fc7\u7a0b\u4e2d\u53d1\u751f\u53d8\u5316")
+            struct.pack_into("<i" if target_kind == "inventory" else "<I", raw, int(offset), value)
+            Path(candidate_path).write_bytes(raw)
+            candidate = self._offline_save_parse_file(candidate_path)
+            if not candidate.get("ok"):
+                raise RuntimeError(candidate.get("error") or "\u526f\u672c\u91cd\u65b0\u89e3\u6790\u5931\u8d25")
+            candidate_table = candidate["inventory"] if target_kind == "inventory" else candidate["technology"]
+            candidate_rows = candidate_table.get("entries") if target_kind == "inventory" else candidate_table.get("nodes")
+            verify = [row for row in (candidate_rows or []) if str(row.get("id") or "").lower() == str(target_id).lower()]
+            got = verify[0].get("quantity" if target_kind == "inventory" else "state") if len(verify) == 1 else None
+            if candidate_table.get("state") != "\u5df2\u8bfb\u53d6" or got != value:
+                raise RuntimeError("\u526f\u672c\u5199\u5165\u540e\u7684\u7ed3\u6784\u6821\u9a8c\u672a\u901a\u8fc7")
+            token = uuid.uuid4().hex
+            history_context = self._operation_history_value(history_context or {})
+            self._offline_save_edit_history_context[candidate_path] = history_context
+            self._offline_save_edit_tokens[token] = {"expires": time.time() + 600, "slot_key": slot["slot_key"], "source_path": source_path, "source_sha": original_sha, "candidate_path": candidate_path, "candidate_sha": candidate["sha256"], "kind": target_kind, "id": target["id"], "name": target.get("name") or target["id"], "value": value, "original": original, "pre_edit": pre_edit}
+            return {"ok": True, "token": token, "expires_in_seconds": 600, "kind": target_kind, "id": target["id"], "name": target.get("name") or target["id"], "before": original, "after": value, "pre_edit_snapshot": pre_edit, "source_sha256": original_sha, "candidate_sha256": candidate["sha256"], "warning": "\u5df2\u53ea\u5728\u79c1\u6709\u526f\u672c\u5b8c\u6210\u5199\u5165\u4e0e\u91cd\u65b0\u89e3\u6790\u6821\u9a8c\uff1b\u6b63\u5f0f\u5b58\u6863\u5c1a\u672a\u4fee\u6539\u3002"}
+        except Exception as exc:
+            self._offline_save_discard_candidate(candidate_path)
+            return {"ok": False, "error": "\u5b58\u6863\u526f\u672c\u5199\u5165\u9884\u6f14\u5931\u8d25\uff0c\u6b63\u5f0f\u5b58\u6863\u672a\u4fee\u6539\uff1a" + str(exc), "pre_edit_snapshot": pre_edit}
+
+    def prepare_offline_inventory_edit(self, slot_key, item_id, quantity):
+        with self._save_manager_lock:
+            return self._offline_save_prepare_edit(slot_key, "inventory", item_id, quantity)
+
+    def prepare_offline_inventory_grant(self, slot_key, item_id, add_quantity):
+        '''Safely add to one existing, verified offline inventory entry.
+
+        This deliberately does not create an item record or address a dwarf
+        backpack. Those structures are not fully parsed and therefore remain
+        unavailable for offline writes. The actual write is delegated to the
+        regular candidate-save transaction below.
+        '''
+        with self._save_manager_lock:
+            try:
+                added = self._offline_save_integer(add_quantity, '发放数量')
+            except ValueError as exc:
+                return {'ok': False, 'error': str(exc)}
+            if added <= 0:
+                return {'ok': False, 'error': '发放数量必须大于 0'}
+
+            ok, error = self._save_require_game_stopped()
+            if not ok:
+                return {'ok': False, 'error': error}
+            slot, error = self._save_slot_from_key(slot_key)
+            if not slot:
+                return {'ok': False, 'error': error}
+            files = self._save_slot_files(slot['path'])
+            primary = next(
+                (row for row in files if str(row.get('name') or '').lower() == 'game1.sav'),
+                next((row for row in files if str(row.get('name') or '').lower().endswith('.sav')), None),
+            )
+            if not primary:
+                return {'ok': False, 'error': '未找到 gameN.sav'}
+            parsed = self._offline_save_parse_file(os.path.join(slot['path'], primary['name']))
+            if not parsed.get('ok'):
+                return {'ok': False, 'error': parsed.get('error') or '存档解析失败'}
+            inventory = parsed.get('inventory') or {}
+            rows = inventory.get('entries') or []
+            if inventory.get('state') != '已读取':
+                return {'ok': False, 'error': '库存表未通过读取校验，已禁止发放'}
+            matches = [
+                row for row in rows
+                if str(row.get('id') or '').lower() == str(item_id or '').strip().lower()
+                and row.get('verified')
+            ]
+            if len(matches) != 1:
+                return {'ok': False, 'error': '只允许发放到唯一且已验证的现有库存条目；不能新增物品类型'}
+            before = self._offline_save_integer(matches[0].get('quantity'), '当前库存数量')
+            after = before + added
+            if after > 2000000000:
+                return {'ok': False, 'error': '发放后的库存数量超出安全范围'}
+
+            prepared = self._offline_save_prepare_edit(
+                slot_key, 'inventory', matches[0]['id'], after,
+                history_context={
+                    'field_name': '离线仓库数量（定向发放）',
+                    'offline_action': 'inventory_grant',
+                    'added': added,
+                },
+            )
+            if prepared.get('ok'):
+                prepared['added'] = added
+                prepared['scope_label'] = '离线仓库 / 全局库存'
+                prepared['unsupported_target'] = '矮人个人背包（语义未验证，未开放）'
+            return prepared
+
+    def prepare_offline_technology_edit(self, slot_key, tech_id, state):
+        with self._save_manager_lock:
+            return self._offline_save_prepare_edit(slot_key, "technology", tech_id, state)
+
+    def confirm_offline_save_edit(self, slot_key, token, phrase):
+        with self._save_manager_lock:
+            self._offline_save_prune_edit_tokens()
+            ok, error = self._save_require_game_stopped()
+            if not ok:
+                return {"ok": False, "error": error}
+            grant = self._offline_save_edit_tokens.pop(str(token or ""), None)
+            if not grant or grant.get("expires", 0) < time.time() or grant.get("slot_key") != str(slot_key or ""):
+                if grant:
+                    self._offline_save_discard_candidate(grant.get("candidate_path"))
+                return {"ok": False, "error": "\u5199\u5165\u786e\u8ba4\u4ee4\u724c\u65e0\u6548\u6216\u5df2\u8fc7\u671f"}
+            if str(phrase or "") != "APPLY_OFFLINE_EDIT":
+                self._offline_save_discard_candidate(grant.get("candidate_path"))
+                return {"ok": False, "error": "\u672a\u901a\u8fc7\u6b63\u5f0f\u66ff\u6362\u786e\u8ba4"}
+            slot, error = self._save_slot_from_key(slot_key)
+            if not slot:
+                self._offline_save_discard_candidate(grant.get("candidate_path"))
+                return {"ok": False, "error": error}
+            source_path, candidate_path = grant["source_path"], grant["candidate_path"]
+            if not os.path.isfile(source_path) or not os.path.isfile(candidate_path):
+                self._offline_save_discard_candidate(candidate_path)
+                return {"ok": False, "error": "\u539f\u5b58\u6863\u6216\u5019\u9009\u526f\u672c\u5df2\u7f3a\u5931\uff0c\u5df2\u62d2\u7edd\u8986\u76d6"}
+            if self._save_hash(source_path) != grant["source_sha"]:
+                self._offline_save_discard_candidate(candidate_path)
+                return {"ok": False, "error": "\u6b63\u5f0f\u5b58\u6863\u5728\u786e\u8ba4\u524d\u53d1\u751f\u53d8\u5316\uff0c\u5df2\u62d2\u7edd\u8986\u76d6"}
+            if self._save_hash(candidate_path) != grant["candidate_sha"]:
+                self._offline_save_discard_candidate(candidate_path)
+                return {"ok": False, "error": "\u5019\u9009\u526f\u672c\u6821\u9a8c\u5931\u8d25\uff0c\u5df2\u62d2\u7edd\u8986\u76d6"}
+            candidate = self._offline_save_parse_file(candidate_path)
+            table = candidate.get("inventory") if grant["kind"] == "inventory" else candidate.get("technology")
+            rows = (table or {}).get("entries") if grant["kind"] == "inventory" else (table or {}).get("nodes")
+            field = "quantity" if grant["kind"] == "inventory" else "state"
+            valid = candidate.get("ok") and table and table.get("state") == "\u5df2\u8bfb\u53d6" and any(str(row.get("id") or "").lower() == str(grant["id"]).lower() and row.get(field) == grant["value"] for row in (rows or []))
+            if not valid:
+                self._offline_save_discard_candidate(candidate_path)
+                return {"ok": False, "error": "\u5019\u9009\u526f\u672c\u91cd\u65b0\u89e3\u6790\u6821\u9a8c\u5931\u8d25\uff0c\u5df2\u62d2\u7edd\u8986\u76d6"}
+            rollback = source_path + ".offline_rollback_" + uuid.uuid4().hex[:8]
+            temporary = source_path + ".offline_edit_" + uuid.uuid4().hex[:8]
+            replaced = False
+            replace_attempted = False
+            rollback_attempted = False
+            rollback_restored = False
+            try:
+                pre_replace = self._save_create_snapshot(slot, "pre_offline_replace")
+                # Retain an exact local copy until post-replace parsing passes.
+                # This makes a late validation failure self-rollback instead of
+                # leaving a formally replaced but unverified save behind.
+                shutil.copy2(source_path, rollback)
+                if self._save_hash(rollback) != grant["source_sha"]:
+                    raise RuntimeError("\u66ff\u6362\u524d\u539f\u5b58\u6863 SHA-256 \u6821\u9a8c\u5931\u8d25")
+                shutil.copy2(candidate_path, temporary)
+                if self._save_hash(temporary) != grant["candidate_sha"]:
+                    raise RuntimeError("\u4e34\u65f6\u6587\u4ef6 SHA-256 \u6821\u9a8c\u5931\u8d25")
+                replace_attempted = True
+                os.replace(temporary, source_path)
+                replaced = True
+                final = self._offline_save_parse_file(source_path)
+                history_context = self._offline_save_edit_history_context.pop(
+                    grant.get('candidate_path'), {})
+                final_table = final.get("inventory") if grant["kind"] == "inventory" else final.get("technology")
+                final_rows = final_table.get("entries") if grant["kind"] == "inventory" else final_table.get("nodes")
+                final_ok = final.get("ok") and final_table and final_table.get("state") == "\u5df2\u8bfb\u53d6" and any(str(row.get("id") or "").lower() == str(grant["id"]).lower() and row.get(field) == grant["value"] for row in (final_rows or []))
+                if final_ok and history_context.get('record_history', True):
+                    kind = 'offline_inventory' if grant['kind'] == 'inventory' else 'offline_technology'
+                    field_name = history_context.get('field_name') or (
+                        '数量' if grant['kind'] == 'inventory' else '科技状态')
+                    history_meta = {
+                        'source_sha': grant['source_sha'],
+                        'post_sha': final.get('sha256'),
+                        'pre_edit_snapshot': grant.get('pre_edit'),
+                        'pre_replace_snapshot': pre_replace,
+                    }
+                    for key in ('offline_action', 'added', 'undo_of'):
+                        if key in history_context:
+                            history_meta[key] = history_context[key]
+                    self._record_operation(
+                        kind, 'offline',
+                        {'slot_key': grant['slot_key'], 'entry_id': grant['id'],
+                         'entry_name': grant.get('name') or grant['id'],
+                         'file': os.path.basename(source_path)},
+                        field_name, grant['original'], grant['value'], True,
+                        meta=history_meta)
+                if not final_ok:
+                    recovery = source_path + ".offline_recover_" + uuid.uuid4().hex[:8]
+                    rollback_attempted = True
+                    shutil.copy2(rollback, recovery)
+                    if self._save_hash(recovery) != grant["source_sha"]:
+                        raise RuntimeError("\u66ff\u6362\u540e\u6821\u9a8c\u5931\u8d25\uff0c\u4e14\u56de\u6eda\u4e34\u65f6\u6587\u4ef6\u6821\u9a8c\u5931\u8d25")
+                    os.replace(recovery, source_path)
+                    replaced = False
+                    rollback_restored = True
+                    raise RuntimeError("\u66ff\u6362\u540e\u91cd\u65b0\u89e3\u6790\u6821\u9a8c\u5931\u8d25\uff0c\u5df2\u81ea\u52a8\u56de\u6eda\u5230\u66ff\u6362\u524d\u5b58\u6863")
+                return {"ok": True, "message": "\u5df2\u66ff\u6362\u6b63\u5f0f\u5b58\u6863\u5e76\u901a\u8fc7\u91cd\u65b0\u89e3\u6790\u6821\u9a8c", "pre_edit_snapshot": grant["pre_edit"], "pre_replace_snapshot": pre_replace, "sha256": final["sha256"]}
+            except Exception as exc:
+                if replaced or replace_attempted:
+                    rollback_attempted = True
+                    try:
+                        recovery = source_path + ".offline_recover_" + uuid.uuid4().hex[:8]
+                        shutil.copy2(rollback, recovery)
+                        if self._save_hash(recovery) == grant["source_sha"]:
+                            os.replace(recovery, source_path)
+                            replaced = False
+                            rollback_restored = True
+                    except Exception:
+                        pass
+                if rollback_restored:
+                    status = "\uff1b\u5df2\u81ea\u52a8\u56de\u6eda\u5230\u66ff\u6362\u524d\u5b58\u6863"
+                elif rollback_attempted:
+                    status = "\uff1b\u81ea\u52a8\u56de\u6eda\u5931\u8d25\uff0c\u53ef\u4f7f\u7528 pre_offline_replace \u5feb\u7167\u6062\u590d"
+                else:
+                    status = "\uff1b\u6b63\u5f0f\u5b58\u6863\u5c1a\u672a\u66ff\u6362"
+                return {"ok": False, "error": "\u6b63\u5f0f\u5b58\u6863\u66ff\u6362\u5931\u8d25\uff1a" + str(exc) + status}
+            finally:
+                for cleanup in (temporary, rollback):
+                    try:
+                        if os.path.isfile(cleanup):
+                            os.remove(cleanup)
+                    except OSError:
+                        pass
+                self._offline_save_discard_candidate(candidate_path)
+
+    def get_save_manager_catalog(self):
+        with self._save_manager_lock:
+            state, processes, process_error = self._save_game_state()
+            main_menu_override = self._save_main_menu_override_active(state, processes)
+            save_actions_allowed = state == "stopped" or main_menu_override
+            slots = []
+            for root in self._save_roots():
+                try:
+                    names = sorted(os.listdir(root["path"]), key=str.lower)
+                except OSError:
+                    continue
+                for name in names:
+                    folder = os.path.join(root["path"], name)
+                    if not (re.fullmatch(r"slot\d+", name, re.I) and os.path.isdir(folder)):
+                        continue
+                    files = self._save_slot_files(folder)
+                    # Empty slot folders are ignored entirely.  In particular,
+                    # do not create a summary/read attempt for an empty folder.
+                    if not files:
+                        continue
+                    slots.append({"slot_key": root["root_id"] + "|" + name, "slot": name, "profile_label": root["label"], "files": files, "summary": self._save_summary(folder, files), "snapshots": self._save_list_snapshots(root["root_id"], name)})
+            slots.sort(key=lambda row: (str(row.get("profile_label") or ""), str(row.get("slot") or "")))
+            return {"ok": True, "game_state": state, "processes": processes, "process_error": process_error, "main_menu_override": main_menu_override, "save_actions_allowed": save_actions_allowed, "slots": slots, "backup_root": self._save_backup_root(), "steam_cloud_warning": "Steam Cloud \u53ef\u80fd\u540e\u7eed\u540c\u6b65\u6216\u8986\u76d6\u672c\u5730\u5b58\u6863\uff1b\u672c\u5de5\u5177\u4ec5\u63d0\u9192\uff0c\u4e0d\u4fee\u6539 Steam \u4e91\u540c\u6b65\u3002"}
+
+    def set_save_main_menu_override(self, enabled, phrase=""):
+        with self._save_manager_lock:
+            state, processes, process_error = self._save_game_state()
+            if not bool(enabled):
+                self.__class__._save_main_menu_override = None
+                return {"ok": True, "game_state": state, "processes": processes, "main_menu_override": False, "save_actions_allowed": state == "stopped"}
+            if str(phrase or "") != "MAIN_MENU":
+                return {"ok": False, "error": "\u672a\u901a\u8fc7\u4e3b\u83dc\u5355\u624b\u52a8\u786e\u8ba4"}
+            if state != "running":
+                return {"ok": False, "error": "\u53ea\u6709 CraftWorld.exe \u8fd0\u884c\u4e2d\u65f6\u624d\u9700\u8981\u4e3b\u83dc\u5355\u624b\u52a8\u8bb8\u53ef" if state == "stopped" else "\u65e0\u6cd5\u786e\u8ba4\u6e38\u620f\u8fdb\u7a0b\u72b6\u6001\uff1a" + process_error}
+            process_ids = self._save_running_process_ids(processes)
+            if not process_ids:
+                return {"ok": False, "error": "\u672a\u80fd\u83b7\u5f97 CraftWorld.exe \u8fdb\u7a0b\u6807\u8bc6"}
+            self.__class__._save_main_menu_override = {"enabled": True, "process_ids": process_ids, "created_at": self._save_time()}
+            return {"ok": True, "game_state": state, "processes": processes, "main_menu_override": True, "save_actions_allowed": True, "warning": "\u5df2\u542f\u7528\u4e3b\u83dc\u5355\u624b\u52a8\u8bb8\u53ef\uff1b\u5de5\u5177\u65e0\u6cd5\u81ea\u52a8\u9a8c\u8bc1\u6e38\u620f\u754c\u9762\uff0c\u8bf7\u4e0d\u8981\u5728\u8f7d\u5165\u3001\u4fdd\u5b58\u3001\u6218\u6597\u6216\u5176\u4ed6\u6e38\u620f\u8fdb\u7a0b\u4e2d\u542f\u7528\u3002\u6e38\u620f\u8fdb\u7a0b\u53d8\u5316\u6216\u4fee\u6539\u5668\u91cd\u542f\u540e\uff0c\u8bb8\u53ef\u4f1a\u81ea\u52a8\u5931\u6548\u3002"}
+
+    def open_save_slot_folder(self, slot_key):
+        with self._save_manager_lock:
+            slot, error = self._save_slot_from_key(slot_key)
+            if not slot:
+                return {"ok": False, "error": error}
+            try:
+                os.startfile(slot["path"])
+                return {"ok": True, "path": slot["path"]}
+            except Exception as exc:
+                return {"ok": False, "error": "\u65e0\u6cd5\u6253\u5f00\u5b58\u6863\u76ee\u5f55\uff1a" + str(exc)}
+
+    def backup_save_slot(self, slot_key):
+        with self._save_manager_lock:
+            ok, error = self._save_require_offline()
+            if not ok: return {"ok": False, "error": error}
+            slot, error = self._save_slot_from_key(slot_key)
+            if not slot: return {"ok": False, "error": error}
+            try: return {"ok": True, "snapshot": self._save_create_snapshot(slot, "manual")}
+            except Exception as exc: return {"ok": False, "error": "\u5907\u4efd\u5931\u8d25\uff1a" + str(exc)}
+
+    def verify_save_snapshot(self, snapshot_id):
+        with self._save_manager_lock:
+            ok, error = self._save_require_offline()
+            if not ok: return {"ok": False, "error": error}
+            found, error = self._save_find_snapshot(snapshot_id)
+            if not found: return {"ok": False, "error": error}
+            manifest, files_dir, slot = found["manifest"], found["files_dir"], found["slot"]
+            expected = {row["name"]: row for row in manifest["files"] if self._save_allowed(row.get("name"))}
+            rows, problem_count = [], 0
+            for name, row in expected.items():
+                snap, live = os.path.join(files_dir, name), os.path.join(slot["path"], name)
+                result = {"name": name, "snapshot": "ok", "current": "ok", "status": "ok"}
+                try:
+                    if not os.path.isfile(snap): result.update(snapshot="\u7f3a\u5931", status="\u5f02\u5e38")
+                    elif self._save_hash(snap) != row.get("sha256"): result.update(snapshot="SHA-256 \u4e0d\u5339\u914d", status="\u5f02\u5e38")
+                    if not os.path.isfile(live): result.update(current="\u7f3a\u5931", status="\u5f02\u5e38")
+                    elif self._save_hash(live) != row.get("sha256"): result.update(current="\u5df2\u4fee\u6539", status="\u5f02\u5e38")
+                except OSError as exc: result.update(status="\u8bfb\u53d6\u5931\u8d25", error=str(exc))
+                if result["status"] != "ok": problem_count += 1
+                rows.append(result)
+            actual_names = {row.get("name") for row in self._save_slot_files(slot["path"])}
+            for name in sorted(actual_names - set(expected)):
+                if name: rows.append({"name": name, "snapshot": "\u65e0", "current": "\u65b0\u589e", "status": "\u5f02\u5e38"}); problem_count += 1
+            return {"ok": True, "valid": problem_count == 0, "problem_count": problem_count, "files": rows}
+
+    def prepare_save_restore(self, snapshot_id):
+        with self._save_manager_lock:
+            ok, error = self._save_require_offline()
+            if not ok: return {"ok": False, "error": error}
+            found, error = self._save_find_snapshot(snapshot_id)
+            if not found: return {"ok": False, "error": error}
+            verification = self.verify_save_snapshot(snapshot_id)
+            if any(row.get("snapshot") != "ok" for row in verification.get("files", [])):
+                return {"ok": False, "error": "\u5907\u4efd\u672c\u8eab\u6821\u9a8c\u5931\u8d25\uff0c\u5df2\u7981\u6b62\u6062\u590d", "verification": verification}
+            token = uuid.uuid4().hex
+            self._save_restore_tokens[token] = {"snapshot_id": snapshot_id, "expires": time.time() + 600}
+            return {"ok": True, "token": token, "warning": "\u6062\u590d\u524d\u4f1a\u81ea\u52a8\u521b\u5efa\u5f53\u524d\u69fd\u4f4d\u7684\u6062\u590d\u524d\u5feb\u7167\uff1b\u8bf7\u7559\u610f Steam Cloud \u540e\u7eed\u540c\u6b65\u3002"}
+
+    def restore_save_snapshot(self, snapshot_id, token, phrase):
+        with self._save_manager_lock:
+            ok, error = self._save_require_offline()
+            if not ok: return {"ok": False, "error": error}
+            grant = self._save_restore_tokens.pop(str(token or ""), None)
+            if not grant or grant.get("snapshot_id") != snapshot_id or grant.get("expires", 0) < time.time(): return {"ok": False, "error": "\u6062\u590d\u786e\u8ba4\u4ee4\u724c\u65e0\u6548\u6216\u5df2\u8fc7\u671f"}
+            if str(phrase or "") != "RESTORE": return {"ok": False, "error": "\u672a\u901a\u8fc7\u7b2c\u4e8c\u6b21\u786e\u8ba4"}
+            found, error = self._save_find_snapshot(snapshot_id)
+            if not found: return {"ok": False, "error": error}
+            manifest, files_dir, slot = found["manifest"], found["files_dir"], found["slot"]
+            files = [row for row in manifest["files"] if self._save_allowed(row.get("name"))]
+            try:
+                for row in files:
+                    source = os.path.join(files_dir, row["name"])
+                    if not os.path.isfile(source) or self._save_hash(source) != row.get("sha256"): return {"ok": False, "error": "\u5907\u4efd\u6821\u9a8c\u5931\u8d25\uff1a" + row["name"]}
+                pre_restore = self._save_create_snapshot(slot, "pre_restore")
+                expected = {row["name"] for row in files}
+                for row in files:
+                    source, destination = os.path.join(files_dir, row["name"]), os.path.join(slot["path"], row["name"])
+                    temporary = destination + ".restore_" + uuid.uuid4().hex[:8]
+                    shutil.copy2(source, temporary)
+                    if self._save_hash(temporary) != row["sha256"]: raise RuntimeError("\u4e34\u65f6\u6587\u4ef6 SHA-256 \u6821\u9a8c\u5931\u8d25\uff1a" + row["name"])
+                    os.replace(temporary, destination)
+                for name in os.listdir(slot["path"]):
+                    if self._save_allowed(name) and name not in expected: os.remove(os.path.join(slot["path"], name))
+                verification = self.verify_save_snapshot(snapshot_id)
+                return {"ok": bool(verification.get("valid")), "message": "\u5df2\u6062\u590d\u5e76\u901a\u8fc7 SHA-256 \u6821\u9a8c" if verification.get("valid") else "\u6062\u590d\u540e\u6821\u9a8c\u5931\u8d25", "pre_restore": pre_restore, "verification": verification}
+            except Exception as exc: return {"ok": False, "error": "\u6062\u590d\u5931\u8d25\uff1a" + str(exc)}
+
+
+### 6. 入口
+
+# 魔法快捷档位/预览方案已移除：它们只会预改下一次手动施法参数，
+# 不能直接产生可见效果。不要把旧方法继续暴露给 WebView 或旧页面。
+for _removed_magic_api in ("get_magic_profile_preview", "apply_magic_profile"):
+    if hasattr(Api, _removed_magic_api):
+        delattr(Api, _removed_magic_api)
+del _removed_magic_api
+
+
+def _serialized_game_write(method):
+    """Make one mutating API request finish before the next one starts."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        result = None
+        try:
+            with self._memory_write_lock:
+                result = method(self, *args, **kwargs)
+            return result
+        finally:
+            # The lock must be released before joining: a worker may be
+            # unwinding from _suspend() and waiting for this same gate.
+            if method.__name__ == "disconnect":
+                self._join_runtime_workers()
+    return wrapped
+
+
+# World mutation endpoints retain their method-level runtime validation.  The
+# wrapper below only enforces the connected-process guard supplied by
+# _require_high_risk_world_write; it is no longer a permanent feature lock.
+def _hard_disabled_high_risk_world_write(method, feature):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        blocked = self._require_high_risk_world_write(feature)
+        if blocked:
+            return {"ok": False, "error": blocked}
+        return method(self, *args, **kwargs)
+    return wrapped
+
+
+_HIGH_RISK_WORLD_WRITE_ENDPOINTS = {
+    "map_replace": "地图方块编辑",
+    "map_replace_front": "地图方块编辑",
+    "map_apply_cells": "地图区域写入",
+    "map_set_water": "地图水量写入",
+    "map_set_explored": "地图探索状态写入",
+    "map_fill": "地图全图填充",
+    "map_clear": "地图全图清空",
+    "set_portal_timer": "传送门倒计时写入",
+    "add_portal_time": "传送门倒计时写入",
+    "toggle_portal_lock": "传送门锁定",
+    "close_portal": "传送门关闭",
+    "spawn_monster_portal": "传送门生成",
+    "force_pandora_event": "潘多拉事件预设",
+    "restore_pandora_events": "潘多拉事件配置恢复",
+    "set_pandora_spawn_timer": "潘多拉倒计时写入",
+}
+# 地图、潘多拉和传送门功能均会在各自方法内校验地图、对象、坐标、昼夜、
+# 范围或生命周期。这里不再按功能类别永久拒绝旧入口，避免正式界面与后端
+# 策略状态不一致。
+for _verified_world_endpoint in (
+    "map_replace", "map_replace_front", "map_apply_cells", "map_set_water",
+    "map_set_explored", "force_pandora_event", "restore_pandora_events",
+    "set_pandora_spawn_timer", "spawn_monster_portal", "end_current_monster_portal_event",
+):
+    _HIGH_RISK_WORLD_WRITE_ENDPOINTS.pop(_verified_world_endpoint, None)
+del _verified_world_endpoint
+for _endpoint_name, _endpoint_feature in _HIGH_RISK_WORLD_WRITE_ENDPOINTS.items():
+    setattr(Api, _endpoint_name, _hard_disabled_high_risk_world_write(
+        getattr(Api, _endpoint_name), _endpoint_feature))
+del _endpoint_name, _endpoint_feature
+
+
+# Every legacy world-changing endpoint is explicitly classified. The default
+# is deny: a stale UI, old preset or manual JavaScript call cannot unlock it.
+WRITE_SAFETY_VERIFIED = '已验证且可安全写入'
+WRITE_SAFETY_USER_TESTED = '保留可用（用户已测试）'
+WRITE_SAFETY_EXPERIMENTAL = '实验性：未完成完整验收'
+WRITE_SAFETY_DISABLED = '明确禁用'
+
+_WRITE_SAFETY_POLICY = {
+    'modify_item_qty': {
+        'state': WRITE_SAFETY_VERIFIED,
+        'feature': '单个已有物品数量',
+        'reason': '已采用 Doctor、容器有效性校验、暂停、快照、写后读回和失败回滚。',
+    },
+    'apply_dwarf_training_preset': {
+        'state': WRITE_SAFETY_VERIFIED,
+        'feature': '矮人培养预设',
+        'reason': '仅写入已有个人技能与已实机验收的头盔槽；采用单对象快照、暂停事务、写后读回及批次失败回滚。',
+    },
+    'save_dwarf_personal_skill_slots': {
+        'state': WRITE_SAFETY_VERIFIED,
+        'feature': '矮人已验证个人技能',
+        'reason': '仅写入已读取的技能槽；保存前后都校验对象和数值，并保留操作记录与撤销。',
+    },
+    'save_dwarf_equipment': {
+        'state': WRITE_SAFETY_VERIFIED,
+        'feature': '矮人已验证装备槽',
+        'reason': '仅允许已识别、已验证槽位的已有物品；写入后立即读回，并保留操作记录与撤销。',
+    },
+    'undo_operation': {
+        'state': WRITE_SAFETY_VERIFIED,
+        'feature': '已验证操作撤销',
+        'reason': '仅撤销带有完整快照和读回记录的已验证操作。',
+    },
+}
+
+# Every mutating legacy endpoint is kept in one registry so the UI can explain
+# it and the serializer can keep requests ordered.  The player has already
+# tested these tools in this build, therefore the registry records availability
+# instead of acting as a global feature-removal switch.
+_EXPERIMENTAL_WRITE_FEATURES = {
+    'map_replace': '地图方块编辑', 'map_replace_front': '地图外层方块编辑',
+    'map_apply_cells': '地图区域写入', 'map_set_water': '地图水量写入',
+    'map_set_explored': '地图探索状态写入', 'map_explore_all': '全图标记已探索', 'map_fill': '地图全图填充',
+    'map_clear': '地图全图清空', 'set_map_write_enabled': '地图写入开关',
+    'set_portal_timer': '传送门倒计时写入', 'add_portal_time': '传送门倒计时写入',
+    'set_timer_lock': '世界事件倒计时锁定', 'toggle_portal_lock': '传送门锁定',
+    'close_portal': '传送门关闭', 'spawn_monster_portal': '怪物传送门生成',
+    'end_current_monster_portal_event': '结束当前怪物传送门事件',
+    'force_pandora_event': '潘多拉事件预设', 'restore_pandora_events': '潘多拉事件配置恢复',
+    'set_pandora_spawn_timer': '潘多拉倒计时写入',
+    'write_gold': '金币写入', 'gold_apply_operation': '金币即时操作',
+    'set_gold_economy_rule': '金币低频经济规则', 'mana_apply_operation': '当前法力操作',
+    'mana_apply_max_operation': '法力上限操作', 'set_mana_reserve_rule': '法力低频保留规则',
+    'xp_apply_progress': '等级与经验进度操作',
+    'write_mana': '当前法力写入',
+    'write_mana_max': '法力上限写入', 'write_xp': '经验写入',
+    'write_timer': '倒计时写入', 'set_game_time': '游戏时间写入',
+    'set_game_speed': '全局速度写入', 'save_skills': '全局技能等级写入',
+    'native_skill_upgrade': '原生技能升级调用', 'apply_skill_targets': '技能等级快捷应用',
+    'heal_all': '全体回血', 'full_sat': '全体补饱食度',
+    'save_dwarf': '矮人属性写入', 'save_dwarf_fields': '矮人字段写入',
+    'save_dwarf_personal_skills': '旧版个人技能写入',
+    'apply_dwarf_equipment_preset': '全体装备预设',
+    'apply_item_quick_settings': '常用物品批量写入', 'apply_feature_preset': '功能预设应用',
+    'pet_house': '宠物按屋生成', 'pet_infinite': '宠物无限生成',
+    'pet_spawn': '宠物生成', 'remove_pet': '单只宠物原生死亡移除',
+    'set_pet_limit_override': '宠物上限本局覆盖', 'clear_pet_limit_override': '恢复自动宠物上限',
+    'toggle_other_feature': '其它功能开关',
+    'set_dwarf_name': '矮人名称写入', 'modify_shop_entry': '商店条目运行时编辑',
+    'spawn_native_dwarf': '原生矮人生成',
+    'native_shop_purchase_one': '哥布林商店单包原生购买',
+    'unlock_recipe': '配方直接解锁', 'set_tech_node_state': '科技树节点状态写入',
+    'set_magic_value': '魔法参数运行时编辑',
+    'cast_magic_collect': '原生收集魔法调用',
+    'cast_magic_collect_full_map': '无耗蓝全图收集', 'save_recipe_grid': '运行时配方编辑',
+    'sync_recipe_grid_to_local': '本地配方同步写入', 'toggle_lock': '通用锁定',
+    'toggle_gold_lock': '金币锁定', 'toggle_mana_lock': '法力锁定',
+    'toggle_xp_lock': '经验锁定', 'set_mana_max_lock': '法力上限锁定',
+    'xp_to_next': '经验设置为下一级',
+    'confirm_offline_save_edit': '离线存档正式替换',
+    'restore_save_snapshot': '离线存档快照恢复',
+}
+for _experimental_endpoint, _experimental_feature in _EXPERIMENTAL_WRITE_FEATURES.items():
+    _WRITE_SAFETY_POLICY[_experimental_endpoint] = {
+        'state': WRITE_SAFETY_USER_TESTED,
+        'feature': _experimental_feature,
+        'reason': '保留用户已测试的入口；执行时仍由各功能自身进行连接、对象、范围或确认校验。',
+        'requires_doctor': False,
+    }
+del _experimental_endpoint, _experimental_feature
+
+
+def _enforce_write_safety_policy(method, endpoint):
+    '''Apply the one authoritative safety policy before an old write runs.'''
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        policy = _WRITE_SAFETY_POLICY.get(endpoint)
+        if not policy:
+            return {'ok': False, 'state': WRITE_SAFETY_DISABLED, 'feature': endpoint,
+                    'error': '接口未注册：请重新打开修改器后再试。'}
+        if policy['state'] not in (WRITE_SAFETY_VERIFIED, WRITE_SAFETY_USER_TESTED):
+            state = policy.get('state', WRITE_SAFETY_DISABLED)
+            reason = policy.get('reason', '该入口未通过安全验收。')
+            return {'ok': False, 'state': state,
+                    'feature': policy.get('feature', endpoint), 'reason': reason,
+                    'error': '%s：%s。%s' % (state, policy.get('feature', endpoint), reason)}
+        if policy.get('requires_doctor', False):
+            blocked = self._require_safe_write(policy['feature'])
+            if blocked:
+                return {'ok': False, 'state': WRITE_SAFETY_VERIFIED,
+                        'feature': policy['feature'], 'error': blocked}
+        return method(self, *args, **kwargs)
+    return wrapped
+
+
+for _endpoint_name in _WRITE_SAFETY_POLICY:
+    setattr(Api, _endpoint_name, _enforce_write_safety_policy(
+        getattr(Api, _endpoint_name), _endpoint_name))
+del _endpoint_name
+
+
+# pywebview may dispatch UI calls concurrently.  Keep all process-changing
+# endpoints behind one re-entrant gate; background write loops use the same
+# gate through _suspend (or explicitly in _lock_restore_loop).
+_GAME_WRITE_ENDPOINTS = (
+    "connect", "connect_pid", "disconnect",
+    "map_replace", "map_replace_front", "map_apply_cells", "map_set_water", "map_fill", "map_clear",
+    "map_set_explored", "map_explore_all",
+    "set_map_write_enabled",
+    "set_portal_timer", "add_portal_time", "toggle_portal_lock", "close_portal", "spawn_monster_portal", "end_current_monster_portal_event", "force_pandora_event", "restore_pandora_events", "set_pandora_spawn_timer", "set_timer_lock",
+    "write_gold", "gold_apply_operation", "set_gold_economy_rule", "mana_apply_operation", "mana_apply_max_operation", "set_mana_reserve_rule", "xp_apply_progress", "write_mana", "write_mana_max", "write_xp", "write_timer", "set_game_time", "set_game_speed",
+    "save_skills", "native_skill_upgrade", "apply_skill_targets", "heal_all", "full_sat", "save_dwarf", "save_dwarf_fields", "save_dwarf_personal_skills", "save_dwarf_personal_skill_slots", "save_dwarf_equipment", "apply_dwarf_equipment_preset", "apply_dwarf_training_preset", "modify_item_qty", "undo_operation",
+    "apply_item_quick_settings", "apply_feature_preset",
+    "pet_house", "pet_infinite", "pet_spawn", "spawn_direct_pet", "spawn_direct_pets", "remove_pet", "set_pet_limit_override", "clear_pet_limit_override", "toggle_other_feature",
+    "set_dwarf_name", "spawn_native_dwarf", "modify_shop_entry", "native_shop_purchase_one", "unlock_recipe", "set_tech_node_state", "set_magic_value", "cast_magic_collect", "cast_magic_collect_full_map", "save_recipe_grid", "sync_recipe_grid_to_local",
+    "toggle_lock", "toggle_gold_lock", "toggle_mana_lock", "toggle_xp_lock", "set_mana_max_lock", "xp_to_next",
+    "confirm_offline_save_edit", "restore_save_snapshot",
+    "set_default_feature_preset",
+)
+for _endpoint_name in _GAME_WRITE_ENDPOINTS:
+    setattr(Api, _endpoint_name, _serialized_game_write(getattr(Api, _endpoint_name)))
+del _endpoint_name
+
+
+if __name__ == "__main__":
+    html=_resource_path("ui_v1.0.html")
+    api = Api()
+    window=webview.create_window("CraftWorld 修改器 v1.0 正式版",html,width=1880,height=1060,min_size=(1280,760),js_api=api)
+
+    def _on_window_closing():
+        # Run synchronously while WebView2 is still alive.  This prevents a
+        # late lock/scanner result from trying to return into a disposed view.
+        api.shutdown()
+
+    window.events.closing += _on_window_closing
+    webview.start()
