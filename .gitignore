@@ -11,6 +11,8 @@ config/user_data.json.bak
 发布包/
 pyinstaller-work/
 pyinstaller-dist/
+pyinstaller-spec/
 *.spec
+release-assets/
 .venv/
 venv/

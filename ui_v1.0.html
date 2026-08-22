@@ -2,13 +2,30 @@
 <html lang="zh-CN"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CraftWorld 修改器</title>
+<title>打造世界修改器 v1.0</title>
 <style>
 .wave-portal-close{background:#F6E9DF;color:#765847;border:1px solid #E7CFC0;box-shadow:none}
 .wave-portal-close:hover{background:#F0DCCD;border-color:#DDB5A2}
 *{margin:0;padding:0;box-sizing:border-box}
 [data-map-write][hidden]{display:none!important}
-body{font-family:"Microsoft YaHei",-apple-system,sans-serif;background:linear-gradient(135deg,#FFF0E8 0%,#FFE8E0 30%,#FFF5F0 70%,#FFF0F0 100%);height:100vh;display:flex;overflow:hidden;user-select:none}
+/* Stable 1.0 surface: keep only deferred procurement hidden. Magic controls are restored. */
+#goldEconomyModal{display:none!important}
+#manaControlNew>details{display:none!important}
+:root{--titlebar-height:38px}
+body{font-family:"Microsoft YaHei",-apple-system,sans-serif;background:linear-gradient(135deg,#FFF0E8 0%,#FFE8E0 30%,#FFF5F0 70%,#FFF0F0 100%);height:100vh;padding-top:var(--titlebar-height);display:flex;overflow:hidden;user-select:none}
+.app-titlebar{position:fixed;inset:0 0 auto 0;z-index:10001;height:var(--titlebar-height);display:flex;align-items:center;background:linear-gradient(100deg,#FFF9F4 0%,#FFF2E9 52%,#FDE9DD 100%);border-bottom:1px solid #E8D5C8;box-shadow:0 1px 8px rgba(103,76,55,.10);color:#514238;cursor:default}
+.app-titlebar-brand{height:100%;display:flex;align-items:center;gap:8px;padding:0 12px 0 14px;min-width:252px;font-size:13px;font-weight:800;letter-spacing:.025em;white-space:nowrap}
+.app-titlebar-icon{width:23px;height:23px;display:block;flex:0 0 auto;filter:drop-shadow(0 1px 1px rgba(96,58,27,.13))}
+.app-titlebar-version{padding:2px 6px;border:1px solid #E8C9A4;border-radius:999px;background:#FFF7EA;color:#A86723;font:700 10px/1 "Segoe UI",sans-serif;letter-spacing:.06em}
+.app-titlebar-drag-copy{color:#9A806F;font-size:11px;font-weight:600;letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-titlebar-spacer{flex:1;align-self:stretch;min-width:24px}
+.app-window-controls{display:flex;align-self:stretch;margin-left:auto}
+.app-window-control{width:46px;min-width:46px;height:var(--titlebar-height);padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;color:#715E51!important;box-shadow:none!important;display:grid;place-items:center;cursor:pointer;transition:background-color .14s ease,color .14s ease!important}
+.app-window-control:hover{background:#F3E2D7!important;color:#46362C!important;transform:none!important}
+.app-window-control:active{background:#EBD3C5!important;transform:none!important}
+.app-window-control.close:hover{background:#C7473F!important;color:#FFF!important}
+.app-window-control svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.app-window-control:focus-visible{position:relative;z-index:1;outline:2px solid #D97706!important;outline-offset:-3px;box-shadow:none!important}
 .sidebar{width:200px;background:rgba(255,255,255,0.75);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-right:1px solid rgba(200,180,170,0.3);display:flex;flex-direction:column;padding:20px 0}
 .logo{font-size:16px;font-weight:700;color:#5C4E40;padding:0 20px 24px;text-align:center}
 .nav-item{padding:12px 22px;margin:2px 10px;border-radius:8px;cursor:pointer;color:#6B5B4F;font-size:14px;display:flex;align-items:center;gap:10px;transition:all 0.2s}
@@ -109,6 +126,7 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .modal-field input:disabled{background:#F5F1EC;color:#8C7C6E;cursor:not-allowed}
 .dwarf-readonly-note{grid-column:1/-1;margin:-2px 0 2px;padding:9px 11px;border:1px solid #E7D8C9;border-radius:8px;background:#FCF7F1;color:#806B58;font-size:12px;line-height:1.5}
 .dwarf-readonly-tag{display:inline-block;margin-left:4px;padding:1px 5px;border-radius:999px;background:#EEE5DC;color:#927A66;font-size:10px;font-weight:700;vertical-align:1px}
+.dwarf-editable-tag{display:inline-block;margin-left:4px;padding:1px 5px;border-radius:999px;background:#E5F1E1;color:#557A50;font-size:10px;font-weight:700;vertical-align:1px}
 .modal-btns{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
 .modal-btns button{padding:8px 20px;border:none;border-radius:8px;font-size:14px;font-family:inherit;cursor:pointer}
 .dwarf-training-confirm-overlay{z-index:1450;background:rgba(53,43,34,.56);padding:18px}.dwarf-training-confirm-box{width:min(560px,calc(100vw - 36px))!important;max-height:calc(100vh - 36px);display:flex;flex-direction:column;padding:24px 26px}.dwarf-training-confirm-lead{margin:-5px 0 13px;color:#5C4E40;font-size:14px;line-height:1.6}.dwarf-training-confirm-summary{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.dwarf-training-confirm-chip{padding:5px 9px;border:1px solid #E5C99E;border-radius:999px;background:#FFF8ED;color:#80542A;font-size:12px;font-weight:700}.dwarf-training-confirm-list{max-height:230px;overflow:auto;border:1px solid #E9DACC;border-radius:10px;background:#FFFCF8}.dwarf-training-confirm-row{padding:10px 12px;border-bottom:1px solid #F1E7DE;color:#5C4E40;font-size:13px;line-height:1.55}.dwarf-training-confirm-row:last-child{border-bottom:0}.dwarf-training-confirm-row b{display:block;margin-bottom:3px;color:#6D5845}.dwarf-training-confirm-change{display:inline-block;margin:2px 5px 0 0;padding:3px 7px;border-radius:6px;background:#FFF1DE;color:#8A6538;font-size:12px}.dwarf-training-confirm-protection{margin-top:12px;padding:11px 12px;border:1px solid #D7E4D2;border-radius:10px;background:#F4FAF2;color:#5E7E56;font-size:12px;line-height:1.6}.dwarf-training-confirm-protection b{display:block;margin-bottom:3px;color:#4F7048}.dwarf-training-confirm-box .modal-btns{margin-top:16px}.dwarf-training-confirm-box .modal-btns .btn-light{min-width:92px}.dwarf-training-confirm-box .modal-btns .btn-orange{min-width:124px}
@@ -180,7 +198,7 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .item-filter-panel label{display:inline-flex;align-items:center;gap:5px;margin:2px;padding:5px 7px;border-radius:6px;color:#5C4E40;font-size:13px;cursor:pointer}
 @media(max-width:1180px){.item-toolbar-main{align-items:flex-start}.item-toolbar-main h1{padding-top:6px}.item-toolbar-controls #itemSearch{flex-basis:300px}}
 @media(max-width:760px){.item-toolbar-main{flex-wrap:wrap}.item-toolbar-main h1{width:100%}.item-toolbar-primary{width:100%}.item-toolbar-controls #itemSearch{flex:1 1 100%;order:3}.item-filter-panel{left:auto!important;right:0!important;min-width:285px}}
-.update-center-box{width:min(720px,calc(100vw - 36px));max-width:calc(100vw - 36px);display:flex;flex-direction:column;gap:12px}.update-center-status{padding:11px 13px;border:1px solid #E7D8C9;border-radius:10px;background:#FFF8F1;color:#6F5B4A;line-height:1.5}.update-center-status.ok{border-color:#B7D9B1;background:#F2FAEF;color:#4F7F4A}.update-center-status.error{border-color:#E5B9B0;background:#FFF1EE;color:#A34B3D}.update-center-status.pending{border-color:#E8C98A;background:#FFF7E5;color:#9A671D}.update-center-note{color:#8C7C6E;font-size:12px;line-height:1.6}.update-center-detail{min-height:36px;padding:10px 12px;border:1px dashed #E8D8CB;border-radius:9px;background:#FFFDFB;white-space:pre-line;color:#6F5B4A}.update-center-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}.btn.update-available{border-color:#E7A23A!important;background:#FFF0D8!important;color:#9A5E10!important;box-shadow:0 0 0 2px rgba(231,162,58,.18)}
+.update-center-box{width:min(720px,calc(100vw - 36px));max-width:calc(100vw - 36px);display:flex;flex-direction:column;gap:12px}.update-center-status{padding:11px 13px;border:1px solid #E7D8C9;border-radius:10px;background:#FFF8F1;color:#6F5B4A;line-height:1.5}.update-center-status.ok{border-color:#B7D9B1;background:#F2FAEF;color:#4F7F4A}.update-center-status.error{border-color:#E5B9B0;background:#FFF1EE;color:#A34B3D}.update-center-status.pending{border-color:#E8C98A;background:#FFF7E5;color:#9A671D}.update-center-note{color:#8C7C6E;font-size:12px;line-height:1.6}.update-center-detail{min-height:36px;padding:10px 12px;border:1px dashed #E8D8CB;border-radius:9px;background:#FFFDFB;white-space:pre-line;color:#6F5B4A}.update-center-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}.update-center-action-help{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px;padding:10px 12px;border:1px solid #E7D8CB;border-radius:9px;background:#FFFDFB;color:#7A6858;font-size:12px;line-height:1.55}.update-center-action-help b{color:#5C4A3A}.btn.update-available{border-color:#E7A23A!important;background:#FFF0D8!important;color:#9A5E10!important;box-shadow:0 0 0 2px rgba(231,162,58,.18)}.update-version-chip{display:inline-flex;align-items:center;min-height:34px;padding:0 10px;border:1px solid #304963;border-radius:9px;background:#13243A;color:#9DB2C8;font-size:12px;font-weight:700;white-space:nowrap}.update-version-chip b{margin-left:5px;color:#EAF2FB;font-variant-numeric:tabular-nums}.update-version-chip[data-state="available"]{border-color:#80612A;background:#3D3020;color:#FFD18A}.update-version-chip[data-state="latest"]{border-color:#236050;background:#153A35;color:#8EE7C0}.update-version-chip[data-state="error"]{border-color:#744151;background:#3D202D;color:#FFB4C2}.update-version-chip[data-state="checking"]{border-color:#80612A;background:#3D3020;color:#FFD18A}
 </style>
 <style id="uiPolishV1" media="not all">
 /* CraftWorld Modifier · cohesive desktop tool theme */
@@ -219,7 +237,7 @@ button:disabled{cursor:not-allowed!important;opacity:.48;transform:none!importan
 .magic-quick-dock,.magic-overview-card,.magic-section,.magic-card{background:linear-gradient(145deg,#17283f,#122137)!important;border-color:#2c4561!important;box-shadow:var(--ui-shadow)!important}.magic-quick-copy,.magic-overview-title,.magic-card-summary b,.magic-section>summary,.magic-card>summary{color:var(--ui-text)!important}.magic-quick-copy span,.magic-quick-status,.magic-card-summary span,.magic-aux-hint{color:var(--ui-muted)!important}.magic-section>summary,.magic-card>summary{background:transparent!important}.magic-card[open]>summary,.magic-section[open]>summary{background:#1b304a!important;border-bottom-color:#2e4865!important}.magic-card-body{color:var(--ui-text-soft)!important}.magic-view-btn{background:#1a2c42!important;color:var(--ui-text-soft)!important;border-color:#304963!important}.magic-view-btn.active{background:var(--ui-accent)!important;color:#152235!important;border-color:#f8b44a!important}.magic-mana-value{color:#fff!important}
 .modal-overlay{background:rgba(3,8,15,.78)!important;backdrop-filter:blur(8px)}.modal-box{background:linear-gradient(145deg,#17283f,#101d30)!important;border:1px solid #385471!important;box-shadow:0 24px 70px rgba(0,0,0,.48)!important;color:var(--ui-text)!important}.modal-title{color:var(--ui-text)!important;border-bottom-color:#29415d!important}.modal-field label,.dwarf-section-head span,.dwarf-training-controls label,.dwarf-spawn-grid label,.dwarf-spawn-skill-label{color:var(--ui-muted)!important}.modal-field input,.dwarf-training-controls select,.dwarf-training-controls input,.dwarf-spawn-grid select,.dwarf-spawn-skill-row select,.dwarf-spawn-skill-row input{background:#0d192a!important;color:var(--ui-text)!important;border-color:#304863!important}.modal-btns{border-top:1px solid #29415d;padding-top:14px}.modal-btns button{border:1px solid #304963!important}
 .gold-economy-modal,.mana-control-modal,.xp-control-modal,.portal-director-modal{background:linear-gradient(145deg,#17283f,#101d30)!important;border-color:#385471!important}.gold-economy-section,.mana-control-section,.xp-control-section,.portal-director-section,.pandora-directory,.pandora-panel{background:#13243a!important;border-color:#2c4561!important;color:var(--ui-text-soft)!important}.gold-economy-section h4,.mana-control-section h4,.xp-control-section h4,.portal-director-section h4,.pandora-panel h4,.pandora-directory h4{color:#ffd18a!important}.gold-economy-current,.mana-control-current,.xp-control-current,.portal-director-state{background:#26364d!important;color:#ffd18a!important}.gold-economy-events,.portal-director-points,.portal-director-history,.pandora-catalog-list,.pandora-queue{background:#0d192a!important;border-color:#2b4562!important}.gold-economy-event,.portal-director-history-row,.pandora-event-row,.pandora-queue-row{color:var(--ui-text-soft)!important;border-bottom-color:#203650!important;background:transparent!important}.pandora-event-row:hover,.pandora-event-row.active{background:#1c3450!important}.pandora-event-meta,.portal-director-note,.gold-economy-note,.mana-control-note,.xp-control-note,.pandora-director-note{color:var(--ui-muted)!important}.pandora-tag,.pandora-director-pill{background:#4b3420!important;color:#ffd18a!important}
-.dwarf-equipment-panel,.dwarf-equip-card,.dwarf-training-preview,.dwarf-training-list,.dwarf-spawn-skills,.dwarf-training-equipment-card{background:#13243a!important;border-color:#2b4561!important}.dwarf-equip-card label,.dwarf-training-equipment-slot-title,.dwarf-training-target b{color:var(--ui-text-soft)!important}.dwarf-equip-card select{background:#0d192a!important;color:var(--ui-text)!important;border-color:#304863!important}.dwarf-readonly-note,.dwarf-training-confirm-lead,.dwarf-training-confirm-list,.dwarf-training-confirm-row,.dwarf-spawn-note,.dwarf-preset-note{background:#182c43!important;border-color:#2d4965!important;color:var(--ui-text-soft)!important}.dwarf-training-confirm-chip{background:#3d3020!important;border-color:#856227!important;color:#ffd18a!important}
+.dwarf-equipment-panel,.dwarf-equip-card,.dwarf-training-preview,.dwarf-training-list,.dwarf-spawn-skills,.dwarf-training-equipment-card{background:#13243a!important;border-color:#2b4561!important}.dwarf-equip-card label,.dwarf-training-equipment-slot-title,.dwarf-training-target b{color:var(--ui-text-soft)!important}.dwarf-equip-card select{background:#0d192a!important;color:var(--ui-text)!important;border-color:#304863!important}.dwarf-readonly-note,.dwarf-training-confirm-lead,.dwarf-training-confirm-list,.dwarf-training-confirm-row,.dwarf-spawn-note,.dwarf-preset-note{background:#182c43!important;border-color:#2d4965!important;color:var(--ui-text-soft)!important}.dwarf-editable-tag{background:#153c37!important;color:#72e0b5!important}.dwarf-training-confirm-chip{background:#3d3020!important;border-color:#856227!important;color:#ffd18a!important}
 .map-protection,.map-toolbar,.map-tool-group{color:var(--ui-text-soft)!important}.map-protection{background:#182a3f!important;border-color:#3a536f!important}.map-protection .map-protection-copy b{color:var(--ui-text)!important}.map-protection .map-protection-state{background:#4b3420!important;color:#ffd18a!important}
 /* Inline legacy colors are normalized so newly injected panels match the theme. */
 [style*="#5C4E40"],[style*="#604B3C"],[style*="#765F4D"],[style*="#6E5E4D"],[style*="#51453B"],[style*="#4D4035"]{color:var(--ui-text-soft)!important}
@@ -299,7 +317,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 .update-center-status{padding:11px 13px;border:1px solid #2b4562;border-radius:10px;background:#182c43;color:var(--ui-text-soft);line-height:1.5}
 .update-center-status.ok{border-color:#236050;background:#153a35;color:#8ee7c0}.update-center-status.error{border-color:#744151;background:#3d202d;color:#ffb4c2}.update-center-status.pending{border-color:#80612a;background:#3d3020;color:#ffd18a}
 .update-center-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.update-center-row label{color:var(--ui-muted);font-size:13px}.update-center-row input{flex:1 1 360px;min-width:220px}
-.update-center-note,.update-center-detail{color:var(--ui-muted);font-size:12px;line-height:1.6}.update-center-detail{min-height:36px;padding:10px 12px;border:1px dashed #2b4562;border-radius:9px;background:#0d192a;white-space:pre-line}.update-center-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+.update-center-note,.update-center-detail{color:var(--ui-muted);font-size:12px;line-height:1.6}.update-center-detail{min-height:36px;padding:10px 12px;border:1px dashed #2b4562;border-radius:9px;background:#0d192a;white-space:pre-line}.update-center-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}.update-center-action-help{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px;padding:10px 12px;border:1px solid #233d59;border-radius:9px;background:#101f32;color:var(--ui-muted);font-size:12px;line-height:1.55}.update-center-action-help b{color:var(--ui-text)}.update-version-chip[data-state="checking"]{border-color:#80612a;background:#3d3020;color:#ffd18a}
 
 /* Status language: the text remains visible even when color is unavailable. */
 .dot{flex:0 0 auto}
@@ -327,6 +345,19 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 </style>
 </head>
 <body>
+<div class="app-titlebar pywebview-drag-region" ondblclick="titlebarToggleMaximize(event)" aria-label="打造世界修改器窗口标题栏">
+    <div class="app-titlebar-brand" aria-label="打造世界修改器 v1.0">
+        <svg class="app-titlebar-icon" aria-hidden="true" viewBox="0 0 32 32"><defs><linearGradient id="appIconBg" x1="4" y1="3" x2="28" y2="30" gradientUnits="userSpaceOnUse"><stop stop-color="#F49A3D"/><stop offset="1" stop-color="#C45F25"/></linearGradient><linearGradient id="appIconGem" x1="12" y1="10" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#FFF2AF"/><stop offset="1" stop-color="#FFD258"/></linearGradient></defs><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8" fill="url(#appIconBg)"/><path d="M7 24.5 21.4 10.1M9 8.5c4.2-2.1 8.9-1.5 12.5.6M19.6 9.2c2.1 3.6 2.7 8.3.6 12.5" stroke="#4B3024" stroke-width="3.15" stroke-linecap="round"/><path d="m16.4 9.6 2.2-2.2a2.05 2.05 0 0 1 2.9 0l2.1 2.1a2.05 2.05 0 0 1 0 2.9l-2.2 2.2" fill="none" stroke="#4B3024" stroke-width="2.35" stroke-linecap="round"/><path d="m16 14.1 4.7 4.7-4.7 6.4-4.7-6.4L16 14.1Z" fill="url(#appIconGem)" stroke="#75442A" stroke-width="1.35" stroke-linejoin="round"/><path d="m16 14.1 0 11.1m-4.7-6.4h9.4" stroke="#A35B2E" stroke-width="1.05" stroke-linejoin="round"/></svg>
+        <span>打造世界修改器</span><span class="app-titlebar-version">v1.0</span>
+    </div>
+    <span class="app-titlebar-drag-copy" aria-hidden="true">Craft The World Modifier</span>
+    <div class="app-titlebar-spacer" aria-hidden="true"></div>
+    <div class="app-window-controls" onmousedown="titlebarControlMouseDown(event)">
+        <button class="app-window-control" type="button" aria-label="最小化窗口" title="最小化" onclick="titlebarWindowControl('minimize',event)"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+        <button id="titlebarMaximize" class="app-window-control" type="button" aria-label="最大化窗口" title="最大化" aria-pressed="false" onclick="titlebarWindowControl('toggle_maximize',event)"><svg viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" rx="1"/></svg></button>
+        <button class="app-window-control close" type="button" aria-label="关闭修改器" title="关闭" onclick="titlebarWindowControl('close',event)"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+    </div>
+</div>
 <div class="sidebar">
     <div class="logo">CraftWorld</div>
     <div class="nav-item active" onclick="switchTab('basic')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg></span> 基础功能</div>
@@ -350,6 +381,8 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <button id="saveManagerBtn" class="save-manager-button" onclick="openSaveManager()" title="只能在 CraftWorld.exe 关闭后备份、校验和恢复"><span aria-hidden="true">▣</span> 离线存档</button>
         <button id="worldDiagnosticsBtn" class="save-manager-button" onclick="openWorldDiagnostics()" title="查看任务与世界运行时状态" style="display:none"><span aria-hidden="true">◎</span> 世界诊断</button>
         <button class="operation-log-button" onclick="openOperationLog()" title="查看本次修改器会话的操作记录"><span aria-hidden="true">≡</span> 操作记录<span class="operation-log-count" id="operationLogCount">0</span></button>
+        <span id="updateVersionChip" class="update-version-chip" role="status" aria-atomic="true" title="当前版本与启动时检查到的 GitHub 最新版本">当前 <b id="updateCurrentVersion">v1.0.0</b> · 最新 <b id="updateLatestVersion">未检查</b></span>
+        <button id="updateCenterButton" class="btn btn-light" onclick="openUpdateCenter()" title="打开更新中心">检查更新</button>
         <span id="logText" class="log-msg"></span>
     </div>
     <div class="feature-preset-dock" aria-label="功能预设快捷栏">
@@ -362,14 +395,13 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <button class="btn btn-light" onclick="deleteFeaturePreset()" title="删除选中的预设">删除</button>
         <button class="btn btn-light" onclick="refreshFeaturePresets()" title="刷新预设列表" style="padding:8px 10px">↻</button>
         <span id="featurePresetStatus" class="preset-help">保存时间、速度、法力上限锁定、常用物品和地图标记</span>
-        <button id="updateCenterButton" class="btn btn-light" onclick="openUpdateCenter()" title="检查修改器自身更新">更新中心</button>
     </div>
     </div>
     <div class="panel active" id="panel-basic">
         <div class="header" style="display:flex;align-items:center;gap:12px"><h1 style="flex:1">基础功能</h1><span id="basicReadStatus" style="font-size:12px;color:#A98C6A">等待读取</span><button class="btn btn-light" onclick="refreshBasicState(true)">↻ 重新读取</button></div>
         <div class="cards">
             <div class="card">
-                <div class="card-title">金币与哥布林商店</div>
+                <div class="card-title">金币</div>
                 <div class="row">
                     <input id="goldVal" value="" placeholder="未读取" style="width:120px">
                     <button class="btn btn-light" onclick="refreshBasicState(true)">读取</button>
@@ -377,7 +409,6 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
                     <button class="btn btn-light" onclick="writeBasicFixed('金币','goldVal','write_gold',1000)">+1K</button>
                     <button class="btn btn-light" onclick="writeBasicFixed('金币','goldVal','write_gold',10000)">+10K</button>
                     <button class="btn btn-light lock-btn" id="goldLock" onclick="toggleLock('gold')">🔓</button>
-                    <button class="btn btn-orange" onclick="openProcurementCenter()">采购中心</button>
                 </div>
             </div>
             <div class="card">
@@ -492,7 +523,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <h1 style="flex:1">🔮 魔法道具</h1>
             <button class="btn btn-light" onclick="refreshMagicItems(true)" style="padding:10px 18px">🔄 重新定位</button>
         </div>
-        <div style="color:#8C7C6E;font-size:13px;margin:-8px 0 16px">连接时会一次性定位并缓存所有支持的魔法参数；平时修改不会重新搜索。游戏重启后请重新连接。</div>
+        <div style="color:#8C7C6E;font-size:13px;margin:-8px 0 16px">魔法参数、快捷操作与原生收集均在本页显示；首次进入本页时定位并缓存当前版本数据。</div>
         <div class="magic-quick-dock" id="magicQuickDock">
             <div class="magic-quick-copy">
                 <b>🧲 常用魔法</b>
@@ -514,7 +545,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             </section>
         </div>
         <div class="cards" id="magicCards">
-            <div class="card wide" style="color:#B8A89A;text-align:center">连接游戏后自动定位魔法数据</div>
+            <div class="card wide" style="color:#B8A89A;text-align:center">连接游戏后，打开本页或点击“刷新状态”即可定位魔法数据</div>
         </div>
     </div>
 
@@ -645,7 +676,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
                 <button id="mapLabelNone" class="btn btn-light" onclick="mapSetLabels('none')">隐藏</button><button id="mapLabelNames" class="btn btn-light" onclick="mapSetLabels('names')">名称</button><button id="mapLabelIds" class="btn btn-light" onclick="mapSetLabels('ids')">ID</button>
             </div>
             <div class="map-tool-group"><span class="map-tool-label">图层</span>
-                <button id="mapLayerGround" class="btn btn-peach" onclick="mapToggleLayer('ground')" title="显示 w2 方块层">地表</button><button id="mapLayerUnderground" class="btn btn-peach" onclick="mapToggleLayer('underground')" title="显示 bg 材质层">地下</button><button id="mapLayerWater" class="btn btn-peach" onclick="mapToggleLayer('water')">水</button><button id="mapLayerBuildings" class="btn btn-light" disabled title="当前版本尚无已验证的建筑分类表，不将 front 外层 ID 伪装成建筑">建筑（暂不支持）</button><button id="mapLayerEntities" class="btn btn-peach" onclick="mapToggleLayer('entities')" title="显示 front 外层实体 ID">实体</button><button id="mapLayerMarkers" class="btn btn-peach" onclick="mapToggleLayer('markers')">标记</button>
+                <button id="mapLayerGround" class="btn btn-peach" onclick="mapToggleLayer('ground')" title="显示 w2 方块层">地表</button><button id="mapLayerUnderground" class="btn btn-peach" onclick="mapToggleLayer('underground')" title="显示 bg 材质层">地下</button><button id="mapLayerWater" class="btn btn-peach" onclick="mapToggleLayer('water')">水</button><button id="mapLayerEntities" class="btn btn-peach" onclick="mapToggleLayer('entities')" title="显示 front 外层实体 ID">实体</button><button id="mapLayerMarkers" class="btn btn-peach" onclick="mapToggleLayer('markers')">标记</button>
             </div>
             <div class="map-tool-group"><span class="map-tool-label">操作</span>
                 <button id="mapPanTool" class="btn btn-light" onclick="mapSetTool('pan')">平移</button><button id="mapSelectTool" class="btn btn-light" onclick="mapSetTool('select')">框选</button><button class="btn btn-light" onclick="mapClearSelection()">清除</button><button class="btn btn-peach" data-map-write onclick="mapFillSelection()">填充</button>
@@ -657,7 +688,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
                 <button class="btn btn-peach" data-map-write onclick="mapExploreAll()" title="仅清除整张地图的未探索标记，不修改方块、地形或水">全图已探索</button>
             </div>
             <div class="map-tool-group"><span class="map-tool-label">导航</span>
-                <button class="btn btn-light" onclick="mapZoomIn()">＋</button><button class="btn btn-light" onclick="mapZoomOut()">－</button><button class="btn btn-light" onclick="mapFit()">适应</button><button class="btn btn-light" onclick="mapLocateInput()">定位</button><button class="btn btn-light" onclick="mapFindSelectedResource()" title="只在点击后扫描一次当前地图，查找上方选中的方块">找资源</button><select id="mapDwarves" onchange="mapJumpDwarf(this.value)" title="&#x5FEB;&#x901F;&#x5B9A;&#x4F4D;&#x77EE;&#x4EBA;" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">&#x77EE;&#x4EBA;</option></select><button id="mapPortalLocate" class="btn btn-light" disabled title="&#x5F53;&#x524D;&#x7248;&#x672C;&#x6CA1;&#x6709;&#x5DF2;&#x9A8C;&#x8BC1;&#x7684;&#x4F20;&#x9001;&#x95E8;&#x5730;&#x56FE;&#x5750;&#x6807;&#xFF0C;&#x4E0D;&#x663E;&#x793A;&#x731C;&#x6D4B;&#x4F4D;&#x7F6E;">&#x4F20;&#x9001;&#x95E8;&#xFF08;&#x6682;&#x4E0D;&#x652F;&#x6301;&#xFF09;</button><button class="btn btn-light" onclick="mapOpenPinDialog()">标记</button><select id="mapPins" onchange="mapJumpPin(this.value)" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">标记点</option></select>
+                <button class="btn btn-light" onclick="mapZoomIn()">＋</button><button class="btn btn-light" onclick="mapZoomOut()">－</button><button class="btn btn-light" onclick="mapFit()">适应</button><button class="btn btn-light" onclick="mapLocateInput()">定位</button><button class="btn btn-light" onclick="mapFindSelectedResource()" title="只在点击后扫描一次当前地图，查找上方选中的方块">找资源</button><select id="mapDwarves" onchange="mapJumpDwarf(this.value)" title="&#x5FEB;&#x901F;&#x5B9A;&#x4F4D;&#x77EE;&#x4EBA;" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">&#x77EE;&#x4EBA;</option></select><button class="btn btn-light" onclick="mapOpenPinDialog()">标记</button><select id="mapPins" onchange="mapJumpPin(this.value)" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">标记点</option></select>
             </div>
         </div>
         <div style="position:relative;border:1px solid #E0D6CC;border-radius:8px;overflow:hidden;background:#0b0e14">
@@ -764,7 +795,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <section class="xp-control-section"><h4>当前成长状态</h4><div id="xpControlCurrent" class="xp-control-current">—</div><div id="xpControlDetail" class="xp-control-note" style="margin-top:9px">等待读取经验进度…</div><div class="xp-control-row"><button class="btn btn-light" onclick="refreshXpControl()">↻ 读取</button><button class="btn btn-light" onclick="xpProgressOperation('next')">一键到下一等级</button></div></section>
             <section class="xp-control-section"><h4>等级目标</h4><div class="xp-control-row"><button class="btn btn-light" onclick="xpProgressOperation('add_levels',1)">+1 级</button><button class="btn btn-light" onclick="xpProgressOperation('add_levels',5)">+5 级</button><button class="btn btn-light" onclick="xpProgressOperation('add_levels',10)">+10 级</button></div><div class="xp-control-row"><label for="xpTargetLevel">目标等级</label><input id="xpTargetLevel" type="number" min="1" step="1"><button class="btn btn-peach" onclick="xpSetTargetLevel()">设为该等级</button></div><div class="xp-control-row"><button class="btn btn-orange" onclick="xpProgressOperation('max_level')">升至已识别最高等级</button></div><div class="xp-control-note">目标等级按等级表的 0% 进度写入，不附加额外溢出经验。</div></section>
             <section class="xp-control-section"><h4>当前等级进度</h4><div class="xp-control-row"><button class="btn btn-light" onclick="xpProgressOperation('progress',0)">0%</button><button class="btn btn-light" onclick="xpProgressOperation('progress',25)">25%</button><button class="btn btn-light" onclick="xpProgressOperation('progress',50)">50%</button><button class="btn btn-light" onclick="xpProgressOperation('progress',75)">75%</button><button class="btn btn-light" onclick="xpProgressOperation('progress',99)">99%</button></div><div class="xp-control-row"><button class="btn btn-peach" onclick="xpProgressOperation('next_minus_one')">差 1 点经验升级</button><button class="btn btn-light" onclick="xpProgressOperation('level_start')">刚升完级 · 0%</button></div><div class="xp-control-note">每次操作都会在写入前显示预期目标，并在写后重新读取经验值。</div></section>
-            <section class="xp-control-section wide"><h4>高级经验模式</h4><div id="xpAdvancedStatus" class="xp-advanced-lab">正在读取经验高级模式定位状态…</div><div class="xp-control-note" style="margin-top:8px">打开后查看高级经验定位状态；当前等级、进度和下一等级操作请使用上方按钮。</div></section>
+            <section class="xp-control-section wide" style="display:none"><h4>高级经验模式</h4><div id="xpAdvancedStatus" class="xp-advanced-lab">正在读取经验高级模式定位状态…</div><div class="xp-control-note" style="margin-top:8px">打开后查看高级经验定位状态；当前等级、进度和下一等级操作请使用上方按钮。</div></section>
         </div></div>
     </div>
 </div>
@@ -777,7 +808,6 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <section class="portal-director-section"><h4>倒计时控制</h4><div class="portal-director-row"><label for="portalDirectorSeconds">精确秒数</label><input id="portalDirectorSeconds" type="number" min="0" step="1"><button class="btn btn-peach" onclick="portalDirectorSetCountdown()">设置</button></div><div class="portal-director-row"><button class="btn btn-light" onclick="portalDirectorAddCountdown(30)">+30 秒</button><button class="btn btn-light" onclick="portalDirectorAddCountdown(60)">+1 分钟</button><button class="btn btn-light" onclick="portalDirectorAddCountdown(300)">+5 分钟</button><button class="btn btn-light" onclick="portalDirectorAddCountdown(600)">+10 分钟</button></div><div class="portal-director-row"><button class="btn btn-light" onclick="portalDirectorSetCountdownValue(0)">立刻触发</button><button class="btn btn-light" onclick="portalDirectorSetCountdownValue(60)">1 分钟后</button><button class="btn btn-light" onclick="portalDirectorSetCountdownValue(300)">5 分钟后</button></div><div class="portal-director-row"><button id="portalDirectorPauseBtn" class="btn btn-orange" onclick="portalDirectorTogglePause()">暂停倒计时</button></div><div class="portal-director-note">暂停使用现有倒计时锁定；恢复后从锁定的秒数继续。倒计时倍率需要额外验证原生计时更新链，暂不伪造倍率按钮。</div></section>
             <section class="portal-director-section"><h4>红门场景生成</h4><div class="portal-director-row"><label for="portalDirectorStrategy">位置策略</label><select id="portalDirectorStrategy"><option value="single">单门测试 · 指定坐标</option><option value="double">双门夹击 · 中心两侧</option><option value="triple">三门围攻 · 围绕中心</option><option value="edge">边界随机门</option><option value="area">指定区域随机门</option><option value="line">直线排列</option><option value="ring">环形排列</option></select></div><div class="portal-director-row"><label for="portalDirectorCol">中心列</label><input id="portalDirectorCol" type="number" min="0" step="1"><label for="portalDirectorRow">行</label><input id="portalDirectorRow" type="number" min="0" step="1"></div><div class="portal-director-row"><label for="portalDirectorCount">门数量</label><input id="portalDirectorCount" type="number" min="1" max="20" value="1"><label for="portalDirectorDuration">持续秒数</label><input id="portalDirectorDuration" type="number" min="1" max="3600" value="60"></div><div class="portal-director-row"><label for="portalDirectorRadius">半径 / 间距</label><input id="portalDirectorRadius" type="number" min="1" value="12"><label style="min-width:auto"><input id="portalDirectorAvoidDwarves" type="checkbox" checked style="width:auto;height:auto;margin-right:5px">避开矮人</label><label style="min-width:auto"><input id="portalDirectorAvoidWater" type="checkbox" style="width:auto;height:auto;margin-right:5px">避开已读取水域</label></div><div class="portal-director-row"><button class="btn btn-light" onclick="portalDirectorGeneratePoints()">生成落点预览</button><button class="btn btn-orange" onclick="portalDirectorSpawn()">执行场景</button></div></section>
             <section class="portal-director-section"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><h4 style="margin:0">场景预览</h4><span id="portalDirectorPreviewCount" class="portal-director-note">0 个落点</span><button class="btn btn-light" onclick="portalDirectorClearPreview(false)" style="margin-left:auto;padding:6px 10px">清除预览</button></div><div id="portalDirectorPoints" class="portal-director-points"><div class="portal-director-point">尚未生成场景落点。</div></div><div class="portal-director-note" style="margin-top:8px"><b>使用方式：</b>先选择位置策略并填写参数 → 点击“生成落点预览” → 确认预览后点击“执行场景”。修改策略或坐标后应重新生成预览。</div></section>
-            <section class="portal-director-section wide"><h4>红门场景预设</h4><div class="portal-director-row"><button class="btn btn-light" onclick="portalDirectorBuiltin('single')">应用单门测试 · 60 秒</button><button class="btn btn-light" onclick="portalDirectorBuiltin('double')">应用双门防守 · 180 秒</button><button class="btn btn-light" onclick="portalDirectorBuiltin('edge')">应用边境骚扰 · 120 秒</button><button class="btn btn-light" onclick="portalDirectorBuiltin('ring')">应用围城演练 · 300 秒</button><span class="portal-director-note">点击后只会填入参数并生成预览，不会立即生成红门。</span></div><div class="portal-director-row"><label for="portalDirectorPresetSelect">已保存方案</label><select id="portalDirectorPresetSelect" onchange="portalDirectorLoadPreset()" style="min-width:220px"><option value="">选择已保存方案</option></select><button class="btn btn-peach" onclick="portalDirectorApplySavedPreset()">载入到编辑区</button><button class="btn btn-light" onclick="portalDirectorExportPresets()">导出方案</button><button class="btn btn-light" onclick="portalDirectorImportPresets()">导入方案</button></div><div class="portal-director-row"><label for="portalDirectorPresetName">新方案名称</label><input id="portalDirectorPresetName" maxlength="40" placeholder="例如：基地右侧双门" style="width:200px"><button class="btn btn-orange" onclick="portalDirectorSavePreset()">保存当前预览</button><button class="btn btn-light" onclick="portalDirectorRenamePreset()">重命名所选</button><button class="btn btn-light" onclick="portalDirectorCopyPreset()">复制所选</button></div><div class="portal-director-note">“保存当前预览”保存当前已确认的落点、持续时间和策略；选择一个已保存方案后，先“载入到编辑区”，检查预览，再执行场景。</div></section>
             <section class="portal-director-section wide"><h4>本次事件历史</h4><div id="portalDirectorHistory" class="portal-director-history"><div class="portal-director-history-row"><small>—</small><span>尚无记录</span><span>创建、结束和状态恢复会记录在这里。</span></div></div></section>
         </div></div>
     </div>
@@ -940,13 +970,13 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <div class="modal-overlay" id="dwarfModal">
     <div class="modal-box dwarf-modal-box">
         <div class="modal-title">🧙 编辑矮人 <span id="modalDwarfIdx" style="font-weight:400;color:#B8A89A">#0</span></div>
-        <div class="dwarf-readonly-note">使用方式：个人技能和装备槽可在本窗口编辑并保存；姓名、坐标、血量与饱食度目前只提供读取。</div>
-        <div class="modal-field" style="grid-column:1/-1"><label>名字 <span class="dwarf-readonly-tag">只读</span></label><input id="modalName" type="text" placeholder="当前稳定版只读" disabled title="姓名写入尚未完成完整验收，当前稳定版仅供查看"></div>
+        <div class="dwarf-readonly-note">坐标、血量和饱食度会在游戏暂停事务中写入，并立即读回确认；校验失败会自动回滚。显示名只影响修改器列表，不会篡改游戏原生姓名。</div>
+        <div class="modal-field" style="grid-column:1/-1"><label for="modalName">修改器显示名 <span class="dwarf-editable-tag">可编辑</span></label><input id="modalName" type="text" maxlength="48" placeholder="留空则显示游戏原生姓名" title="仅修改修改器内的显示名称；不会写入游戏原生字符串"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div class="modal-field"><label>X 坐标 <span class="dwarf-readonly-tag">只读</span></label><input id="modalX" type="text" disabled title="坐标写入尚未完成完整验收，当前稳定版仅供查看"></div>
-            <div class="modal-field"><label>Y 坐标 <span class="dwarf-readonly-tag">只读</span></label><input id="modalY" type="text" disabled title="坐标写入尚未完成完整验收，当前稳定版仅供查看"></div>
-            <div class="modal-field"><label>血量 (HP) <span class="dwarf-readonly-tag">只读</span></label><input id="modalHP" type="text" disabled title="血量写入尚未完成完整验收，当前稳定版仅供查看"></div>
-            <div class="modal-field"><label>饱食度 <span class="dwarf-readonly-tag">只读</span></label><input id="modalSat" type="text" disabled title="饱食度写入尚未完成完整验收，当前稳定版仅供查看"></div>
+            <div class="modal-field"><label for="modalX">X 坐标 <span class="dwarf-editable-tag">可编辑</span></label><input id="modalX" type="number" step="0.01" min="0" max="20000" inputmode="decimal" title="范围 0 ～ 20000；保存后立即读回确认"></div>
+            <div class="modal-field"><label for="modalY">Y 坐标 <span class="dwarf-editable-tag">可编辑</span></label><input id="modalY" type="number" step="0.01" min="0" max="20000" inputmode="decimal" title="范围 0 ～ 20000；保存后立即读回确认"></div>
+            <div class="modal-field"><label for="modalHP">血量 (HP) <span class="dwarf-editable-tag">可编辑</span></label><input id="modalHP" type="number" step="0.1" min="0" max="100000" inputmode="decimal" title="范围 0 ～ 100000；保存后立即读回确认"></div>
+            <div class="modal-field"><label for="modalSat">饱食度 <span class="dwarf-editable-tag">可编辑</span></label><input id="modalSat" type="number" step="0.1" min="0" max="10" inputmode="decimal" title="范围 0 ～ 10；保存后立即读回确认"></div>
         </div>
         <div class="dwarf-section">
             <div class="dwarf-section-head"><b>⚔️ 装备栏</b><span>每个槽位只显示游戏允许装备的物品；选择“无装备”可卸下。</span></div>
@@ -958,7 +988,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         </div>
         <div class="modal-btns">
             <button class="btn btn-light" onclick="closeDwarfModal()" style="padding:8px 20px">取消</button>
-            <button class="btn btn-orange" onclick="saveDwarfModal()" style="padding:8px 20px">保存</button>
+            <button id="modalDwarfSave" class="btn btn-orange" onclick="saveDwarfModal()" style="padding:8px 20px">保存</button>
         </div>
     </div>
 </div>
@@ -1166,9 +1196,10 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <div class="modal-overlay" id="updateCenterModal" onclick="if(event.target===this)closeUpdateCenter()">
     <div class="modal-box update-center-box" role="dialog" aria-modal="true" aria-labelledby="updateCenterTitle">
         <div class="modal-title" id="updateCenterTitle">修改器更新</div>
-        <div class="update-center-status" id="updateCenterStatus">启动时会自动检查内置更新服务。</div>
-        <div class="update-center-note">更新地址已内置在修改器中；只会替换修改器自身文件，不会覆盖用户配置、存档、游戏目录或本地模组数据。</div>
-        <div class="update-center-actions"><button class="btn btn-orange" onclick="checkModifierUpdate()">立即检查</button><button class="btn btn-peach" id="stageUpdateBtn" onclick="stageModifierUpdate()" disabled>下载并校验</button><button class="btn btn-orange" id="applyUpdateBtn" onclick="applyModifierUpdate()" disabled>应用并重启</button><button class="btn btn-light" onclick="closeUpdateCenter()">关闭</button></div>
+        <div class="update-center-status" id="updateCenterStatus">尚未检查更新。</div>
+        <div class="update-center-note">启动时会在后台检查一次，并只更新顶部版本信息；不会自动下载、替换或重启。更新地址已内置在修改器中，更新只会替换修改器自身文件，不会覆盖用户配置、存档、游戏目录或本地模组数据。</div>
+        <div class="update-center-actions"><button class="btn btn-orange" type="button" onclick="checkModifierUpdate()" title="重新读取 GitHub 最新 Release；不会下载">立即检查</button><button class="btn btn-peach" id="stageUpdateBtn" type="button" onclick="stageModifierUpdate()" title="下载新版本并校验文件完整性；暂不替换当前程序" disabled>下载并校验</button><button class="btn btn-orange" id="applyUpdateBtn" type="button" onclick="applyModifierUpdate()" title="使用已校验的暂存包替换文件，并自动重新启动" disabled>应用并重启</button><button class="btn btn-light" type="button" onclick="closeUpdateCenter()" title="关闭更新中心，不执行任何更新操作">关闭</button></div>
+        <div class="update-center-action-help" role="note"><span><b>立即检查</b>：重新读取 GitHub 最新版本，不下载。</span><span><b>下载并校验</b>：下载更新包，验证大小和 SHA-256 后暂存。</span><span><b>应用并重启</b>：用已暂存的更新包替换修改器文件，然后自动重启。</span><span><b>关闭</b>：仅关闭此窗口，不执行更新。</span></div>
         <div class="update-center-detail" id="updateCenterDetail"></div>
     </div>
 </div>
@@ -1625,23 +1656,71 @@ function closeOperationLog(){ document.getElementById('operationLogModal').class
 var _updateCheck=null;
 function updateCenterSetStatus(text,kind){var el=document.getElementById('updateCenterStatus');if(!el)return;el.className='update-center-status '+(kind||'');el.textContent=String(text||'');}
 function updateCenterSetDetail(text){var el=document.getElementById('updateCenterDetail');if(el)el.textContent=String(text||'');}
+function updateQuickState(current,latest,state){
+    var currentEl=document.getElementById('updateCurrentVersion'),latestEl=document.getElementById('updateLatestVersion'),chip=document.getElementById('updateVersionChip');
+    if(currentEl)currentEl.textContent='v'+String(current||'1.0.0').replace(/^v/i,'');
+    if(latestEl)latestEl.textContent=String(latest||'未检查');
+    if(chip){if(state)chip.setAttribute('data-state',state);else chip.removeAttribute('data-state');}
+}
+function updateQuickButtonState(result){
+    var button=document.getElementById('updateCenterButton');if(!button)return;
+    var staged=result&&result.staged;
+    if(staged&&staged.version){button.textContent='应用 v'+staged.version;button.title='已下载并校验，点击完成更新';button.classList.add('update-available');return;}
+    if(result&&result.ok&&result.available){button.textContent='更新 v'+result.version;button.title='发现新版本，点击下载并更新';button.classList.add('update-available');return;}
+    button.textContent='检查更新';button.title='手动检查修改器更新';button.classList.remove('update-available');
+}
 function updateCenterRender(result){
     var stage=document.getElementById('stageUpdateBtn'),apply=document.getElementById('applyUpdateBtn');
     if(stage)stage.disabled=!(result&&result.ok&&result.available&&result.package_ready);
     if(apply)apply.disabled=!(result&&result.staged&&result.staged.files&&result.staged.files.length);
     if(!result)return;
-    if(!result.ok){updateCenterSetStatus(result.error||'更新检查失败','error');return;}
-    if(result.staged){updateCenterSetStatus('已暂存 '+result.staged.version+'，等待应用。','pending');updateCenterSetDetail('文件：'+(result.staged.files||[]).join('、'));return;}
-    if(!result.available){updateCenterSetStatus('当前版本 '+(result.current_version||result.version||'1.0.0')+' 已是最新。','ok');updateCenterSetDetail(result.message||'');return;}
-    updateCenterSetStatus('发现新版本 '+result.version,'pending');var m=result.manifest||{};var p=m.package||{};updateCenterSetDetail('当前：'+(result.current_version||'1.0.0')+'\n新版本：'+result.version+'\n包大小：'+(p.size?Number(p.size).toLocaleString('zh-CN')+' 字节':'未声明')+'\nSHA-256：'+(p.sha256||'未声明')+'\n'+(m.notes||''));
+    var current=result.current_version||result.version||'1.0.0',latest=result.latest_version||result.version||'未检查';
+    if(!result.ok){updateQuickState(current,'检查失败','error');updateQuickButtonState(null);updateCenterSetStatus(result.error||'更新检查失败','error');return;}
+    if(result.staged){updateQuickState(current,result.staged.version,'available');updateQuickButtonState(result);updateCenterSetStatus('已暂存 '+result.staged.version+'，等待应用。','pending');updateCenterSetDetail('文件：'+(result.staged.files||[]).join('、'));return;}
+    if(!result.available){var state=latest===current?'latest':'';updateQuickState(current,latest,state);updateQuickButtonState(result);updateCenterSetStatus(latest==='未发布'?'GitHub 暂未发布可用版本。':'当前版本 '+current+' 已是最新。',latest==='未发布'?'':'ok');updateCenterSetDetail(result.message||'');return;}
+    updateQuickState(current,latest,'available');updateQuickButtonState(result);updateCenterSetStatus('发现新版本 '+result.version,'pending');var m=result.manifest||{};var p=m.package||{};updateCenterSetDetail('当前：'+current+'\n新版本：'+result.version+'\n包大小：'+(p.size?Number(p.size).toLocaleString('zh-CN')+' 字节':'未声明')+'\nSHA-256：'+(p.sha256||'未声明')+'\n'+(m.notes||''));
 }
-function openUpdateCenter(){var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.add('active');call('get_update_info',function(info){if(info&&info.staged){updateCenterSetStatus('已暂存 '+info.staged.version+'，等待应用。','pending');updateCenterSetDetail('文件：'+(info.staged.files||[]).join('、'));var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;}else if(info&&!info.feed_url){updateCenterSetStatus('内置更新服务尚未配置，暂时无法检查。','error');}else updateCenterSetStatus('当前版本 '+((info&&info.version)||'1.0.0')+'；可立即检查更新。');});}
+function openUpdateCenter(){
+    var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.add('active');
+    call('get_update_info',function(info){
+        var current=(info&&info.version)||'1.0.0';
+        if(info&&info.staged){_updateCheck={ok:true,current_version:current,staged:info.staged};updateCenterRender(_updateCheck);return;}
+        if(_updateCheck){updateCenterRender(_updateCheck);return;}
+        if(_updateAutoCheckInFlight){updateCenterSetStatus('正在后台检查 GitHub Releases…','pending');updateCenterSetDetail('检查完成后，顶部“最新版本”会自动更新。');return;}
+        updateQuickState(current,'未检查','');
+        updateCenterSetStatus('当前版本 '+current+'；尚未检查 GitHub 最新版本。');updateCenterSetDetail('点击“立即检查”可重新读取 GitHub Releases。');
+    });
+}
 function closeUpdateCenter(){var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.remove('active');}
-function checkModifierUpdate(){updateCenterSetStatus('正在检查更新…','pending');updateCenterSetDetail('');call('check_for_update',function(r){_updateCheck=r;updateCenterRender(r);});}
-function stageModifierUpdate(){updateCenterSetStatus('正在下载并校验更新包…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'暂存更新失败','error');return;}updateCenterSetStatus('更新包已校验并暂存。','ok');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包已暂存：'+r.version,'success');});}
+function checkModifierUpdate(){var quick=document.getElementById('updateCenterButton');if(quick){quick.disabled=true;quick.textContent='正在检查…';}updateCenterSetStatus('正在检查 GitHub Releases…','pending');updateCenterSetDetail('');call('check_for_update',function(r){if(quick)quick.disabled=false;_updateCheck=r;updateCenterRender(r);});}
+function stageModifierUpdate(){updateCenterSetStatus('正在下载并校验更新包…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'暂存更新失败','error');return;}updateCenterSetStatus('更新包已校验并暂存。','ok');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));updateQuickState(r.current_version||'1.0.0',r.version,'available');updateQuickButtonState({ok:true,staged:{version:r.version}});var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包已暂存：'+r.version,'success');});}
 function applyModifierUpdate(){updateCenterSetStatus('正在安排重启更新…','pending');call('apply_staged_update',function(r){if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'应用更新失败','error');return;}updateCenterSetStatus(r.message||'更新已排队；即将重启。','ok');log('修改器更新已排队，准备重启','success');scheduleUiTimeout(function(){beginUiShutdown();},350);});}
-function updateCenterSetAvailable(version){var button=document.getElementById('updateCenterButton');if(!button)return;if(version){button.textContent='更新中心 · '+version;button.title='发现新版本 '+version+'，点击查看';button.classList.add('update-available');}else{button.textContent='更新中心';button.title='检查修改器自身更新';button.classList.remove('update-available');}}
-function autoCheckModifierUpdate(){call('check_for_update',function(result){if(!result||!result.ok){return;}if(result.available){updateCenterSetAvailable(result.version);log('发现修改器新版本 '+result.version+'，可打开更新中心查看','info');}else updateCenterSetAvailable('');});}
+var _updateAutoCheckInFlight=false;
+function autoCheckModifierUpdateDisplayOnly(currentVersion){
+    if(_updateAutoCheckInFlight)return;
+    _updateAutoCheckInFlight=true;
+    call('check_for_update',function(result){
+        _updateAutoCheckInFlight=false;
+        _updateCheck=result||{ok:false,current_version:currentVersion||'1.0.0',error:'更新检查没有返回结果'};
+        var current=(result&&result.current_version)||currentVersion||'1.0.0';
+        if(!result||!result.ok){updateQuickState(current,'检查失败','error');updateQuickButtonState(null);return;}
+        var latest=result.latest_version||result.version||'未发布';
+        var state=result.available?'available':(latest===current?'latest':'');
+        updateQuickState(current,latest,state);
+        updateQuickButtonState(result);
+    });
+}
+function initializeUpdateStatus(){
+    call('get_update_info',function(info){
+        if(!info||!info.ok)return;
+        var current=info.version||'1.0.0';
+        if(info.staged){_updateCheck={ok:true,current_version:current,staged:info.staged};updateQuickState(current,info.staged.version,'available');updateQuickButtonState(_updateCheck);return;}
+        updateQuickState(current,'检查中…','checking');
+        // Let the first paint settle before opening the network request.  This
+        // remains display-only and never enters the normal operation log.
+        scheduleUiTimeout(function(){autoCheckModifierUpdateDisplayOnly(current);},900);
+    });
+}
 function clearOperationLog(){ _operationLog=[]; setTopLog(null); renderOperationLog(); }
 function operationLogText(){
     return _operationLog.map(function(entry){ return '['+operationTime(entry.at)+'] ['+operationStateText(entry.level)+'] '+entry.message; }).join('\n');
@@ -1742,6 +1821,7 @@ function invalidateUiSessionRequests() {
     // “正在读取” state from the old session and stop refreshing that panel.
     _dwarfRefreshBusy=false; _itemScanBusy=false; _itemRefreshBusy=false;
     _basicReadPending=false; _gameTimeReadPending=false; _pandoraRuntimeBusy=false;
+    _magicRefreshRequested=false; _magicRenderFingerprint='';
     _mapScanning=false; _mapStatusScanning=false; _mapRegionScanning=false;
     _localDataSyncing=false;
 }
@@ -1781,6 +1861,44 @@ function call(method) {
         return;
     }
     invokeApi(method, args, cb, null);
+}
+function titlebarControlMouseDown(event){
+    // Prevent pywebview's drag-region handler from treating window controls
+    // as a draggable part of the title bar.
+    if(event) event.stopPropagation();
+}
+function titlebarSetMaximized(maximized){
+    var button=document.getElementById('titlebarMaximize');
+    if(!button)return;
+    var isMaximized=!!maximized;
+    button.setAttribute('aria-pressed',String(isMaximized));
+    button.setAttribute('aria-label',isMaximized?'还原窗口':'最大化窗口');
+    button.title=isMaximized?'还原':'最大化';
+    button.innerHTML=isMaximized?'<svg viewBox="0 0 24 24"><rect x="8" y="5.5" width="10.5" height="10.5" rx="1"/><path d="M5.5 8v10.5h10.5"/></svg>':'<svg viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" rx="1"/></svg>';
+}
+function titlebarWindowControl(action,event){
+    if(event){event.preventDefault();event.stopPropagation();}
+    if(action==='close'){
+        // Stop every UI timer before the native close destroys WebView2.
+        beginUiShutdown();
+        var bridge=window.pywebview&&window.pywebview.api;
+        if(bridge&&typeof bridge.window_control==='function'){
+            Promise.resolve(bridge.window_control('close')).catch(function(error){if(window.console)console.warn('window close failed',error);});
+        }else{
+            // The bridge normally mounts before a user can interact. Keep a
+            // short retry for the rare first-paint click without logging noise.
+            var retries=10;
+            (function retryClose(){var api=window.pywebview&&window.pywebview.api;if(api&&typeof api.window_control==='function'){Promise.resolve(api.window_control('close')).catch(function(){});return;}if(retries-->0)setTimeout(retryClose,80);})();
+        }
+        return;
+    }
+    call('window_control',function(result){
+        if(result&&result.ok&&Object.prototype.hasOwnProperty.call(result,'maximized')) titlebarSetMaximized(result.maximized);
+    },action);
+}
+function titlebarToggleMaximize(event){
+    if(event&&event.target&&event.target.closest&&event.target.closest('.app-window-controls'))return;
+    titlebarWindowControl('toggle_maximize',event);
 }
 var _localDataSyncing = false;
 function setLocalSyncStatus(text, isError) {
@@ -2773,7 +2891,7 @@ function portalDirectorEnsureMiniMap(){var points=document.getElementById('porta
 function portalDirectorLoadGridMap(){call('get_portal_director_grid_map',function(result){if(!result||!result.ok||!Array.isArray(result.rows)){var text=(result&&result.error)||'方格地图读取失败';portalDirectorStatus(text,true);portalDirectorPreviewError(text);return;}_portalDirectorGridMap=result;portalDirectorDrawMiniMap();});}
 function portalDirectorToggleGridPoint(gx,gy){var grid=_portalDirectorGridMap,row=String(grid.rows&&grid.rows[gy]||'');if(row.charAt(gx)!=='0'){portalDirectorStatus('此格包含地形方块，不能把红门放到地下。',true);return;}portalDirectorMapInfo(function(profile){if(!profile)return;var col=Math.min(Number(grid.width)-1,Math.floor((gx+.5)*Number(grid.width)/Number(grid.grid_width))),mapRow=Math.min(Number(grid.height)-1,Math.floor((gy+.5)*Number(grid.height)/Number(grid.grid_height))),surface=Number(profile.surface_rows&&profile.surface_rows[col]);if(!isFinite(surface)||surface<0||mapRow>=surface){portalDirectorStatus('此格不在地表上方，不能放置红门。',true);return;}var index=_portalDirectorPoints.findIndex(function(point){return point[0]===col&&point[1]===mapRow;});if(index>=0){_portalDirectorPoints.splice(index,1);portalDirectorStatus('已移除 列 '+col+'，行 '+mapRow+' 的红门点。',false);}else{if(_portalDirectorPoints.length>=20){portalDirectorStatus('一次最多选择 20 个红门点。',true);return;}_portalDirectorPoints.push([col,mapRow]);portalDirectorStatus('已添加红门点：列 '+col+'，行 '+mapRow+'。',false);}portalDirectorRenderPoints();});}
 function portalDirectorDrawMiniMap(){var canvas=document.getElementById('portalDirectorMiniMapCanvas'),grid=_portalDirectorGridMap;if(!canvas)return;var ctx=canvas.getContext('2d'),cw=canvas.width,ch=canvas.height;if(!ctx)return;ctx.fillStyle='#FBF7F3';ctx.fillRect(0,0,cw,ch);if(!grid||!Number(grid.grid_width)||!Number(grid.grid_height)||!Array.isArray(grid.rows)){ctx.fillStyle='#A28A77';ctx.font='20px sans-serif';ctx.fillText('正在读取方格地图…',26,42);return;}var gw=Number(grid.grid_width),gh=Number(grid.grid_height),cellW=cw/gw,cellH=ch/gh;for(var gy=0;gy<gh;gy++){var row=String(grid.rows[gy]||'');for(var gx=0;gx<gw;gx++){ctx.fillStyle=row.charAt(gx)==='1'?'#D5BFA7':'#FFFDFB';ctx.fillRect(gx*cellW,gy*cellH,Math.ceil(cellW),Math.ceil(cellH));}}if(cellW>=3&&cellH>=3){ctx.strokeStyle='rgba(183,156,132,.24)';ctx.lineWidth=1;for(var x=0;x<=gw;x++){ctx.beginPath();ctx.moveTo(x*cellW,0);ctx.lineTo(x*cellW,ch);ctx.stroke();}for(var y=0;y<=gh;y++){ctx.beginPath();ctx.moveTo(0,y*cellH);ctx.lineTo(cw,y*cellH);ctx.stroke();}}ctx.fillStyle='#4E91C9';(grid.dwarves||[]).forEach(function(d){var gx=Math.floor(Number(d.col)*gw/Number(grid.width)),gy=Math.floor(Number(d.row)*gh/Number(grid.height));if(isFinite(gx)&&isFinite(gy)){ctx.fillRect(gx*cellW,gy*cellH,Math.max(3,cellW),Math.max(3,cellH));}});ctx.fillStyle='#E45D3A';_portalDirectorPoints.forEach(function(point){var gx=Math.floor(Number(point[0])*gw/Number(grid.width)),gy=Math.floor(Number(point[1])*gh/Number(grid.height));ctx.beginPath();ctx.arc((gx+.5)*cellW,(gy+.5)*cellH,Math.max(4,Math.min(cellW,cellH)*.65),0,Math.PI*2);ctx.fill();});}
-function openPortalDirectorModal(){portalDirectorEnsureAltitudeControl();portalDirectorEnsureMiniMap();var preset=document.getElementById('portalDirectorPresetSelect');if(preset&&preset.closest('section'))preset.closest('section').style.display='none';var modal=document.getElementById('portalDirectorModal');if(!modal)return;modal.classList.add('active');portalDirectorRenderPoints();portalDirectorRenderHistory();refreshPortalDirector();portalDirectorLoadGridMap();portalDirectorMapInfo(function(){portalDirectorDrawMiniMap();});}
+function openPortalDirectorModal(){portalDirectorEnsureAltitudeControl();portalDirectorEnsureMiniMap();var modal=document.getElementById('portalDirectorModal');if(!modal)return;modal.classList.add('active');portalDirectorRenderPoints();portalDirectorRenderHistory();refreshPortalDirector();portalDirectorLoadGridMap();portalDirectorMapInfo(function(){portalDirectorDrawMiniMap();});}
 function portalDirectorPreviewError(message){_portalDirectorPoints=[];var host=document.getElementById('portalDirectorPoints'),count=document.getElementById('portalDirectorPreviewCount');if(count)count.textContent='读取失败';if(host)host.innerHTML='<div class="portal-director-point" style="color:#B34F38">'+escapeHtml(String(message||'场景预览读取失败'))+'</div>';portalDirectorDrawMiniMap(_portalDirectorMap);}
 function portalDirectorProfileFromMapScan(raw){var width=Math.floor(Number(raw&&raw.width)),height=Math.floor(Number(raw&&raw.height)),w2=raw&&raw.w2,water=raw&&raw.water;if(!raw||!raw.ok||!isFinite(width)||!isFinite(height)||!Array.isArray(w2)||w2.length!==width*height)return null;var surface=[],surfaceWater=[];for(var col=0;col<width;col++){var row=-1;for(var r=0;r<height;r++){if(Number(w2[r*width+col])!==65535){row=r-1;break;}}surface.push(row);surfaceWater.push(row>=0&&Array.isArray(water)?Number(water[row*width+col])&31:0);}return {width:width,height:height,surface_rows:surface,surface_water:surfaceWater,dwarves:Array.isArray(raw.dwarves)?raw.dwarves:[]};}
 function portalDirectorMapInfo(done){function accept(profile){var rows=profile&&profile.surface_rows||[],valid=rows.filter(function(row){return Number(row)>=0;}).length;if(!profile||!Number(profile.width)||!Number(profile.height)||!valid)return false;_portalDirectorMap=profile;portalDirectorDrawMiniMap(profile);done(profile);return true;}function fallback(reason){call('map_scan',function(scan){var profile=portalDirectorProfileFromMapScan(scan);if(accept(profile))return;var text=(scan&&scan.error)||reason||'地图地表轮廓读取失败；请进入存档后再试。';portalDirectorStatus(text,true);portalDirectorPreviewError(text);done(null);});}if(_portalDirectorMap&&Number(_portalDirectorMap.width)&&Array.isArray(_portalDirectorMap.surface_rows)&&_portalDirectorMap.surface_rows.some(function(row){return Number(row)>=0;})){done(_portalDirectorMap);return;}call('get_portal_director_surface_profile',function(profile){if(!accept(profile))fallback((profile&&profile.error)||'轻量地表轮廓读取失败');});}
@@ -2894,20 +3012,22 @@ function clearGameTimeControls(){
     document.getElementById('gameTimeNow').textContent = '连接后读取昼夜时间';
     document.getElementById('gameTimeHint').textContent = '时间范围会按当前地图自动读取';
 }
-function refreshGameTimeControls(showError){
-    if (_gameTimeReadPending) return;
+function refreshGameTimeControls(showError, done){
+    if (_gameTimeReadPending) { if (done) done(false, null); return; }
     _gameTimeReadPending = true;
     call('get_game_time_state', function(r){
         _gameTimeReadPending = false;
         if (!r || !r.ok) {
-            var state = readStateText(r, '读取失败');
+            var state = r && r.scanning ? '正在读取' : readStateText(r, '读取失败');
             var message = readStateDetail(r);
             document.getElementById('gameTimePhase').textContent = state;
             document.getElementById('gameTimeNow').textContent = message;
             if (showError) log(state + '：' + message, 'error');
+            if (done) done(false, r);
             return;
         }
         applyGameTimeState(r);
+        if (done) done(true, r);
     });
 }
 function setGameTime(){
@@ -3305,32 +3425,49 @@ function doConnect(pid) {
                 if(state==='已验证') return label+'：已验证但计数缺失';
                 return label+'：'+String(state || '读取失败');
             }
+            var magicConnectionState = r.magic_unloaded ? '待打开' :
+                (r.magic_scanning ? '定位中' : (Number.isInteger(Number(r.magic)) ? String(r.magic) : '读取失败'));
             extra.textContent = "\u2714\uFE0F " + connectionReadLabel('矮人',r.dwarves,r.dwarves_state)
                 + " | " + connectionReadLabel('物品',r.items,r.items_state)
-                + " | 魔法: " + (r.magic_scanning ? '定位中' : (Number.isInteger(Number(r.magic)) ? String(r.magic) : '读取失败'));
+                + " | 魔法: " + magicConnectionState;
             log("");
-            if (r.magic_scanning) setTopMagicStatus('定位中');
+            if (r.magic_unloaded) {
+                setTopMagicStatus('待打开');
+                setMagicQuickStatus('打开魔法页后定位');
+            } else if (r.magic_scanning) setTopMagicStatus('定位中');
             _defaultPresetAutoPending=true;
             _defaultPresetAutoRunning=false;
             _defaultPresetAutoAttempts=0;
             refreshWriteSafetyPolicy();
-            mapDropCache();
-            refreshCreatureList(false);
-            scanItems();
-            mapScan(false, function(){ tryAutoApplyDefaultFeaturePreset(); });
-            refreshOtherFeatures();
-            refreshMagicItems(false);
-            refreshGameTimeControls(false);
-            refreshManaMaxLock();
-            refreshTimerLocks();
-            refreshPandoraEvents(false);
-            pandoraDirectorRefresh(true);
-            pandoraDirectorStartPolling();
-            refreshBasicState(false);
-            // The pet panel is always visible now; load it once at connection
-            // time so opening a separate window is no longer required.
-            refreshPetManager(false);
-            startUiRefreshTimers();
+            // Do not immediately pile map/item/creature scans on top of the
+            // single time-object locator.  On a normal save it is ready in
+            // about a second; on a slower save the fallback still continues
+            // startup instead of leaving the rest of the UI waiting forever.
+            function startSecondaryReads(attempt){
+                refreshGameTimeControls(false, function(timeReady){
+                    if (!timeReady && attempt < 6) {
+                        scheduleUiTimeout(function(){ startSecondaryReads(attempt + 1); }, 300);
+                        return;
+                    }
+                    mapDropCache();
+                    refreshCreatureList(false);
+                    scanItems();
+                    mapScan(false, function(){ tryAutoApplyDefaultFeaturePreset(); });
+                    refreshOtherFeatures();
+                    refreshManaMaxLock();
+                    refreshTimerLocks();
+                    refreshPandoraEvents(false);
+                    pandoraDirectorRefresh(true);
+                    pandoraDirectorStartPolling();
+                    refreshBasicState(false);
+                    // The pet panel is always visible now; load it once at
+                    // connection time so opening a separate window is no
+                    // longer required.
+                    refreshPetManager(false);
+                    startUiRefreshTimers();
+                });
+            }
+            startSecondaryReads(0);
         } else {
             btn.className = "btn-conn";
             btn.textContent = "\uD83D\uDD0C \u8fde\u63a5\u6e38\u620f";
@@ -4393,11 +4530,12 @@ function showDwarfModal(idx) {
         if (_dwarfCache[i].idx === idx) { d = _dwarfCache[i]; break; }
     }
     if (!d) { log("\u627e\u4e0d\u5230\u77ee\u4eba #" + idx); return; }
-    _dwarfEditBaseline = {name:String(d.name || ""), x:parseFloat(d.x), y:parseFloat(d.y), hp:parseFloat(d.hp), sat:parseFloat(d.sat), skills:{}, skillsReady:d.skills_ready !== false, equipment:null};
+    _dwarfEditBaseline = {name:String(d.local_name || ""), x:parseFloat(d.x), y:parseFloat(d.y), hp:parseFloat(d.hp), sat:parseFloat(d.sat), skills:{}, skillsReady:d.skills_ready !== false, equipment:null};
     (d.skills || []).forEach(function(skill){
         if (skill && skill.id && isFinite(Number(skill.value))) _dwarfEditBaseline.skills[String(skill.id)] = Number(skill.value);
     });
-    document.getElementById("modalName").value = d.name || "";
+    document.getElementById("modalName").value = d.local_name || "";
+    document.getElementById("modalName").placeholder = d.native_name ? ("游戏原生姓名：" + d.native_name) : "留空则显示游戏原生姓名";
     document.getElementById("modalX").value = d.x;
     document.getElementById("modalY").value = d.y;
     document.getElementById("modalHP").value = d.hp;
@@ -4480,12 +4618,9 @@ function saveDwarfModal() {
         if (key === 'sat' && satUnavailable) return;
         if (!isFinite(base[key]) || Math.abs(values[key] - base[key]) > 0.001) fields[key] = values[key];
     });
+    name = String(name || "").trim();
     var nameChanged = name !== base.name;
     var hasFieldChanges = Object.keys(fields).length > 0;
-    if (nameChanged || hasFieldChanges) {
-        log("姓名、坐标、血量和饱食度当前为只读；稳定版仅允许保存个人技能或一个已验证装备槽", "warning");
-        return;
-    }
     var personalSkills = [];
     var invalidPersonalSkill = false;
     var seenPersonalSkill = {};
@@ -4526,17 +4661,34 @@ function saveDwarfModal() {
         }
     }
     if (hasEquipmentChanges && base.equipment === null) { log("装备栏仍在读取，请稍候再保存"); return; }
-    var pending = (hasPersonalSkillChanges ? 1 : 0) + (hasEquipmentChanges ? 1 : 0), failed = false;
+    var pending = (nameChanged ? 1 : 0) + (hasFieldChanges ? 1 : 0) + (hasPersonalSkillChanges ? 1 : 0) + (hasEquipmentChanges ? 1 : 0), failed = false;
     if (!pending) { closeDwarfModal(); log("矮人 #" + idx + " 没有修改"); return; }
+    var saveButton = document.getElementById("modalDwarfSave");
+    if (saveButton) { saveButton.disabled = true; saveButton.textContent = "正在保存…"; }
     function done(ok) {
         if (!ok) failed = true;
         pending--;
         if (pending) return;
+        if (saveButton) { saveButton.disabled = false; saveButton.textContent = "保存"; }
         if (failed) { log("矮人 #" + idx + " 部分保存失败，请刷新后确认"); return; }
         closeDwarfModal();
         call("refresh_dwarves_status", renderDwarfReadResult);
         log("矮人 #" + idx + " 已保存");
     }
+    if (nameChanged) call("set_dwarf_name", function(r){
+        if (!(r && r.ok)) log("显示名保存失败：" + ((r && r.error) || "本地配置未确认"), "error");
+        else log("修改器显示名已保存；游戏原生姓名未被修改", "success");
+        done(!!(r && r.ok));
+    }, idx, name);
+    if (hasFieldChanges) call("save_dwarf_fields", function(r){
+        if (!r || !r.ok) log("属性保存失败：" + ((r && r.error) || "游戏未确认写入"), "error");
+        else {
+            var changed = (r.changed || []).join("、") || Object.keys(fields).join("、");
+            log("属性已更新：" + changed + "；即时读回通过" + (r.operation_id ? "，可在操作记录中撤销/复核" : ""), "success");
+            if (typeof loadVerifiedOperationHistory === "function") loadVerifiedOperationHistory();
+        }
+        done(!!(r && r.ok));
+    }, idx, fields);
     if (hasPersonalSkillChanges) call("save_dwarf_personal_skill_slots", function(r){
         if (!r || !r.ok) log("个人技能保存失败：" + ((r && r.error) || "未知错误"));
         else {
@@ -4948,9 +5100,9 @@ function globalRefreshTick(){
         // scanItems starts the dedicated 2-second quantity refresh.  Do not
         // make the global timer launch a second overlapping item read.
         if (!_focusPaused && _tick % 6 == 0 && !_itemAutoTimer) refreshItemQty();
-        if (!_focusPaused && _tick % 8 == 0) refreshMagicItems(false);
+        if (!_focusPaused && _magicRefreshRequested && _tick % 8 == 0) refreshMagicItems(false);
         if (_tick % 8 == 0) refreshBasicState(false);
-        if (!_focusPaused && _tick % 10 == 0) refreshGameTimeControls(false);
+        if (!_focusPaused && _tick % 2 == 0) refreshGameTimeControls(false);
         if (_tick % 4 == 0 && document.getElementById('goldEconomyModal').classList.contains('active')) refreshGoldEconomyLive();
         if (_tick % 4 == 0 && document.getElementById('manaControlModal').classList.contains('active')) refreshManaControlLive();
         if (_tick % 4 == 0 && document.getElementById('xpControlModal').classList.contains('active')) refreshXpControlLive();
@@ -5066,7 +5218,7 @@ function castMagicCollectAll(){
         }
     });
 }
-var _magicView='all',_magicRenderFingerprint='';
+var _magicView='all',_magicRenderFingerprint='',_magicRefreshRequested=false;
 var _magicCategories={all:{title:'全部',note:'全部已定位魔法'},utility:{title:'实用',note:'收集、照明与探索'},environment:{title:'建造/环境',note:'传送、森林、降雨与号角'},summon:{title:'召唤/移动',note:'小鬼与支援'},combat:{title:'战斗',note:'伤害、范围、数量与耗蓝'}};
 var _magicCategoryIds={utility:['magic_collect','magic_light','magic_compas'],environment:['magic_portal','magic_forest','magic_rain','magic_horn'],summon:['magic_imp'],combat:['magic_fireball','magic_icearrow','magic_transform','magic_explosion']};
 function makeMagicSection(title,note,open){var section=document.createElement('details');section.className='magic-section';section.open=!!open;var summary=document.createElement('summary');summary.textContent=title;if(note){var suffix=document.createElement('span');suffix.className='magic-section-note';suffix.textContent=note;summary.appendChild(suffix);}var grid=document.createElement('div');grid.className='magic-grid';section.appendChild(summary);section.appendChild(grid);return {section:section,grid:grid};}
@@ -5077,7 +5229,7 @@ function renderMagicManaOverview(){call('get_mana_control_state',function(result
 function appendMagicCollectAuxiliary(body){var advanced=document.createElement('details');advanced.className='magic-advanced';var summary=document.createElement('summary');summary.textContent='高级辅助：指定坐标原生收集（会消耗法力）';advanced.appendChild(summary);var box=document.createElement('div');box.className='magic-advanced-body';var hint=document.createElement('div');hint.className='magic-aux-hint';hint.textContent='仅用于单点验证。它只吸取地面可拾取的掉落物，不会采矿或收集方块。';box.appendChild(hint);var mapCol=document.getElementById('mapCol'),mapRow=document.getElementById('mapRow');[['列',mapCol?mapCol.value:0],['行',mapRow?mapRow.value:0]].forEach(function(spec){var label=document.createElement('label');label.style.cssText='display:inline-flex;flex-direction:column;gap:4px;color:#6B5B4F;font-size:12px;margin-right:8px';label.textContent=spec[0];var input=document.createElement('input');input.type='number';input.step='1';input.value=spec[1];input.style.width='70px';input.id='magicCollect'+spec[0];label.appendChild(input);box.appendChild(label);});var sync=document.createElement('button');sync.className='btn btn-light';sync.textContent='同步地图当前格';sync.onclick=function(){if(mapCol)document.getElementById('magicCollect列').value=mapCol.value;if(mapRow)document.getElementById('magicCollect行').value=mapRow.value;};box.appendChild(sync);var cast=document.createElement('button');cast.className='btn btn-peach';cast.textContent='原生收集';cast.onclick=function(){var col=parseInt(document.getElementById('magicCollect列').value,10),row=parseInt(document.getElementById('magicCollect行').value,10);if(!Number.isInteger(col)||!Number.isInteger(row)){log('请输入有效的地图列、行坐标','warning');return;}cast.disabled=true;call('cast_magic_collect',function(reply){cast.disabled=false;if(reply&&reply.ok)log('已在 列 '+reply.col+' / 行 '+reply.row+' 调用原生收集魔法','success');else log('原生收集失败：'+((reply&&reply.error)||''),'error');},col,row);};applyDynamicWritePolicy(cast,'cast_magic_collect');box.appendChild(cast);advanced.appendChild(box);body.appendChild(advanced);}
 function appendMagicCard(grid,item){var card=document.createElement('details');card.className='magic-card';var title=document.createElement('summary');var titleWrap=document.createElement('span');titleWrap.className='magic-card-summary';titleWrap.innerHTML='<b>🔮 '+escapeHtml(item.title)+'</b><span>'+escapeHtml(magicSummary(item))+'</span>';title.appendChild(titleWrap);card.appendChild(title);var body=document.createElement('div');body.className='magic-card-body';var hint=document.createElement('div');hint.className='magic-aux-hint';hint.textContent='修改参数后，请在游戏内手动施放此魔法以验证实际效果。';body.appendChild(hint);var fields=document.createElement('div');fields.className='magic-card-fields';(item.fields||[]).forEach(function(field){var group=document.createElement('label');group.style.cssText='display:flex;flex-direction:column;gap:4px;color:#6B5B4F;font-size:12px';var label=document.createElement('span');label.textContent=field.title+'（原 '+field.original+'）';group.appendChild(label);var row=document.createElement('div');row.className='row';row.style.gap='5px';var input=document.createElement('input');input.type='number';input.step=field.type==='float'?'0.1':'1';input.value=field.value;input.style.width='88px';var button=document.createElement('button');button.className='btn btn-peach';button.textContent='修改';button.onclick=function(){var value=parseFloat(input.value);if(!isFinite(value)){log('请输入有效数值','warning');return;}call('set_magic_value',function(reply){if(reply&&reply.ok){input.value=reply.value;log(item.title+' · '+field.title+' 已修改；请在游戏内手动施放验证','success');}else log('修改失败：'+((reply&&reply.error)||''),'error');},item.id,field.id,value);};applyDynamicWritePolicy(button,'set_magic_value');row.appendChild(input);row.appendChild(button);group.appendChild(row);fields.appendChild(group);});body.appendChild(fields);if(item.id==='magic_collect')appendMagicCollectAuxiliary(body);card.appendChild(body);grid.appendChild(card);}
 function renderMagicItems(result){var host=document.getElementById('magicCards');if(!host)return;var items=result.items||[];host.innerHTML='';var visible=items.filter(function(item){return _magicView==='all'||magicCategoryFor(item.id)===_magicView;});if(!visible.length){host.innerHTML='<div class="card wide" style="color:#B8A89A;text-align:center">当前分类没有已定位的魔法参数</div>';return;}var grouped={};visible.forEach(function(item){var key=magicCategoryFor(item.id);(grouped[key]=grouped[key]||[]).push(item);});Object.keys(grouped).forEach(function(key){var cat=_magicCategories[key]||_magicCategories.utility;var section=makeMagicSection(cat.title,cat.note,_magicView===key||_magicView==='all'&&key==='utility');grouped[key].forEach(function(item){appendMagicCard(section.grid,item);});host.appendChild(section.section);});if(result.scan_ms){var note=document.createElement('div');note.style.cssText='width:100%;color:#B8A89A;font-size:12px;text-align:right';note.textContent='本次定位耗时 '+result.scan_ms+' ms；后续操作使用缓存地址';host.appendChild(note);}}
-function refreshMagicItems(force){var host=document.getElementById('magicCards');if(!host)return;renderMagicManaOverview();renderMagicViewbar();if(force){host.innerHTML='<div class="card wide" style="color:#B8A89A;text-align:center">正在重新定位魔法数据…</div>';setMagicQuickStatus('正在重新定位魔法参数…');setTopMagicStatus('定位中');}call('get_magic_items',function(result){if(!result||!result.ok){host.innerHTML='';var empty=document.createElement('div');empty.className='card wide';empty.style.cssText='color:#B8A89A;text-align:center';var readState=readStateText(result,'读取失败'),readDetail=readStateDetail(result)||'请确认已连接游戏后重试';empty.textContent=readState+'：'+readDetail;host.appendChild(empty);setMagicQuickStatus(readState+'：'+readDetail,'error');if(result&&result.scanning){setTopMagicStatus('定位中');scheduleUiTimeout(function(){refreshMagicItems(false);},700);}else setTopMagicStatus(readState==='读取失败'?'定位失败':readState);return;}if(!Array.isArray(result.items)){host.innerHTML='<div class="card wide" style="color:#C85C3E;text-align:center">定位失效：魔法读取返回结构无效；请重新连接后再读取。</div>';setMagicQuickStatus('定位失效：返回结构无效','error');setTopMagicStatus('定位失效');return;}var fingerprint=JSON.stringify(result.items.map(function(item){return [item.id,(item.fields||[]).map(function(f){return [f.id,f.value];})];}));if(force||fingerprint!==_magicRenderFingerprint){_magicRenderFingerprint=fingerprint;renderMagicItems(result);}setMagicQuickStatus('参数已就绪 · '+result.items.length+' 个魔法','ok');setTopMagicStatus('已定位 '+result.items.length+' 项');},!!force);}
+function refreshMagicItems(force){var host=document.getElementById('magicCards');if(!host)return;_magicRefreshRequested=true;renderMagicManaOverview();renderMagicViewbar();if(force){host.innerHTML='<div class="card wide" style="color:#B8A89A;text-align:center">正在重新定位魔法数据…</div>';setMagicQuickStatus('正在重新定位魔法参数…');setTopMagicStatus('定位中');}call('get_magic_items',function(result){if(!result||!result.ok){host.innerHTML='';var empty=document.createElement('div');empty.className='card wide';empty.style.cssText='color:#B8A89A;text-align:center';var readState=readStateText(result,'读取失败'),readDetail=readStateDetail(result)||'请确认已连接游戏后重试';empty.textContent=readState+'：'+readDetail;host.appendChild(empty);setMagicQuickStatus(readState+'：'+readDetail,'error');if(result&&result.scanning){setTopMagicStatus('定位中');scheduleUiTimeout(function(){refreshMagicItems(false);},700);}else setTopMagicStatus(readState==='读取失败'?'定位失败':readState);return;}if(!Array.isArray(result.items)){host.innerHTML='<div class="card wide" style="color:#C85C3E;text-align:center">定位失效：魔法读取返回结构无效；请重新连接后再读取。</div>';setMagicQuickStatus('定位失效：返回结构无效','error');setTopMagicStatus('定位失效');return;}var fingerprint=JSON.stringify(result.items.map(function(item){return [item.id,(item.fields||[]).map(function(f){return [f.id,f.value];})];}));if(force||fingerprint!==_magicRenderFingerprint){_magicRenderFingerprint=fingerprint;renderMagicItems(result);}setMagicQuickStatus('参数已就绪 · '+result.items.length+' 个魔法','ok');setTopMagicStatus('已定位 '+result.items.length+' 项');},!!force);}
 
 function switchTab(name){
     document.querySelectorAll(".panel").forEach(function(p){p.classList.remove("active");});
@@ -7901,7 +8053,7 @@ function normalizeDecorativeUiIcons(root){
 }
 window.addEventListener('DOMContentLoaded',function(){
     normalizeDecorativeUiIcons(document);
-    scheduleUiTimeout(autoCheckModifierUpdate,1200);
+    scheduleUiTimeout(initializeUpdateStatus,180);
     if(window.MutationObserver){
         var observer=new MutationObserver(function(records){
             records.forEach(function(record){record.addedNodes&&Array.from(record.addedNodes).forEach(function(node){if(node.nodeType===Node.ELEMENT_NODE)normalizeDecorativeUiIcons(node);});});

@@ -76,8 +76,10 @@ _install_webview_disposal_guard()
 DEFAULT_GAME_ROOT = r"D:\Steam\steamapps\common\CraftTheWorld"
 APP_VERSION = "1.0.0"
 APP_ID = "crafttheworld-modifier"
-UPDATE_FEED_ENV = "CTW_UPDATE_FEED_URL"
-UPDATE_RELEASE_API_URL = ""
+# Public release metadata for the maintainer's GitHub repository.  The UI
+# performs one display-only check after startup; it never downloads or applies
+# an update until the user explicitly chooses to do so.
+UPDATE_RELEASE_API_URL = "https://api.github.com/repos/dszwamn/CraftWorldModifier/releases/latest"
 UPDATE_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 UPDATE_MAX_PACKAGE_BYTES = 300 * 1024 * 1024
 UPDATE_ALLOWED_SOURCE_NAMES = frozenset({
@@ -149,8 +151,8 @@ def _config_dir():
 
 
 def _package_config_dir():
-    """Return the read-only package config directory beside the source/EXE."""
-    return os.path.join(_application_dir(), "config")
+    """Return packaged defaults from source, onedir or a one-file bundle."""
+    return _resource_path("config")
 
 
 def _hide_user_data_root(path):
@@ -2964,6 +2966,8 @@ class Api:
     _time_controls_scan_lock = threading.RLock()
     _time_controls_last_failed_scan = 0.0
     _time_controls_scan_error = ""
+    _time_controls_scan_token = 0
+    _time_controls_scan_running = False
     # Monster-wave portal controls are installed only on demand.  The code
     # cave is per-process and is always removed before disconnecting.
     _wave_portal_controller = None
@@ -3049,6 +3053,8 @@ class Api:
             self._magic_scan_token += 1
             self._magic_scan_running = False
             self._magic_scan_completed = False
+            self._time_controls_scan_token += 1
+            self._time_controls_scan_running = False
             self._task_runtime_candidates = {}
             self._task_runtime_candidates_generation = self._runtime_session_generation
             self._task_runtime_probe_baselines = {}
@@ -3064,6 +3070,8 @@ class Api:
             self._magic_scan_token += 1
             self._magic_scan_running = False
             self._magic_scan_completed = False
+            self._time_controls_scan_token += 1
+            self._time_controls_scan_running = False
             self._task_runtime_candidates = {}
             self._task_runtime_candidates_generation = self._runtime_session_generation
             self._task_runtime_probe_baselines = {}
@@ -3188,6 +3196,27 @@ class Api:
                 if not isinstance(expected, dict) or any(
                         live.get(key) != int(value) for key, value in expected.items()):
                     raise RuntimeError('装备槽读回与记录值不一致')
+            elif kind == 'dwarf_fields':
+                dwarf = self._live_dwarf_by_index(target.get('dwarf_index'))
+                if not dwarf or (target.get('dwarf_name') and dwarf.get('name') != target.get('dwarf_name')):
+                    raise RuntimeError('找不到原矮人；请刷新后确认编号和名称未变化')
+                edi = int(dwarf.get('edi') or 0)
+                is_v2 = self._detect_v2()
+                live = {}
+                if isinstance(expected, dict):
+                    if 'x' in expected:
+                        live['x'] = pm.read_float(edi + (V2_DWARF_X if is_v2 else 0x428))
+                    if 'y' in expected:
+                        live['y'] = pm.read_float(edi + (V2_DWARF_Y if is_v2 else 0x42C))
+                    if 'hp' in expected:
+                        live['hp'] = self._read_live_dwarf_hp(edi, is_v2)
+                    if 'sat' in expected:
+                        live['sat'] = self._read_live_dwarf_satiety(edi, is_v2)
+                if (not isinstance(expected, dict) or any(
+                        live.get(key) is None or
+                        abs(float(live[key]) - float(value)) > (0.05 if key == 'hp' else 0.02)
+                        for key, value in expected.items())):
+                    raise RuntimeError('矮人属性读回与记录值不一致')
             elif kind == 'runtime_item_qty':
                 item_id = str(target.get('item_id') or '')
                 item = next((row for row in item_cache if row.get('name_en') == item_id), None)
@@ -3281,6 +3310,11 @@ class Api:
                 return self._finish_operation_undo(
                     entry, {'ok': bool(ok),
                             'error': '' if ok else '个人技能已变化或撤销写入未通过读回'})
+            if kind == 'dwarf_fields':
+                result = self.save_dwarf_fields(
+                    target.get('dwarf_index'), entry.get('before'),
+                    _expected_current=entry.get('after'), _record_history=False)
+                return self._finish_operation_undo(entry, result)
             if kind == 'dwarf_training_preset':
                 before_rows = entry.get('before') or []
                 after_by_idx = {int(row.get('idx', -1)): row for row in (entry.get('after') or [])
@@ -3451,6 +3485,45 @@ class Api:
                 self._lock_restore_active = False
         self._join_runtime_workers()
         return True
+
+    def window_control(self, action):
+        """Handle only the chrome actions exposed by the custom title bar."""
+        name = str(action or "").strip().lower()
+        window_ref = getattr(self, "_modifier_window", None)
+        if window_ref is None:
+            return {"ok": False, "error": "窗口尚未就绪"}
+        try:
+            if name == "minimize":
+                window_ref.minimize()
+                return {"ok": True, "state": "minimized"}
+            if name == "toggle_maximize":
+                maximized = bool(getattr(self, "_window_is_maximized", False))
+                if maximized:
+                    window_ref.restore()
+                    self._window_is_maximized = False
+                    return {"ok": True, "state": "normal", "maximized": False}
+                window_ref.maximize()
+                self._window_is_maximized = True
+                return {"ok": True, "state": "maximized", "maximized": True}
+            if name == "close":
+                if getattr(self, "_window_close_requested", False):
+                    return {"ok": True, "state": "closing"}
+                self._window_close_requested = True
+
+                # Return the API result before destroying WebView2. This gives
+                # the page a chance to stop its timers; the existing closing
+                # hook then performs the synchronous runtime cleanup.
+                def close_window():
+                    try:
+                        window_ref.destroy()
+                    except Exception as exc:
+                        print("modifier window close:", exc)
+
+                threading.Timer(0.08, close_window).start()
+                return {"ok": True, "state": "closing"}
+            return {"ok": False, "error": "未知窗口操作"}
+        except Exception as exc:
+            return {"ok": False, "error": "窗口操作失败：%s" % exc}
 
     def _config_path(self):
         """Return the clean, package-owned default configuration path."""
@@ -3655,14 +3728,20 @@ class Api:
             return handle.read(), path
 
     def _update_feed_url(self, supplied=""):
-        """Return the built-in release API endpoint; never read user config."""
-        value = str(supplied or os.environ.get(UPDATE_FEED_ENV) or UPDATE_RELEASE_API_URL or "").strip()
+        """Return the immutable built-in release endpoint.
+
+        Update sources are intentionally not user-configurable.  This avoids
+        an environment variable or stale UI call silently redirecting a
+        future packaged build to an unrelated download location.
+        """
+        value = str(UPDATE_RELEASE_API_URL or "").strip()
         return self._update_url(value)
 
     def get_update_info(self):
         """Return local version, built-in release source, staged package and mode."""
         ready = self._read_staged_update()
         return {"ok": True, "app": APP_ID, "name": "CraftWorld 修改器", "version": APP_VERSION,
+                "current_version": APP_VERSION, "latest_version": "未检查",
                 "frozen": bool(getattr(sys, "frozen", False)), "app_dir": _application_dir(),
                 "feed_url": self._update_feed_url(), "staged": ready or None}
 
@@ -3707,6 +3786,8 @@ class Api:
                     "published_at": payload.get("published_at") or payload.get("published_at_at") or "",
                     "notes": notes, "package": package, "feed_url": source, "resolved_feed_url": resolved}, ""
         except urllib.error.HTTPError as exc:
+            if int(getattr(exc, "code", 0) or 0) == 404:
+                return None, "GitHub 暂未发布可用版本"
             return None, "读取内置更新服务失败：HTTP %s" % exc.code
         except urllib.error.URLError as exc:
             return None, "读取内置更新服务失败：%s" % exc.reason
@@ -3716,7 +3797,16 @@ class Api:
     def check_for_update(self, manifest_url=""):
         manifest, error = self._read_update_manifest(manifest_url)
         if not manifest:
-            return {"ok": False, "available": False, "version": APP_VERSION, "error": error}
+            # A missing GitHub Release is a normal "no update yet" state.
+            # Transport, API and data-format failures must remain visible to
+            # the UI instead of being mistaken for an unpublished release.
+            if error != "GitHub 暂未发布可用版本":
+                return {"ok": False, "available": False, "version": APP_VERSION,
+                        "current_version": APP_VERSION, "latest_version": "检查失败",
+                        "package_ready": False, "error": error or "更新检查失败"}
+            return {"ok": True, "available": False, "version": APP_VERSION,
+                    "current_version": APP_VERSION, "latest_version": "未发布",
+                    "package_ready": False, "message": error or "暂无可用版本"}
         remote_version = self._update_version_tuple(manifest.get("version"))
         current_version = self._update_version_tuple(APP_VERSION)
         available = bool(remote_version and current_version and remote_version > current_version)
@@ -3725,6 +3815,7 @@ class Api:
         if available and not package_ready:
             manifest["notes"] = (manifest.get("notes") + "\n" if manifest.get("notes") else "") + "该版本暂未提供下载包。"
         return {"ok": True, "available": available, "current_version": APP_VERSION,
+                "latest_version": str(manifest.get("version")),
                 "version": str(manifest.get("version")), "manifest": manifest,
                 "package_ready": package_ready, "message": "发现新版本" if available else "当前已是最新版本"}
 
@@ -4670,10 +4761,15 @@ class Api:
             self.scan_dwarves_stable()
             self.scan_items()
             self.scan_shop()
+            # The first time lookup uses a broad, read-only heap pass.  Start
+            # it only after connection-critical reads finish, so it never
+            # competes with roster/inventory startup scans.
+            self._start_time_controls_scan()
             self._restore_mana_max_lock()
-            # One batch scan is started with the connection, but runs in the
-            # background so that the rest of the modifier is ready immediately.
-            self._start_magic_scan()
+            # Magic parameters are loaded lazily when the Magic tab is opened.
+            # They use a broad heap pass; keeping that work out of connection
+            # avoids delaying the independent time reader and the first usable
+            # game state.
             dwarf_state = _get_cached_read_state("dwarves")
             item_state = _get_cached_read_state("items")
             return {"success":True,"pid":pm.process_id,
@@ -4684,7 +4780,7 @@ class Api:
                     "items": len(item_cache) if item_state.get("state") == self.STATUS_VERIFIED else None,
                     "dwarves_state": dwarf_state,
                     "items_state": item_state,
-                    "magic":0,"magic_scanning":True,"doctor":doctor}
+                    "magic":None,"magic_scanning":False,"magic_unloaded":True,"doctor":doctor}
         except Exception as e:
             return {"success":False,"error":str(e)}
 
@@ -7167,6 +7263,58 @@ class Api:
         if error:
             self._time_controls_scan_error = str(error)
 
+    def _start_time_controls_scan(self):
+        """Locate time objects in one cancellable worker for this game session.
+
+        The broad heap pass is read-only but can take roughly a second on a
+        loaded world.  Running it independently lets the connection finish and
+        makes every later refresh a tiny cached read instead of a blocked UI
+        request.  Cache publication is still tied to the exact PID/session.
+        """
+        if not connected or not pm:
+            return False
+        pm_obj = pm
+        try:
+            process_id = int(pm_obj.process_id)
+            module_base = int(get_base(pm_obj))
+        except Exception:
+            return False
+        with self._runtime_session_lock:
+            if self._runtime_shutdown or self._time_controls_scan_running:
+                return False
+            generation = self._runtime_session_generation
+            self._time_controls_scan_token += 1
+            scan_token = self._time_controls_scan_token
+            self._time_controls_scan_running = True
+            self._time_controls_scan_error = ""
+
+        def worker():
+            try:
+                cache, error = self._scan_time_controls(pm_obj, process_id, module_base)
+                with self._runtime_session_lock:
+                    if (scan_token != self._time_controls_scan_token or
+                            not self._runtime_session_current(generation, pm_obj)):
+                        return
+                    if cache:
+                        self._time_controls_cache = cache
+                        self._time_controls_scan_error = ""
+                    else:
+                        self._time_controls_last_failed_scan = time.time()
+                        self._time_controls_scan_error = error or "定位游戏时间对象失败"
+            except Exception as exc:
+                with self._runtime_session_lock:
+                    if (scan_token == self._time_controls_scan_token and
+                            self._runtime_session_current(generation, pm_obj)):
+                        self._time_controls_last_failed_scan = time.time()
+                        self._time_controls_scan_error = str(exc) or "定位游戏时间对象失败"
+            finally:
+                with self._runtime_session_lock:
+                    if scan_token == self._time_controls_scan_token:
+                        self._time_controls_scan_running = False
+
+        self._spawn_runtime_worker(worker, name="ctw-time-scan")
+        return True
+
     def _read_time_region_chunks(self, pm_obj, region_base, region_size):
         """Read one suitable region with small fallbacks and a 3-byte overlap."""
         pos = int(region_base)
@@ -7362,11 +7510,6 @@ class Api:
             if self._read_time_control_state(pm_obj, cache):
                 return cache, ""
             self._invalidate_time_controls_cache("游戏时间对象已失效")
-        # The magic parameter worker already performs a broad heap pass after
-        # connection.  Waiting for it prevents two expensive scans from making
-        # the game/UI feel sluggish at the same time.
-        if self._magic_scan_running:
-            return None, "正在定位魔法参数，完成后会自动读取游戏时间"
         with self._time_controls_scan_lock:
             if not connected or pm is not pm_obj or int(pm_obj.process_id) != process_id:
                 return None, "游戏连接已变化，请重新读取"
@@ -7374,17 +7517,14 @@ class Api:
             if cache and cache.get("pid") == process_id and cache.get("base") == module_base:
                 if self._read_time_control_state(pm_obj, cache):
                     return cache, ""
+            if self._time_controls_scan_running:
+                return None, "正在读取游戏时间，请稍候"
             now = time.time()
             if now - self._time_controls_last_failed_scan < 3.0:
                 return None, self._time_controls_scan_error or "正在等待地图时间对象"
-            cache, error = self._scan_time_controls(pm_obj, process_id, module_base)
-            if cache and connected and pm is pm_obj and int(pm_obj.process_id) == process_id:
-                self._time_controls_cache = cache
-                self._time_controls_scan_error = ""
-                return cache, ""
-            self._time_controls_last_failed_scan = now
-            self._time_controls_scan_error = error or "定位游戏时间对象失败"
-            return None, self._time_controls_scan_error
+            if self._start_time_controls_scan():
+                return None, "正在读取游戏时间，请稍候"
+            return None, self._time_controls_scan_error or "正在等待游戏时间对象"
 
     def get_game_time_state(self):
         """Read current day/night time and the global simulation multiplier."""
@@ -7393,13 +7533,12 @@ class Api:
                     "error": "请先连接游戏并进入已载入的地图"}
         cache, error = self._ensure_time_controls()
         if not cache:
-            # A connection starts the magic cache scan first.  Time control
-            # deliberately waits for that single heap pass instead of starting
-            # a competing broad scan; this is an in-progress read, not a stale
-            # time object and must not be rendered as a failed/zero value.
-            pending_magic_scan = bool(self._magic_scan_running)
-            return {"ok": False, "state": self.STATUS_UNVERIFIED if pending_magic_scan else self.STATUS_STALE,
-                    "scanning": pending_magic_scan,
+            # Time and magic use independent caches.  Never report a magic
+            # scan as a time read: it only delays the primary time/velocity UI.
+            pending_time_scan = bool(self._time_controls_scan_running)
+            return {"ok": False,
+                    "state": self.STATUS_UNVERIFIED if pending_time_scan else self.STATUS_STALE,
+                    "scanning": pending_time_scan,
                     "error": error or "游戏时间对象定位失效"}
         state = self._read_time_control_state(pm, cache)
         if not state:
@@ -10770,8 +10909,14 @@ class Api:
                         hp = None; sat = None
                     gn = chr(0x7537) if (g or 0) == 0 else chr(0x5973)
                     idx_n = len(res)
-                    name = self._dwarf_names.get(str(idx_n), "")
+                    local_name = str(self._dwarf_names.get(str(idx_n), "") or "")
+                    # V2's native name location is not part of this build's
+                    # validated layout.  Keep a local display name separate
+                    # instead of passing it off as a game-string write.
+                    native_name = ""
+                    name = local_name or native_name
                     res.append({"idx": idx_n, "edi": edi, "name": name,
+                                "native_name": native_name, "local_name": local_name,
                                 "x": "%.2f" % x, "y": "%.2f" % y,
                                 "hp": self._dwarf_hp_text(hp),
                                 "hp_status": "可用" if self._dwarf_hp_text(hp) != "—" else self.STATUS_FAILED,
@@ -11122,15 +11267,19 @@ class Api:
                     # appears in the list. During UI/world rebuilds the embedded
                     # skill/name records can briefly be unavailable.
                     try:
-                        name=self._v1_dwarf_name(edi, g) or self._dwarf_names.get(str(i),"")
+                        native_name=self._v1_dwarf_name(edi, g)
                     except Exception:
-                        name=self._dwarf_names.get(str(i),"")
+                        native_name=""
+                    local_name=str(self._dwarf_names.get(str(i), "") or "")
+                    name=local_name or native_name
                     personal_skills, skills_ready = [], False
                     try:
                         personal_skills, skills_ready = self._read_v1_personal_skills_snapshot(edi)
                     except Exception:
                         pass
-                    res.append({"idx":i,"edi":edi,"name":name,"x":"%.2f"%x,"y":"%.2f"%y,
+                    res.append({"idx":i,"edi":edi,"name":name,
+                                "native_name":native_name,"local_name":local_name,
+                                "x":"%.2f"%x,"y":"%.2f"%y,
                                 "hp":self._dwarf_hp_text(hp),
                                 "hp_status":"可用" if self._dwarf_hp_text(hp) != "—" else "读取失败",
                                 "sat":self._dwarf_satiety_text(sat),
@@ -12476,6 +12625,10 @@ class Api:
                 if not self._validate_dwarf(d["edi"], is_v2):
                     continue
                 if is_v2:
+                    local_name = str(self._dwarf_names.get(str(d.get("idx")), "") or "")
+                    d["local_name"] = local_name
+                    d["native_name"] = ""
+                    d["name"] = local_name
                     d["x"] = "%.2f" % pm.read_float(d["edi"] + V2_DWARF_X)
                     d["y"] = "%.2f" % pm.read_float(d["edi"] + V2_DWARF_Y)
                     d["hp"] = self._dwarf_hp_text(pm.read_float(d["edi"] + V2_DWARF_HP_DISP))
@@ -12494,8 +12647,10 @@ class Api:
                     d["sat_status"] = "可用" if d["sat"] != "—" else self.STATUS_FAILED
                     gender = pm.read_int(d["edi"] + 0x68)
                     native_name = self._v1_dwarf_name(d["edi"], gender)
-                    if native_name:
-                        d["name"] = native_name
+                    local_name = str(self._dwarf_names.get(str(d.get("idx")), "") or "")
+                    d["native_name"] = native_name or ""
+                    d["local_name"] = local_name
+                    d["name"] = local_name or native_name or ""
                     personal_skills, skills_ready = self._read_v1_personal_skills_snapshot(d["edi"])
                     d["skills"] = personal_skills
                     d["skills_ready"] = skills_ready
@@ -13451,14 +13606,21 @@ class Api:
             "readback_ok": bool(skill_result.get("readback_ok", True)),
         }
 
-    def save_dwarf_fields(self, idx, values):
-        """Atomically save changed dwarf fields from one dialog submission."""
-        if not pm or not connected or not isinstance(values, dict):
-            return False
+    def save_dwarf_fields(self, idx, values, _expected_current=None,
+                          _record_history=True):
+        """Atomically save one dwarf's coordinates/HP/satiety with readback.
+
+        The public result is deliberately structured so the UI can distinguish
+        a rejected write from a successful one.  ``_expected_current`` and
+        ``_record_history`` are internal guards used by the undo path.
+        """
+        if not pm or not connected:
+            return {"ok": False, "error": "尚未连接游戏"}
+        if not isinstance(values, dict):
+            return {"ok": False, "error": "矮人属性参数格式无效"}
         guard = self._require_safe_write("矮人属性写入")
         if guard:
-            print(guard)
-            return False
+            return {"ok": False, "error": guard}
         try:
             requested = {}
             for key in ("x", "y", "hp", "sat"):
@@ -13466,18 +13628,18 @@ class Api:
                     continue
                 value = float(values[key])
                 if not math.isfinite(value):
-                    return False
+                    return {"ok": False, "error": "%s 必须是有效数字" % key}
                 if key in ("x", "y") and not (0.0 <= value <= 20000.0):
-                    return False
+                    return {"ok": False, "error": "%s 坐标必须在 0 ～ 20000 范围内" % key.upper()}
                 if key == "hp" and not (0.0 <= value <= 100000.0):
-                    return False
+                    return {"ok": False, "error": "血量必须在 0 ～ 100000 范围内"}
                 if key == "sat" and not (0.0 <= value <= 10.0):
-                    return False
+                    return {"ok": False, "error": "饱食度必须在 0 ～ 10 范围内"}
                 requested[key] = value
             if not requested:
-                return True
+                return {"ok": True, "changed": [], "readback_ok": True}
         except (TypeError, ValueError, OverflowError):
-            return False
+            return {"ok": False, "error": "矮人属性包含无效数字"}
 
         is_v2 = self._detect_v2()
 
@@ -13492,6 +13654,22 @@ class Api:
                 raise RuntimeError("矮人对象校验失败")
             if not is_v2 and edi not in self._v1_dwarf_set():
                 raise RuntimeError("矮人已不在当前游戏列表中")
+
+            before = {}
+            if "x" in requested:
+                before["x"] = float(pm.read_float(edi + (V2_DWARF_X if is_v2 else 0x428)))
+            if "y" in requested:
+                before["y"] = float(pm.read_float(edi + (V2_DWARF_Y if is_v2 else 0x42C)))
+            if "hp" in requested:
+                before["hp"] = self._read_live_dwarf_hp(edi, is_v2)
+            if "sat" in requested:
+                before["sat"] = self._read_live_dwarf_satiety(edi, is_v2)
+            if any(value is None or not math.isfinite(float(value)) for value in before.values()):
+                raise RuntimeError("写入前读取矮人属性失败")
+            if isinstance(_expected_current, dict):
+                for key, expected in _expected_current.items():
+                    if key not in before or abs(float(before[key]) - float(expected)) > (0.05 if key == "hp" else 0.02):
+                        raise RuntimeError("矮人属性已被其他操作改变，拒绝覆盖")
 
             if "x" in requested:
                 snapshot(edi + (V2_DWARF_X if is_v2 else 0x428), 4)
@@ -13533,18 +13711,50 @@ class Api:
                 actual = self._read_live_dwarf_satiety(edi, is_v2)
                 if actual is None or abs(actual - requested["sat"]) > 0.02:
                     raise RuntimeError("饱食度读回不一致")
-            return True
+            after = {}
+            if "x" in requested:
+                after["x"] = float(pm.read_float(edi + (V2_DWARF_X if is_v2 else 0x428)))
+            if "y" in requested:
+                after["y"] = float(pm.read_float(edi + (V2_DWARF_Y if is_v2 else 0x42C)))
+            if "hp" in requested:
+                after["hp"] = self._read_live_dwarf_hp(edi, is_v2)
+            if "sat" in requested:
+                after["sat"] = self._read_live_dwarf_satiety(edi, is_v2)
+            return {"before": before, "after": after, "edi": edi}
 
-        ok, _result, error = self._paused_memory_transaction(write_and_verify)
+        ok, result, error = self._paused_memory_transaction(write_and_verify)
         if not ok:
-            print("save_dwarf_fields:", error)
-        return bool(ok)
+            return {"ok": False, "error": error or "矮人属性写入失败"}
+        before = result.get("before") or {}
+        after = result.get("after") or {}
+        changed = list(requested)
+        operation_id = None
+        if _record_history:
+            try:
+                live = self._live_dwarf_by_index(idx) or {}
+                history = self._record_operation(
+                    "dwarf_fields", "runtime",
+                    {"dwarf_index": int(idx), "dwarf_name": str(live.get("name") or "")},
+                    "fields", before, after, True,
+                    runtime_generation=self._runtime_session_generation,
+                    runtime_pid=int(pm.process_id),
+                    meta={"changed": changed, "reversible": True,
+                          "note": "暂停事务写入并即时读回；重进存档后需复核"})
+                operation_id = history.get("id")
+            except Exception as exc:
+                # The memory write itself is already verified.  Keep the
+                # result successful but make the missing audit entry visible.
+                print("save_dwarf_fields history:", exc)
+        return {"ok": True, "changed": changed, "before": before,
+                "after": after, "readback_ok": True,
+                "operation_id": operation_id}
 
     def save_dwarf(self, idx, field, val):
         """Backward-compatible single-field entry point for existing UI calls."""
         if field not in ("x", "y", "hp", "sat"):
             return False
-        return self.save_dwarf_fields(idx, {field: val})
+        result = self.save_dwarf_fields(idx, {field: val})
+        return bool(result.get("ok")) if isinstance(result, dict) else bool(result)
 
     def scan_items(self):
         """扫描并缓存所有物品"""
@@ -15160,10 +15370,24 @@ class Api:
             return False
 
     def set_dwarf_name(self, idx, name):
-        """设置矮人名称"""
-        self._dwarf_names[str(idx)] = name
-        self._save_dwarf_names()
-        return True
+        """Save a modifier-only display name; never touch a game string."""
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "矮人编号无效"}
+        if idx < 0 or not self._live_dwarf_by_index(idx):
+            return {"ok": False, "error": "找不到当前矮人；请刷新列表后重试"}
+        value = str(name or "").strip()
+        if len(value) > 48:
+            return {"ok": False, "error": "修改器显示名不能超过 48 个字符"}
+        if value:
+            self._dwarf_names[str(idx)] = value
+        else:
+            self._dwarf_names.pop(str(idx), None)
+        if not self._save_dwarf_names():
+            return {"ok": False, "error": "本地显示名配置保存失败"}
+        return {"ok": True, "idx": idx, "local_name": value,
+                "message": "修改器显示名已保存；游戏原生姓名未被修改"}
 
     def _load_dwarf_names(self):
         """_load_dwarf_names"""
@@ -17013,7 +17237,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    # ==================== 魔法道具（连接时批量定位并缓存） ====================
+    # ==================== 魔法道具（按需批量定位并缓存） ====================
     def _start_magic_scan(self):
         if not connected or not pm:
             return
@@ -18888,14 +19112,6 @@ class Api:
 
 ### 6. 入口
 
-# 魔法快捷档位/预览方案已移除：它们只会预改下一次手动施法参数，
-# 不能直接产生可见效果。不要把旧方法继续暴露给 WebView 或旧页面。
-for _removed_magic_api in ("get_magic_profile_preview", "apply_magic_profile"):
-    if hasattr(Api, _removed_magic_api):
-        delattr(Api, _removed_magic_api)
-del _removed_magic_api
-
-
 def _serialized_game_write(method):
     """Make one mutating API request finish before the next one starts."""
     @wraps(method)
@@ -18987,6 +19203,11 @@ _WRITE_SAFETY_POLICY = {
         'feature': '矮人已验证装备槽',
         'reason': '仅允许已识别、已验证槽位的已有物品；写入后立即读回，并保留操作记录与撤销。',
     },
+    'save_dwarf_fields': {
+        'state': WRITE_SAFETY_VERIFIED,
+        'feature': '单矮人坐标、血量与饱食度',
+        'reason': '仅写入当前仍在列表中的单个矮人；暂停事务包含写前快照、立即读回、失败回滚以及可撤销记录。',
+    },
     'undo_operation': {
         'state': WRITE_SAFETY_VERIFIED,
         'feature': '已验证操作撤销',
@@ -19019,7 +19240,7 @@ _EXPERIMENTAL_WRITE_FEATURES = {
     'set_game_speed': '全局速度写入', 'save_skills': '全局技能等级写入',
     'native_skill_upgrade': '原生技能升级调用', 'apply_skill_targets': '技能等级快捷应用',
     'heal_all': '全体回血', 'full_sat': '全体补饱食度',
-    'save_dwarf': '矮人属性写入', 'save_dwarf_fields': '矮人字段写入',
+    'save_dwarf': '旧版矮人属性写入',
     'save_dwarf_personal_skills': '旧版个人技能写入',
     'apply_dwarf_equipment_preset': '全体装备预设',
     'apply_item_quick_settings': '常用物品批量写入', 'apply_feature_preset': '功能预设应用',
@@ -19027,7 +19248,7 @@ _EXPERIMENTAL_WRITE_FEATURES = {
     'pet_spawn': '宠物生成', 'remove_pet': '单只宠物原生死亡移除',
     'set_pet_limit_override': '宠物上限本局覆盖', 'clear_pet_limit_override': '恢复自动宠物上限',
     'toggle_other_feature': '其它功能开关',
-    'set_dwarf_name': '矮人名称写入', 'modify_shop_entry': '商店条目运行时编辑',
+    'set_dwarf_name': '修改器显示名', 'modify_shop_entry': '商店条目运行时编辑',
     'spawn_native_dwarf': '原生矮人生成',
     'native_shop_purchase_one': '哥布林商店单包原生购买',
     'unlock_recipe': '配方直接解锁', 'set_tech_node_state': '科技树节点状态写入',
@@ -19049,6 +19270,15 @@ for _experimental_endpoint, _experimental_feature in _EXPERIMENTAL_WRITE_FEATURE
         'requires_doctor': False,
     }
 del _experimental_endpoint, _experimental_feature
+
+
+# These helpers only support an abandoned profile schema and have no matching
+# V1.0 control.  Keep them private so a stale script cannot trigger a broken
+# endpoint; the visible magic cards use get_magic_items/set_magic_value.
+for _removed_magic_api in ("get_magic_profile_preview", "apply_magic_profile"):
+    if hasattr(Api, _removed_magic_api):
+        delattr(Api, _removed_magic_api)
+del _removed_magic_api
 
 
 def _enforce_write_safety_policy(method, endpoint):
@@ -19106,7 +19336,12 @@ del _endpoint_name
 if __name__ == "__main__":
     html=_resource_path("ui_v1.0.html")
     api = Api()
-    window=webview.create_window("CraftWorld 修改器 v1.0 正式版",html,width=1880,height=1060,min_size=(1280,760),js_api=api)
+    # A frameless window needs an explicit drag region.  easy_drag is kept off
+    # so existing map, list and button interactions never turn into a drag.
+    window=webview.create_window("打造世界修改器 v1.0",html,width=1880,height=1060,min_size=(1280,760),frameless=True,easy_drag=False,js_api=api)
+    api._modifier_window = window
+    api._window_is_maximized = False
+    api._window_close_requested = False
 
     def _on_window_closing():
         # Run synchronously while WebView2 is still alive.  This prevents a
