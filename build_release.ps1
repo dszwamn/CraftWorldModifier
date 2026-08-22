@@ -34,6 +34,14 @@ if (-not (Test-Path -LiteralPath $builtExe)) {
 }
 
 New-Item -ItemType Directory -Force -Path $releasePath | Out-Null
-Copy-Item -LiteralPath $builtExe -Destination (Join-Path $releasePath 'CraftWorldModifier.exe') -Force
-Get-FileHash -LiteralPath (Join-Path $releasePath 'CraftWorldModifier.exe') -Algorithm SHA256 |
-    Select-Object Algorithm, Hash, Path
+$releaseExe = Join-Path $releasePath 'CraftWorldModifier.exe'
+$releaseSha256 = Join-Path $releasePath 'SHA256SUMS.txt'
+Copy-Item -LiteralPath $builtExe -Destination $releaseExe -Force
+$hash = (Get-FileHash -LiteralPath $releaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -LiteralPath $releaseSha256 -Value "$hash *CraftWorldModifier.exe" -Encoding ascii -NoNewline
+
+[PSCustomObject]@{
+    File = $releaseExe
+    SHA256 = $hash
+    ChecksumFile = $releaseSha256
+}

@@ -1,0 +1,43 @@
+name: 兼容性报告
+description: 提交某个游戏版本、模组组合或语言环境的读取/写入兼容情况。
+title: "[兼容性]: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请以“已实际验证”的结果填写。只读成功不代表写入或重进存档后仍有效。
+  - type: input
+    id: modifier-version
+    attributes:
+      label: 修改器版本
+      placeholder: 例如 v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: game-version
+    attributes:
+      label: 游戏版本、平台与语言
+      placeholder: 例如 Steam 1.11.009 / 简体中文
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: 模组和第三方工具
+      description: 没有请填写“无”。
+    validations:
+      required: true
+  - type: textarea
+    id: tested-features
+    attributes:
+      label: 已测试功能与结果
+      description: 请注明读取是否准确、写入是否读回成功、重进存档后是否仍有效。
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: 补充信息
+      description: 例如定位失效提示、卡顿、崩溃报告文件名或复现条件。

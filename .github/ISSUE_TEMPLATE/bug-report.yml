@@ -1,0 +1,59 @@
+name: 功能异常 / Bug 报告
+description: 报告可重复出现的读取、写入或界面问题。
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请不要上传完整存档、Token、个人路径或其它隐私信息。发生崩溃时，请先保留游戏生成的崩溃报告文件。
+  - type: input
+    id: modifier-version
+    attributes:
+      label: 修改器版本
+      placeholder: 例如 v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: game-version
+    attributes:
+      label: 游戏版本与来源
+      placeholder: 例如 Steam 1.11.009
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: 模组与其它内存工具
+      description: 没有请填写“无”。
+      placeholder: 模组名称、注入器、调试器或其它修改器
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开游戏、进入存档、连接修改器开始，按顺序写出每一步。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 操作记录、截图或崩溃报告文件名
+      description: 可粘贴相关日志；不要提交完整存档或敏感信息。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 使用前检查
+      options:
+        - label: 我已备份存档，并确认问题发生时使用的是副本或可恢复存档。
+          required: true
+        - label: 我确认提交内容不含 Token、完整存档或个人隐私。
+          required: true

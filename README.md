@@ -8,7 +8,18 @@
 >
 > **务必使用 Steam 最新版，或 [1.11.009](https://steamdb.info/patchnotes/21203273/) 及以上的版本。使用更低版本时，部分功能或许仍然有效；务必提前备份存档，若发生游戏崩溃致使存档损坏，本项目概不负责。**
 
+[⬇️ 下载 v1.0.0（Windows EXE）](https://github.com/dszwamn/CraftWorldModifier/releases/download/v1.0.0/CraftWorldModifier.exe) · [校验 SHA-256](https://github.com/dszwamn/CraftWorldModifier/releases/download/v1.0.0/SHA256SUMS.txt) · [查看全部 Release](../../releases)
+
 ![打造世界修改器主界面](docs/images/main-panel.png)
+
+## 兼容性速览
+
+| 游戏环境 | 预期支持情况 | 使用建议 |
+| --- | --- | --- |
+| Steam 最新版 / 1.11.009 及以上 | 推荐范围 | 先读取确认，再进行单次写入。 |
+| 接近的 Steam 旧版本 | 部分功能可能可用 | 不要把“可读取”视为“全部可写入”。 |
+| 非 Steam、重打包或测试版本 | 不保证兼容 | 仅建议在副本存档中测试。 |
+| 安装或移除模组后 | 对象定位可能改变 | 重新连接并做读取检查。 |
 
 ## 功能概览
 
@@ -62,7 +73,7 @@ python -m pip install -r requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\build_release.ps1
 ```
 
-输出文件为 `发布包\CraftWorldModifier.exe`。它会把界面、默认配置、方块数据与物品翻译数据打入一个 EXE；个人配置不会参与构建。
+输出文件为 `发布包\CraftWorldModifier.exe` 与 `发布包\SHA256SUMS.txt`。它会把界面、默认配置、方块数据与物品翻译数据打入一个 EXE；个人配置不会参与构建。
 
 ## 目录说明
 
@@ -97,3 +108,7 @@ powershell -ExecutionPolicy Bypass -File .\build_release.ps1
 - 如发生崩溃，附上游戏生成的崩溃报告文件名。
 
 请不要上传完整存档、个人路径、Token 或任何私密信息。
+
+## 授权与再发布
+
+本项目采用保留所有权利的授权策略；请参阅 [LICENSE](LICENSE)。游戏本体、模组、名称、图标及其相关数据仍归各自权利人所有，本项目与游戏开发商或发行平台不存在官方关联。
