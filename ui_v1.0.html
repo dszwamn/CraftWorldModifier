@@ -198,7 +198,14 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .item-filter-panel label{display:inline-flex;align-items:center;gap:5px;margin:2px;padding:5px 7px;border-radius:6px;color:#5C4E40;font-size:13px;cursor:pointer}
 @media(max-width:1180px){.item-toolbar-main{align-items:flex-start}.item-toolbar-main h1{padding-top:6px}.item-toolbar-controls #itemSearch{flex-basis:300px}}
 @media(max-width:760px){.item-toolbar-main{flex-wrap:wrap}.item-toolbar-main h1{width:100%}.item-toolbar-primary{width:100%}.item-toolbar-controls #itemSearch{flex:1 1 100%;order:3}.item-filter-panel{left:auto!important;right:0!important;min-width:285px}}
-.update-center-box{width:min(720px,calc(100vw - 36px));max-width:calc(100vw - 36px);display:flex;flex-direction:column;gap:12px}.update-center-status{padding:11px 13px;border:1px solid #E7D8C9;border-radius:10px;background:#FFF8F1;color:#6F5B4A;line-height:1.5}.update-center-status.ok{border-color:#B7D9B1;background:#F2FAEF;color:#4F7F4A}.update-center-status.error{border-color:#E5B9B0;background:#FFF1EE;color:#A34B3D}.update-center-status.pending{border-color:#E8C98A;background:#FFF7E5;color:#9A671D}.update-center-note{color:#8C7C6E;font-size:12px;line-height:1.6}.update-center-detail{min-height:36px;padding:10px 12px;border:1px dashed #E8D8CB;border-radius:9px;background:#FFFDFB;white-space:pre-line;color:#6F5B4A}.update-center-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}.update-center-action-help{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px;padding:10px 12px;border:1px solid #E7D8CB;border-radius:9px;background:#FFFDFB;color:#7A6858;font-size:12px;line-height:1.55}.update-center-action-help b{color:#5C4A3A}.btn.update-available{border-color:#E7A23A!important;background:#FFF0D8!important;color:#9A5E10!important;box-shadow:0 0 0 2px rgba(231,162,58,.18)}.update-version-chip{display:inline-flex;align-items:center;min-height:34px;padding:0 10px;border:1px solid #304963;border-radius:9px;background:#13243A;color:#9DB2C8;font-size:12px;font-weight:700;white-space:nowrap}.update-version-chip b{margin-left:5px;color:#EAF2FB;font-variant-numeric:tabular-nums}.update-version-chip[data-state="available"]{border-color:#80612A;background:#3D3020;color:#FFD18A}.update-version-chip[data-state="latest"]{border-color:#236050;background:#153A35;color:#8EE7C0}.update-version-chip[data-state="error"]{border-color:#744151;background:#3D202D;color:#FFB4C2}.update-version-chip[data-state="checking"]{border-color:#80612A;background:#3D3020;color:#FFD18A}
+.update-center-box{width:min(720px,calc(100vw - 36px));max-width:calc(100vw - 36px);display:flex;flex-direction:column;gap:12px}.update-center-status{padding:11px 13px;border:1px solid #E7D8C9;border-radius:10px;background:#FFF8F1;color:#6F5B4A;line-height:1.5}.update-center-status.ok{border-color:#B7D9B1;background:#F2FAEF;color:#4F7F4A}.update-center-status.error{border-color:#E5B9B0;background:#FFF1EE;color:#A34B3D}.update-center-status.pending{border-color:#E8C98A;background:#FFF7E5;color:#9A671D}.update-center-note{color:#8C7C6E;font-size:12px;line-height:1.6}.update-center-detail{min-height:36px;padding:10px 12px;border:1px dashed #E8D8CB;border-radius:9px;background:#FFFDFB;white-space:pre-line;color:#6F5B4A}.update-center-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}.update-center-action-help{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 14px;padding:10px 12px;border:1px solid #E7D8CB;border-radius:9px;background:#FFFDFB;color:#7A6858;font-size:12px;line-height:1.55}.update-center-action-help b{color:#5C4A3A}.btn.update-available{border-color:#E7A23A!important;background:#FFF0D8!important;color:#9A5E10!important;box-shadow:0 0 0 2px rgba(231,162,58,.18)}.update-version-chip,.game-version-chip{display:inline-flex;align-items:center;min-height:34px;padding:0 10px;border:1px solid #304963;border-radius:9px;background:#13243A;color:#9DB2C8;font-size:12px;font-weight:700;white-space:nowrap}.update-version-chip b,.game-version-chip b{margin-left:5px;color:#EAF2FB;font-variant-numeric:tabular-nums}.update-version-chip[data-state="available"]{border-color:#80612A;background:#3D3020;color:#FFD18A}.update-version-chip[data-state="latest"]{border-color:#236050;background:#153A35;color:#8EE7C0}.update-version-chip[data-state="error"]{border-color:#744151;background:#3D202D;color:#FFB4C2}.update-version-chip[data-state="checking"]{border-color:#80612A;background:#3D3020;color:#FFD18A}.game-version-chip[data-state="connected"]{border-color:#236050;background:#153A35;color:#8EE7C0}.game-version-chip[data-state="unknown"]{border-color:#80612A;background:#3D3020;color:#FFD18A}
+</style>
+<style>
+/* Game build is secondary connection metadata: keep it as one quiet line,
+   never as a button-like status chip. */
+.game-version-chip{display:inline-flex;align-items:center;min-height:0!important;padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;color:#9A806F!important;font-size:11px!important;font-weight:500!important;line-height:1.2!important;white-space:nowrap}.game-version-chip b{margin-left:3px!important;color:inherit!important;font-weight:600!important;font-variant-numeric:tabular-nums}.game-version-chip[data-state="connected"]{color:#6D8C62!important}.game-version-chip[data-state="unknown"]{color:#A96A22!important}
+/* Version text doubles as the only update-center entry point. */
+#top-bar .update-version-chip{display:inline-flex;align-items:center;min-height:34px;padding:0 10px;border:1px solid #304963;border-radius:9px;background:#13243A;color:#9DB2C8;font:700 12px inherit;white-space:nowrap;cursor:pointer;transition:background-color .16s ease,border-color .16s ease,box-shadow .16s ease}#top-bar .update-version-chip:hover:not(:disabled){background:#1B304A;border-color:#466381;box-shadow:0 0 0 3px rgba(96,165,250,.14)}#top-bar .update-version-chip:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(96,165,250,.3)}#top-bar .update-version-chip b{margin-left:5px;color:#EAF2FB;font-variant-numeric:tabular-nums}#top-bar .update-version-chip[data-state="available"]{border-color:#80612A;background:#3D3020;color:#FFD18A}#top-bar .update-version-chip[data-state="latest"]{border-color:#236050;background:#153A35;color:#8EE7C0}#top-bar .update-version-chip[data-state="error"]{border-color:#744151;background:#3D202D;color:#FFB4C2}#top-bar .update-version-chip[data-state="checking"]{border-color:#80612A;background:#3D3020;color:#FFD18A}
 </style>
 <style id="uiPolishV1" media="not all">
 /* CraftWorld Modifier · cohesive desktop tool theme */
@@ -374,15 +381,14 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <button id="connBtn" class="btn-conn" onclick="toggleConnect()"><svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-3px;margin-right:5px"><path d="M8 3v6M16 3v6M5 8h14v2a7 7 0 0 1-14 0V8ZM12 17v4"/></svg>连接游戏</button>
         <span class="conn-info"><span class="dot off" id="connDot"></span><span id="connText">JS已加载!</span></span>
         <span id="statusExtra" class="conn-info"></span>
-        <span id="writeSafetyBadge" class="conn-info" title="读取当前版本的写入边界中"><span aria-hidden="true">◆</span> 写入策略读取中</span>
+        <span id="gameVersionChip" class="game-version-chip" role="status" aria-atomic="true" data-state="disconnected" title="连接 CraftWorld.exe 后读取游戏版本信息">游戏：<b id="gameVersionText">未连接</b></span>
         <button id="localSyncBtn" class="local-sync-button" onclick="syncLocalData()" title="重新读取游戏本体与已安装模组的本地数据"><span aria-hidden="true">↻</span> 本地同步</button>
         <span class="local-sync-help">如有新加模组，请先同步</span>
         <span id="localSyncStatus" class="local-sync-status"></span>
         <button id="saveManagerBtn" class="save-manager-button" onclick="openSaveManager()" title="只能在 CraftWorld.exe 关闭后备份、校验和恢复"><span aria-hidden="true">▣</span> 离线存档</button>
         <button id="worldDiagnosticsBtn" class="save-manager-button" onclick="openWorldDiagnostics()" title="查看任务与世界运行时状态" style="display:none"><span aria-hidden="true">◎</span> 世界诊断</button>
         <button class="operation-log-button" onclick="openOperationLog()" title="查看本次修改器会话的操作记录"><span aria-hidden="true">≡</span> 操作记录<span class="operation-log-count" id="operationLogCount">0</span></button>
-        <span id="updateVersionChip" class="update-version-chip" role="status" aria-atomic="true" title="当前版本与启动时检查到的 GitHub 最新版本">当前 <b id="updateCurrentVersion">v1.0.0</b> · 最新 <b id="updateLatestVersion">未检查</b></span>
-        <button id="updateCenterButton" class="btn btn-light" onclick="openUpdateCenter()" title="打开更新中心">检查更新</button>
+        <button id="updateVersionChip" class="update-version-chip" type="button" onclick="openUpdateCenter()" title="当前版本与启动时检查到的 GitHub 最新版本" aria-label="打开更新中心"><span>当前 <b id="updateCurrentVersion">v1.0.0</b> · 最新 <b id="updateLatestVersion">未检查</b></span></button>
         <span id="logText" class="log-msg"></span>
     </div>
     <div class="feature-preset-dock" aria-label="功能预设快捷栏">
@@ -513,7 +519,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <button id="otherRelocateBtn" class="btn btn-light" onclick="autoRelocateOtherFeatures()" style="padding:10px 18px">🧭 校验偏移</button>
             <button class="btn btn-light" onclick="refreshOtherFeatures()" style="padding:10px 18px">↻ 刷新状态</button>
         </div>
-        <div style="color:#8C7C6E;font-size:13px;margin:-8px 0 16px">仅包含已验证的代码补丁。“校验偏移”会重新读取当前运行中代码；不匹配时保留保护，不会猜测地址或写入未知位置。</div>
+        <div style="color:#8C7C6E;font-size:13px;margin:-8px 0 16px">仅包含已验证的代码补丁。“校验偏移”会先按当前 CraftWorld.exe 指纹选择已收录的布局，再读取对应代码；未知版本不会猜测地址或写入。</div>
         <div class="cards" id="otherFeatureCards">
             <div class="card wide" style="color:#B8A89A;text-align:center">连接游戏后读取状态</div>
         </div>
@@ -1663,11 +1669,11 @@ function updateQuickState(current,latest,state){
     if(chip){if(state)chip.setAttribute('data-state',state);else chip.removeAttribute('data-state');}
 }
 function updateQuickButtonState(result){
-    var button=document.getElementById('updateCenterButton');if(!button)return;
+    var button=document.getElementById('updateVersionChip');if(!button)return;
     var staged=result&&result.staged;
-    if(staged&&staged.version){button.textContent='应用 v'+staged.version;button.title='已下载并校验，点击完成更新';button.classList.add('update-available');return;}
-    if(result&&result.ok&&result.available){button.textContent='更新 v'+result.version;button.title='发现新版本，点击下载并更新';button.classList.add('update-available');return;}
-    button.textContent='检查更新';button.title='手动检查修改器更新';button.classList.remove('update-available');
+    if(staged&&staged.version){button.title='已暂存 v'+staged.version+'；点击打开更新中心';button.classList.add('update-available');return;}
+    if(result&&result.ok&&result.available){button.title='发现新版本 '+result.version+'；点击打开更新中心';button.classList.add('update-available');return;}
+    button.title='点击打开更新中心';button.classList.remove('update-available');
 }
 function updateCenterRender(result){
     var stage=document.getElementById('stageUpdateBtn'),apply=document.getElementById('applyUpdateBtn');
@@ -1692,7 +1698,7 @@ function openUpdateCenter(){
     });
 }
 function closeUpdateCenter(){var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.remove('active');}
-function checkModifierUpdate(){var quick=document.getElementById('updateCenterButton');if(quick){quick.disabled=true;quick.textContent='正在检查…';}updateCenterSetStatus('正在检查 GitHub Releases…','pending');updateCenterSetDetail('');call('check_for_update',function(r){if(quick)quick.disabled=false;_updateCheck=r;updateCenterRender(r);});}
+function checkModifierUpdate(){var quick=document.getElementById('updateVersionChip');if(quick){quick.disabled=true;quick.title='正在检查 GitHub Releases…';}updateCenterSetStatus('正在检查 GitHub Releases…','pending');updateCenterSetDetail('');call('check_for_update',function(r){if(quick){quick.disabled=false;quick.title='点击打开更新中心';}_updateCheck=r;updateCenterRender(r);});}
 function stageModifierUpdate(){updateCenterSetStatus('正在下载并校验更新包…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'暂存更新失败','error');return;}updateCenterSetStatus('更新包已校验并暂存。','ok');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));updateQuickState(r.current_version||'1.0.0',r.version,'available');updateQuickButtonState({ok:true,staged:{version:r.version}});var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包已暂存：'+r.version,'success');});}
 function applyModifierUpdate(){updateCenterSetStatus('正在安排重启更新…','pending');call('apply_staged_update',function(r){if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'应用更新失败','error');return;}updateCenterSetStatus(r.message||'更新已排队；即将重启。','ok');log('修改器更新已排队，准备重启','success');scheduleUiTimeout(function(){beginUiShutdown();},350);});}
 var _updateAutoCheckInFlight=false;
@@ -1962,6 +1968,17 @@ function log(m, level) {
     var text=String(m===undefined || m===null ? '' : m).trim();
     if (!text){ setTopLog(null); return null; }
     return recordOperation(text, level || 'info');
+}
+function setGameVersion(version){
+    var chip=document.getElementById('gameVersionChip');
+    var value=document.getElementById('gameVersionText');
+    if(!chip || !value) return;
+    var info=version || {};
+    var state=String(info.state || '未连接');
+    var display=String(info.display || (state==='未连接'?'未连接':'未识别'));
+    value.textContent=display;
+    chip.dataset.state=state==='未连接'?'disconnected':(info.ok?'connected':'unknown');
+    chip.title=String(info.detail || (state==='未连接'?'连接 CraftWorld.exe 后读取游戏版本信息':'无法确认当前游戏版本'));
 }
 function updateGold(v) { var el=document.getElementById('goldVal'); if (v !== undefined && v !== null && v !== '' && document.activeElement!==el) g('goldVal', v); }
 function updateMana(v) {
@@ -3364,6 +3381,7 @@ function toggleConnect() {
             dot.className = "dot off";
             txt.textContent = "\u672a\u8fde\u63a5";
             extra.textContent = "";
+            setGameVersion({state:'未连接',display:'未连接',detail:'尚未连接游戏进程'});
             document.getElementById('portalList').textContent = '连接后自动扫描当前传送门';
             document.getElementById('portalCount').textContent = '';
             clearGameTimeControls();
@@ -3419,6 +3437,7 @@ function doConnect(pid) {
             btn.style.opacity = "1";
             dot.className = "dot on";
             txt.textContent = "\u8fde\u63a5\u6210\u529f (PID: " + r.pid + ")";
+            setGameVersion(r.game_version);
             function connectionReadLabel(label, count, result){
                 var state=result && result.state;
                 if(state==='已验证' && Number.isInteger(Number(count)) && Number(count)>=0) return label+': '+String(count);
@@ -3473,6 +3492,7 @@ function doConnect(pid) {
             btn.textContent = "\uD83D\uDD0C \u8fde\u63a5\u6e38\u620f";
             btn.style.opacity = "1";
             txt.textContent = "\u8fde\u63a5\u5931\u8d25";
+            setGameVersion({state:'未连接',display:'未连接',detail:'未连接到游戏进程'});
             log("\u8fde\u63a5\u5931\u8d25: " + (r ? r.error : "\u672a\u77e5"));
         }
     }, pid);
@@ -5145,7 +5165,7 @@ function autoRelocateOtherFeatures(){
         if(button)button.disabled=false;
         if(!result||!result.ok){log((result&&result.error)||'自动定位失败','error');return;}
         var unresolved=Object.keys(result.unresolved||{});
-        log('偏移校验完成：'+result.count+' 项已匹配'+(unresolved.length?'；'+unresolved.length+' 项保留保护':'')+'（'+(result.exe||'CraftWorld.exe')+'）',result.count?'success':'warning');
+        log('偏移校验完成：'+result.count+' 项已匹配'+(unresolved.length?'；'+unresolved.length+' 项保留保护':'')+'（'+(result.profile||result.exe||'CraftWorld.exe')+'）',result.count?'success':'warning');
         refreshOtherFeatures();
     });
 }
@@ -5159,6 +5179,13 @@ function refreshOtherFeatures(){
             var detail=escapeHtml(readStateDetail(r));
             host.innerHTML = '<div class="card wide" style="color:#C96A45;text-align:center"><b>'+state+'</b><br><span style="display:inline-block;margin-top:7px;color:#8C7C6E">'+detail+'</span></div>';
             return;
+        }
+        if(r.profile){
+            var profile=document.createElement('div');
+            profile.className='card wide';
+            profile.style.cssText='padding:10px 14px;font-size:12px;color:#8C7C6E';
+            profile.textContent='补丁布局：'+r.profile+(r.profile_recognized?' · 已按 EXE 指纹匹配':' · 未收录，仅保留逐字节保护');
+            host.appendChild(profile);
         }
         r.features.forEach(function(feature){
             var card = document.createElement("div");

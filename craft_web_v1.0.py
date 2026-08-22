@@ -129,6 +129,62 @@ def _resource_path(name):
     return candidates[0]
 
 
+def _read_windows_file_version(path):
+    """Read the semantic file version when the PE actually provides one.
+
+    CraftWorld's current Steam executable reports ``0.0.0.0`` and has no
+    version resource, so callers must treat that value as unavailable instead
+    of showing a misleading version number.
+    """
+    if os.name != "nt" or not path or not os.path.isfile(path):
+        return ""
+    try:
+        version = ctypes.windll.version
+        size = int(version.GetFileVersionInfoSizeW(str(path), None) or 0)
+        if size <= 0:
+            return ""
+        blob = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(str(path), 0, size, blob):
+            return ""
+        pointer = ctypes.c_void_p()
+        length = ctypes.c_uint()
+        if not version.VerQueryValueW(blob, "\\", ctypes.byref(pointer), ctypes.byref(length)):
+            return ""
+        if not pointer.value or int(length.value) < 16:
+            return ""
+        # VS_FIXEDFILEINFO: dwFileVersionMS at offset 8 and dwFileVersionLS
+        # at offset 12.  Ignore the all-zero placeholder used by this game.
+        raw = ctypes.string_at(pointer.value, int(length.value))
+        version_ms, version_ls = struct.unpack_from("<II", raw, 8)
+        major, minor = (version_ms >> 16) & 0xFFFF, version_ms & 0xFFFF
+        build, revision = (version_ls >> 16) & 0xFFFF, version_ls & 0xFFFF
+        if not any((major, minor, build, revision)):
+            return ""
+        return "%d.%d.%d.%d" % (major, minor, build, revision)
+    except Exception:
+        return ""
+
+
+def _read_steam_build_id(exe_path):
+    """Read the Steam appmanifest buildid associated with CraftWorld.exe."""
+    if not exe_path:
+        return ""
+    try:
+        common_dir = os.path.dirname(os.path.abspath(exe_path))
+        steamapps = os.path.dirname(os.path.dirname(common_dir))
+        if os.path.basename(steamapps).lower() != "steamapps":
+            return ""
+        manifest = os.path.join(steamapps, "appmanifest_248390.acf")
+        if not os.path.isfile(manifest):
+            return ""
+        with open(manifest, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(512 * 1024)
+        match = re.search(r'"buildid"\s*"([0-9]+)"', text, re.IGNORECASE)
+        return match.group(1) if match else ""
+    except Exception:
+        return ""
+
+
 def _ensure_resource_import_path():
     """Make resources/block_data.py importable in an onedir package."""
     resource_file = _resource_path("block_data.py")
@@ -749,6 +805,111 @@ V2_OTHER_FEATURE_PATCHES = {
             (0x762591, b"\x74", b"\x75"),
         ),
     },
+}
+
+
+def _other_feature_patch_variant(base_specs, rva_deltas):
+    """Build an immutable, named-RVA patch profile from validated deltas.
+
+    The byte changes themselves are identical across these two nearby Steam
+    V1 builds; only the compiler layout moved the containing code blocks.
+    Keeping the offsets in a profile (rather than "relocating" at runtime)
+    means an unknown executable can never inherit a guessed write address.
+    """
+    output = {}
+    for key, spec in base_specs.items():
+        delta = int(rva_deltas.get(key, 0))
+        output[key] = {
+            "name": spec["name"],
+            "patches": tuple((int(offset) + delta, bytes(off_bytes), bytes(on_bytes))
+                             for offset, off_bytes, on_bytes in spec["patches"]),
+        }
+    return output
+
+
+# Fingerprinted layouts for the code-patch tools.  These exact SHA-256 values
+# are intentional: PE timestamp/size alone can collide after a repack.  The
+# second profile was mapped by matching the full surrounding instruction runs
+# of all nine existing patch points against its local CraftWorld.exe/PDB pair.
+V1_OTHER_FEATURE_PATCH_PROFILES = {
+    "steam-v1-build-21776357": {
+        "sha256": "9ed44877dbc1b7ee59bbcbc5eaa15e8bd168c432ee8e422030d2245f4e0f8fbd",
+        "label": "Steam 构建 21776357",
+        "patches": OTHER_FEATURE_PATCHES,
+    },
+    "steam-v1-local-20260202": {
+        "sha256": "9adfdd40816e8a820a1cbc3967401e3fa0eb59c85e6c7475b30227b0d956ab6c",
+        "label": "已识别低版本（2026-02-02）",
+        "patches": _other_feature_patch_variant(OTHER_FEATURE_PATCHES, {
+            "infinite_items": -0xA0,
+            "mega_xp": -0xF0,
+            "portal_mana": -0x20,
+            "infinite_health": -0x90,
+            "reveal_map": -0xA0,
+            "instant_tech": -0x90,
+            "no_hunger": -0x90,
+            "infinite_mana": -0x80,
+            "fast_climb": -0xA0,
+        }),
+    },
+}
+
+
+def _other_feature_signature(pattern_hex, mask_hex, patch_index, patch_size=1,
+                             extra_wildcards=()):
+    """Create a compact, masked code signature for one known patch point."""
+    pattern, mask = bytes.fromhex(pattern_hex), bytearray(bytes.fromhex(mask_hex))
+    patch_index, patch_size = int(patch_index), int(patch_size)
+    if len(pattern) != len(mask) or patch_index < 0 or patch_index + patch_size > len(mask):
+        raise ValueError("其它功能特征码定义无效")
+    # The running image may contain either the original code or the enabled
+    # patch.  It is verified separately after locating the surrounding code.
+    mask[patch_index:patch_index + patch_size] = b"\0" * patch_size
+    for index in extra_wildcards:
+        if 0 <= int(index) < len(mask):
+            mask[int(index)] = 0
+    return {"pattern": pattern, "mask": bytes(mask), "patch_index": patch_index,
+            "patch_size": patch_size}
+
+
+# Fallback signatures for nearby Steam V1 executables that are not yet in the
+# fingerprint table above.  Each covers 12 bytes of code on either side of a
+# patch point.  Patch bytes themselves are masked during the scan so a feature
+# that is already enabled remains discoverable.  A mask byte of 00 denotes a
+# compiler/build-specific byte that is deliberately not compared.
+V1_OTHER_FEATURE_SIGNATURES = {
+    "infinite_items": (_other_feature_signature(
+        "7505bec80000003bde8bcf0f4fde53e8417fb1ff807d140075",
+        "ffffffffffffffffffffffffffffffff00ffffffffffffffff", 12),),
+    "mega_xp": (_other_feature_signature(
+        "14768b47108b093b4491040f8c450100008d4601c645cf0189",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffff", 12),),
+    "portal_mana": (_other_feature_signature(
+        "0f2f0d8468f900f30f1055087625f30f5cca0f57c00f2fc1f3",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffff", 12, 1, (5,)),),
+    "infinite_health": (_other_feature_signature(
+        "f30f1045d4d95dcc0f2f45cc0f86c80000008d8fc0010000e849c59effd9",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffff00ffffffff", 12, 6),),
+    "reveal_map": (_other_feature_signature(
+        "2c803d6d891c010056578bf9741b8b750868ff00000056e89f",
+        "ffffffffffffffffffffffffffffffffffffffffffffffff00", 12, 1, (5, 6, 23)),),
+    "instant_tech": (_other_feature_signature(
+        "0f2f0dd087fb00f30f114e64720ee84b46c4ff8bc8e8e4cdffff",
+        "ffffffffffffffffffffffffffffff00ffffffffffffffffffff", 12, 2, (5,)),),
+    "no_hunger": (_other_feature_signature(
+        "9efff30f10054c40f900f30f5e4038f30f5945088d8fa40100",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffff", 12, 1, (8,)),),
+    "infinite_mana": (_other_feature_signature(
+        "0f2fc8f30f11861c0200000f827f010000a12c241c0185c075",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffff", 12, 1, (20, 21)),),
+    "fast_climb": (
+        _other_feature_signature(
+            "00f30f5d05f850f900f30f1187000200007e10f30f58054c40",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffff", 12, 1, (7,)),
+        _other_feature_signature(
+            "10f30f58054c40f900f30f1187000200008bcfe8249e0000f3",
+            "ffffffffffffffffffffffffffffffffffffffff00ffffffff", 12, 1, (7,)),
+    ),
 }
 
 
@@ -4671,6 +4832,52 @@ class Api:
             "entries": rows,
         }
 
+    @staticmethod
+    def _game_version_info(exe_path):
+        """Return a truthful, read-only version label for the running game.
+
+        The current CraftWorld Steam PE has no usable semantic file version,
+        so its Steam appmanifest buildid is the only stable release marker.
+        Keep the source and state in the response so the UI can distinguish a
+        real read from an unavailable/non-Steam version.
+        """
+        path = os.path.abspath(str(exe_path or "")) if exe_path else ""
+        file_version = _read_windows_file_version(path)
+        if file_version:
+            return {"ok": True, "display": "游戏版本 " + file_version,
+                    "file_version": file_version, "steam_build_id": "",
+                    "source": "CraftWorld.exe 文件版本", "state": "已读取",
+                    "detail": "已读取 CraftWorld.exe 的正式文件版本"}
+        build_id = _read_steam_build_id(path)
+        if build_id:
+            return {"ok": True, "display": "Steam 构建 " + build_id,
+                    "file_version": "", "steam_build_id": build_id,
+                    "source": "Steam appmanifest", "state": "已读取",
+                    "detail": "当前 CraftWorld.exe 对应 Steam 构建 " + build_id}
+        if not path:
+            detail = "未读取到 CraftWorld.exe 路径"
+        elif not os.path.isfile(path):
+            detail = "CraftWorld.exe 文件不存在或路径不可读"
+        else:
+            detail = "程序没有文件版本信息，且未找到 Steam appmanifest buildid"
+        return {"ok": False, "display": "未识别", "file_version": "",
+                "steam_build_id": "", "source": "", "state": "未识别",
+                "detail": detail}
+
+    def get_game_version(self, pid=0):
+        """Read the current game's version marker without touching memory."""
+        try:
+            import psutil
+            target_pid = int(pid or getattr(pm, "process_id", 0) or 0)
+            if not target_pid:
+                return {"ok": False, "display": "未连接", "state": self.STATUS_DISCONNECTED,
+                        "source": "", "detail": "尚未连接游戏进程"}
+            exe_path = psutil.Process(target_pid).exe()
+            return self._game_version_info(exe_path)
+        except Exception as exc:
+            return {"ok": False, "display": "未识别", "state": "未识别",
+                    "source": "", "detail": "游戏版本读取失败：%s" % exc}
+
     def list_processes(self):
         """列出所有 CraftWorld.exe 进程"""
         import psutil
@@ -4719,6 +4926,7 @@ class Api:
         self._restore_pet_limit_override_internal()
         self._dispose_wave_portal_controller()
         self._v2_cache = None
+        self._other_feature_profile_cache = {"pid": 0, "exe_path": "", "profile": None}
         self._skill_base_cache = None
         self._skill_base_ver = None
         self._magic_cache = {}
@@ -4772,6 +4980,7 @@ class Api:
             # game state.
             dwarf_state = _get_cached_read_state("dwarves")
             item_state = _get_cached_read_state("items")
+            game_version = self.get_game_version(pm.process_id)
             return {"success":True,"pid":pm.process_id,
                     # A count is meaningful only after a verified read.  Do
                     # not turn a locator failure into a convincing-looking 0
@@ -4780,7 +4989,8 @@ class Api:
                     "items": len(item_cache) if item_state.get("state") == self.STATUS_VERIFIED else None,
                     "dwarves_state": dwarf_state,
                     "items_state": item_state,
-                    "magic":None,"magic_scanning":False,"magic_unloaded":True,"doctor":doctor}
+                    "magic":None,"magic_scanning":False,"magic_unloaded":True,"doctor":doctor,
+                    "game_version": game_version}
         except Exception as e:
             return {"success":False,"error":str(e)}
 
@@ -4806,6 +5016,7 @@ class Api:
         self._clear_timer_locks()
         self._dispose_wave_portal_controller()
         self._v2_cache = None
+        self._other_feature_profile_cache = {"pid": 0, "exe_path": "", "profile": None}
         global pm, connected, dwarf_cache, item_cache
         try:
             if pm and (self._pa1 or self._pa2):
@@ -15187,8 +15398,153 @@ class Api:
 
     # ==================== 其它功能（已验证代码补丁） ====================
 
+    _other_feature_profile_cache = {"pid": 0, "exe_path": "", "profile": None}
+
+    @staticmethod
+    def _masked_signature_matches(blob, pattern, mask, limit=2):
+        """Return up to ``limit`` exact masked matches in a module section."""
+        if not blob or len(pattern) != len(mask) or not pattern:
+            return []
+        # Use the longest required run as an anchor so scanning a 12 MiB .text
+        # section remains quick.  The full mask is checked after every hit.
+        runs, run_start = [], None
+        for index, required in enumerate(mask + b"\0"):
+            if required and run_start is None:
+                run_start = index
+            elif not required and run_start is not None:
+                runs.append((run_start, pattern[run_start:index]))
+                run_start = None
+        if not runs:
+            return []
+        anchor_start, anchor = max(runs, key=lambda row: len(row[1]))
+        hits, cursor, length = [], 0, len(pattern)
+        while len(hits) < int(limit):
+            found = blob.find(anchor, cursor)
+            if found < 0:
+                break
+            candidate = found - anchor_start
+            if candidate >= 0 and candidate + length <= len(blob):
+                segment = blob[candidate:candidate + length]
+                if all(not mask[index] or segment[index] == pattern[index]
+                       for index in range(length)):
+                    hits.append(candidate)
+            cursor = found + 1
+        return hits
+
+    def _module_text_section(self):
+        """Read only CraftWorld.exe's live .text section for signature scans."""
+        try:
+            base = int(get_base() or 0)
+            if not self._valid_runtime_pointer(base):
+                return None, "无法读取 CraftWorld.exe 模块基址"
+            pe_offset_raw = pm.read_bytes(base + 0x3C, 4)
+            pe_offset = struct.unpack("<I", bytes(pe_offset_raw))[0]
+            if pm.read_bytes(base + pe_offset, 4) != b"PE\0\0":
+                return None, "CraftWorld.exe PE 头不匹配"
+            file_header = pm.read_bytes(base + pe_offset + 4, 20)
+            sections = struct.unpack_from("<H", bytes(file_header), 2)[0]
+            optional_size = struct.unpack_from("<H", bytes(file_header), 16)[0]
+            if not 1 <= sections <= 32 or not 0x40 <= optional_size <= 0x400:
+                return None, "CraftWorld.exe PE 节表无效"
+            section_base = base + pe_offset + 24 + optional_size
+            for index in range(sections):
+                row = bytes(pm.read_bytes(section_base + index * 40, 40))
+                name = row[:8].split(b"\0", 1)[0]
+                if name != b".text":
+                    continue
+                virtual_size, virtual_rva, raw_size = struct.unpack_from("<III", row, 8)
+                size = max(int(virtual_size), int(raw_size))
+                if not 0 < virtual_rva < 0x20000000 or not 0 < size <= 32 * 1024 * 1024:
+                    return None, "CraftWorld.exe .text 节大小异常"
+                return {"rva": int(virtual_rva),
+                        "bytes": bytes(pm.read_bytes(base + int(virtual_rva), size))}, ""
+            return None, "CraftWorld.exe 中未找到 .text 节"
+        except Exception as exc:
+            return None, "读取 CraftWorld.exe .text 节失败：%s" % exc
+
+    def _signature_locate_other_feature_patches(self):
+        """Build a patch profile only if every V1 code signature is unique."""
+        text, error = self._module_text_section()
+        if text is None:
+            return None, error
+        payload, text_rva = text["bytes"], int(text["rva"])
+        patches, diagnostics = {}, {}
+        for key, spec in OTHER_FEATURE_PATCHES.items():
+            signatures = V1_OTHER_FEATURE_SIGNATURES.get(key) or ()
+            if len(signatures) != len(spec["patches"]):
+                return None, "%s 的特征码定义不完整" % spec.get("name", key)
+            rows, offsets = [], []
+            for signature, (_old_offset, off_bytes, on_bytes) in zip(signatures, spec["patches"]):
+                hits = self._masked_signature_matches(payload, signature["pattern"], signature["mask"], 2)
+                if len(hits) != 1:
+                    return None, "%s 特征码%s" % (spec.get("name", key),
+                                                     "未唯一命中" if hits else "未命中")
+                offset = text_rva + int(hits[0]) + int(signature["patch_index"])
+                actual = payload[int(hits[0]) + int(signature["patch_index"]):
+                                 int(hits[0]) + int(signature["patch_index"]) + len(off_bytes)]
+                if actual not in (off_bytes, on_bytes):
+                    return None, "%s 命中位置的开关字节不符合已验证状态" % spec.get("name", key)
+                offsets.append(offset)
+                rows.append((offset, bytes(off_bytes), bytes(on_bytes)))
+            # The two climbing sites are part of the same native routine.  A
+            # unique hit is not enough: their fixed instruction distance is a
+            # second independent check against accidental look-alikes.
+            if key == "fast_climb" and len(offsets) == 2 and offsets[1] - offsets[0] != 0x12:
+                return None, "快速攀爬的两个特征命中距离异常"
+            patches[key] = {"name": spec["name"], "patches": tuple(rows)}
+            diagnostics[key] = tuple("+0x%X" % int(offset) for offset in offsets)
+        return {"key": "steam-v1-signature", "label": "Steam V1 特征定位布局",
+                "sha256": "", "recognized": True, "patches": patches,
+                "diagnostics": diagnostics}, ""
+
+    def _other_feature_patch_profile(self):
+        """Return the exact code-patch profile for the connected executable.
+
+        These features patch instructions, unlike the data readers elsewhere
+        in the trainer.  A module-relative RVA remains valid only for an
+        explicitly fingerprinted build.  The hash is calculated once per
+        process and cached, so refreshes only read the already verified bytes.
+        """
+        if self._detect_v2():
+            return {"key": "dragon-v2", "label": "巨龙版已验证布局",
+                    "sha256": "", "recognized": True,
+                    "patches": V2_OTHER_FEATURE_PATCHES}
+        try:
+            import psutil
+            pid = int(getattr(pm, "process_id", 0) or 0)
+            exe_path = os.path.abspath(psutil.Process(pid).exe()) if pid else ""
+            cached = getattr(self, "_other_feature_profile_cache", {}) or {}
+            if (cached.get("profile") is not None and int(cached.get("pid", 0) or 0) == pid and
+                    os.path.normcase(str(cached.get("exe_path") or "")) == os.path.normcase(exe_path)):
+                return cached["profile"]
+            digest = self._preflight_file_hash(exe_path).lower() if exe_path else ""
+            selected = None
+            for key, spec in V1_OTHER_FEATURE_PATCH_PROFILES.items():
+                if digest and digest == str(spec.get("sha256") or "").lower():
+                    selected = {"key": key, "label": spec["label"], "sha256": digest,
+                                "recognized": True, "patches": spec["patches"]}
+                    break
+            if selected is None:
+                selected, scan_error = self._signature_locate_other_feature_patches()
+                if selected is not None:
+                    selected["sha256"] = digest
+                else:
+                    # The fallback does not produce a partially relocated
+                    # profile.  All features keep their byte guard and reject
+                    # writing until a complete, unique layout is available.
+                    selected = {"key": "v1-unrecognized", "label": "未收录的 Steam V1 布局",
+                                "sha256": digest, "recognized": False,
+                                "reason": scan_error or "特征定位未完成",
+                                "patches": {}}
+            self._other_feature_profile_cache = {"pid": pid, "exe_path": exe_path,
+                                                 "profile": selected}
+            return selected
+        except Exception:
+            return {"key": "v1-unresolved", "label": "版本指纹读取失败", "sha256": "",
+                    "recognized": False, "patches": OTHER_FEATURE_PATCHES}
+
     def _other_feature_patches(self):
-        return V2_OTHER_FEATURE_PATCHES if self._detect_v2() else OTHER_FEATURE_PATCHES
+        return self._other_feature_patch_profile()["patches"]
 
     def get_other_features(self):
         """读取其它功能的实际开关状态，并校验当前游戏版本是否匹配。"""
@@ -15197,8 +15553,18 @@ class Api:
                     "error": "未连接游戏", "features": None}
         try:
             b = get_base()
+            profile = self._other_feature_patch_profile()
             features = []
-            for key, spec in self._other_feature_patches().items():
+            patch_specs = self._other_feature_patches()
+            # An unresolved executable still lists every legacy tool, but no
+            # fallback RVA is exposed to a writer.  This avoids treating one
+            # coincidental byte match as permission to patch an unknown build.
+            candidates = patch_specs if profile.get("recognized") else OTHER_FEATURE_PATCHES
+            for key, spec in candidates.items():
+                if not profile.get("recognized"):
+                    features.append({"key": key, "name": spec["name"], "status": "unsupported",
+                                     "note": profile.get("reason") or "当前 EXE 未通过特征定位"})
+                    continue
                 original = True
                 enabled = True
                 for offset, off_bytes, on_bytes in spec["patches"]:
@@ -15215,7 +15581,9 @@ class Api:
             unsupported = [entry for entry in features if entry.get("status") == "unsupported"]
             return {"ok": True,
                     "state": self.STATUS_VERIFIED if not unsupported else self.STATUS_UNVERIFIED,
-                    "features": features,
+                    "features": features, "profile": profile.get("label"),
+                    "profile_recognized": bool(profile.get("recognized")),
+                    "profile_reason": profile.get("reason", ""),
                     "reason": ("部分补丁原始字节与当前版本不一致，相关开关已拒绝写入。"
                                if unsupported else "所有其它功能的补丁字节已读取并校验。")}
         except Exception as e:
@@ -15238,8 +15606,16 @@ class Api:
                     "error": "未连接游戏，无法校验其它功能偏移"}
         try:
             base = int(get_base())
+            profile = self._other_feature_patch_profile()
             resolved, unresolved = {}, {}
-            for key, spec in self._other_feature_patches().items():
+            patch_specs = self._other_feature_patches()
+            candidates = patch_specs if profile.get("recognized") else OTHER_FEATURE_PATCHES
+            for key, spec in candidates.items():
+                if not profile.get("recognized"):
+                    unresolved[key] = {"name": spec.get("name") or key,
+                                       "reason": profile.get("reason") or "当前 EXE 未通过特征定位",
+                                       "patches": []}
+                    continue
                 rows, state = [], "off"
                 all_original, all_enabled = True, True
                 for offset, off_bytes, on_bytes in spec["patches"]:
@@ -15265,7 +15641,9 @@ class Api:
             return {"ok": True, "state": self.STATUS_VERIFIED,
                     "exe": "CraftWorld.exe", "count": len(resolved),
                     "resolved": resolved, "unresolved": unresolved,
-                    "message": "已重新校验当前会话的模块相对补丁偏移；未猜测或写入未知地址。"}
+                    "profile": profile.get("label"),
+                    "profile_recognized": bool(profile.get("recognized")),
+                    "message": "已按当前 EXE 指纹选择并重新校验模块相对补丁偏移；未猜测或写入未知地址。"}
         except Exception as exc:
             return {"ok": False, "state": self.STATUS_FAILED,
                     "error": "其它功能偏移校验失败：%s" % exc}
@@ -15275,6 +15653,11 @@ class Api:
         if not connected or pm is None:
             return {"ok": False, "state": self.STATUS_DISCONNECTED,
                     "error": "未连接游戏"}
+        profile = self._other_feature_patch_profile()
+        if not profile.get("recognized"):
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "当前 EXE 未通过特征定位，未执行修改：%s" %
+                             (profile.get("reason") or "未知版本")}
         spec = self._other_feature_patches().get(key)
         if spec is None:
             return {"ok": False, "state": self.STATUS_UNSUPPORTED,
