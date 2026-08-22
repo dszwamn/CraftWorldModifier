@@ -1,5 +1,5 @@
 ### 1. 导入与常量
-import webview, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys, random
+import webview, webbrowser, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys, random
 import urllib.parse, urllib.request, urllib.error, zipfile, tempfile, subprocess, io
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -5676,6 +5676,15 @@ class Api:
                     "matches": matches, "truncated": False, "write_enabled": False}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def open_project_url(self):
+        """Open the public project page in the user's default browser."""
+        url = "https://github.com/dszwamn/CraftWorldModifier"
+        try:
+            opened = bool(webbrowser.open(url, new=2))
+            return {"ok": opened, "url": url, "error": "系统未能打开默认浏览器" if not opened else ""}
+        except Exception as exc:
+            return {"ok": False, "url": url, "error": str(exc)}
 
     def get_map_pins(self, map_key):
         """Return pins belonging to one generated world/save."""
