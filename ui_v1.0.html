@@ -39,8 +39,6 @@ body{font-family:"Microsoft YaHei",-apple-system,sans-serif;background:linear-gr
 #top-bar{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
 #top-bar button{padding:10px 22px;border:none;border-radius:10px;font-size:14px;font-family:inherit;cursor:pointer}
 .local-sync-button{background:#F0EBE6;color:#6B5B4F;font-weight:700}.local-sync-button:hover{background:#E8E2DC}.local-sync-button:disabled{opacity:.62;cursor:wait}.local-sync-help{font-size:12px;color:#A88C68;white-space:nowrap}.local-sync-status{font-size:11px;color:#8C7C6E;max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.feature-preset-dock{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid #E8C98A;border-radius:11px;background:linear-gradient(100deg,#FFF9E9,#FFF0DD);box-shadow:0 3px 14px rgba(144,100,47,.10)}
-.feature-preset-dock .preset-title{font-size:15px;font-weight:800;color:#855B25;white-space:nowrap}.feature-preset-dock input,.feature-preset-dock select{height:36px;padding:0 10px;border:1px solid #E0D6CC;border-radius:7px;background:#fff;color:#51453B;font-family:inherit;font-size:13px}.feature-preset-dock input{width:145px}.feature-preset-dock select{min-width:210px;max-width:min(360px,36vw)}.feature-preset-dock .preset-help{font-size:11px;color:#A88C68;white-space:nowrap}
 .item-command-dock{position:sticky;top:0;z-index:24;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-4px -4px 12px;padding:10px 12px;border:1px solid #E8DDD3;border-radius:11px;background:rgba(255,250,246,.97);box-shadow:0 3px 14px rgba(109,82,57,.10)}
 .item-command-dock h1{margin-right:4px!important}.item-command-dock button{flex:0 0 auto}.item-command-dock input[type="text"]{min-width:220px}.item-command-dock select{max-width:190px}
 .btn-conn{background:#FF9C2C;color:#fff;font-weight:600}
@@ -104,7 +102,7 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .item-header{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
 .item-quick-panel{display:none;margin:0 0 10px;padding:14px 16px;border:1px solid #E8C98A;border-radius:11px;background:linear-gradient(110deg,#FFF9EE,#FFF3E8);box-shadow:0 2px 8px rgba(144,100,47,.06)}.item-quick-panel.active{display:block}.item-quick-panel .item-quick-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.item-quick-panel .item-quick-title{font-size:16px;font-weight:800;color:#855B25}.item-quick-panel .item-quick-summary{font-size:12px;color:#A88C68;margin-right:auto}.item-quick-add{display:grid;grid-template-columns:minmax(180px,1fr) minmax(200px,1fr) auto;gap:8px;align-items:end;margin-bottom:10px}.item-quick-add input,.item-quick-add select{height:36px;width:100%;padding:0 10px;border:1px solid #E0D6CC;border-radius:7px;background:#fff;color:#51453B;font-family:inherit;font-size:13px}.item-quick-add label{display:block;font-size:12px;font-weight:700;color:#8C7C6E;margin:0 0 3px}.item-quick-panel .item-quick-note{font-size:12px;color:#A88C68;margin-top:9px;line-height:1.5}
 .recipe-editor-box{width:min(1040px,94vw)!important;max-height:90vh;display:flex;flex-direction:column;padding:22px 24px}.recipe-editor-layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:18px;min-height:0;flex:1}.recipe-editor-list{min-height:0;display:flex;flex-direction:column;padding-right:16px;border-right:1px solid #EEE4DA}.recipe-editor-list input,.recipe-editor-picker input,.recipe-editor-picker select{width:100%;height:36px;padding:0 10px;border:1px solid #E0D6CC;border-radius:7px;background:#fff;color:#51453B;font:13px inherit;outline:none}.recipe-editor-list input:focus,.recipe-editor-picker input:focus,.recipe-editor-picker select:focus{border-color:#FF9C2C}.recipe-editor-list select{width:100%;min-height:365px;margin-top:8px;padding:5px;border:1px solid #E0D6CC;border-radius:8px;background:#fff;color:#51453B;font:13px inherit;outline:none}.recipe-editor-list option{padding:7px 8px}.recipe-editor-work{min-width:0;display:flex;flex-direction:column}.recipe-editor-meta{min-height:51px;margin-bottom:12px;padding:10px 12px;border:1px solid #EADBC9;border-radius:10px;background:#FFF9F1;color:#755A38;font-size:13px;line-height:1.45}.recipe-editor-meta b{display:block;color:#5C4E40;font-size:15px}.recipe-grid{display:grid;grid-template-columns:repeat(3,minmax(102px,1fr));gap:9px;max-width:570px;margin:0 auto 16px}.recipe-cell{position:relative;display:flex;min-height:88px;align-items:center;justify-content:center;padding:20px 9px 10px;border:1px solid #DFC7A7;border-radius:10px;background:linear-gradient(145deg,#FFFDF9,#F7EADB);color:#725636;font:700 14px "Microsoft YaHei",sans-serif;line-height:1.35;text-align:center;cursor:pointer;box-shadow:inset 0 1px 0 #fff,0 2px 4px rgba(99,62,22,.08);overflow:hidden}.recipe-cell:hover{border-color:#E89B35;background:#FFF4E3}.recipe-cell.active{border:2px solid #FF9C2C;background:#FFF1D7;box-shadow:0 0 0 3px rgba(255,156,44,.16)}.recipe-cell.empty{color:#B8A89A;font-weight:600;background:#FBF9F6;border-style:dashed}.recipe-cell-index{position:absolute;top:6px;left:8px;color:#B99A76;font:11px Consolas,monospace}.recipe-editor-picker{display:grid;grid-template-columns:minmax(150px,1fr) minmax(230px,1.4fr) auto;gap:9px;align-items:end;margin-top:auto;padding:13px;border:1px solid #EADBC9;border-radius:10px;background:#FCF8F2}.recipe-editor-picker label{display:block;margin:0 0 4px;color:#8C7C6E;font-size:12px;font-weight:700}.recipe-editor-help{margin-top:10px;color:#A88C68;font-size:12px;line-height:1.5}.recipe-editor-status{min-height:18px;margin-top:8px;color:#8C7C6E;font-size:12px}.recipe-editor-status.error{color:#B34F38}.recipe-editor-status.ok{color:#4E8048}@media (max-width:760px){.recipe-editor-box{max-height:94vh;overflow:auto}.recipe-editor-layout{grid-template-columns:1fr}.recipe-editor-list{max-height:210px;padding:0 0 12px;border-right:0;border-bottom:1px solid #EEE4DA}.recipe-editor-list select{min-height:135px}.recipe-editor-picker{grid-template-columns:1fr}.recipe-grid{max-width:none}.recipe-cell{min-height:72px;font-size:12px}}
-@media (max-width:900px){.feature-preset-dock .preset-help{display:none}.feature-preset-dock input{width:120px}.item-quick-add{grid-template-columns:1fr 1fr}.item-quick-add button{grid-column:1/-1;justify-self:end}}
+@media (max-width:900px){.item-quick-add{grid-template-columns:1fr 1fr}.item-quick-add button{grid-column:1/-1;justify-self:end}}
 .item-list{background:rgba(255,255,255,0.85);border-radius:12px;flex:1;overflow-y:auto;margin-top:4px;padding:4px;font-size:13px}
 .ih{display:grid;grid-template-columns:68px 1fr 1fr 60px 90px 90px 100px 70px;padding:9px 14px;font-size:15px;color:#B8A89A;gap:6px;border-bottom:1px solid #E0D6CC}
 .ii{display:grid;grid-template-columns:68px 1fr 1fr 60px 90px 90px 100px 70px;padding:9px 14px;border-bottom:1px solid #F0EBE6;font-size:15px;color:#5C4E40;gap:6px;cursor:pointer;transition:background 0.12s}
@@ -234,7 +232,6 @@ button:disabled{cursor:not-allowed!important;opacity:.48;transform:none!importan
 #top-bar{gap:9px!important;margin-bottom:10px!important}.conn-info{color:var(--ui-muted)!important}.conn-info[style]{color:var(--ui-muted)!important}.dot.off{background:#536579}.dot.on{background:var(--ui-success);box-shadow:0 0 0 4px rgba(52,211,153,.12)}
 .btn,.top-command-dock button{border-radius:9px!important;font-weight:600}.btn-light{background:#1a2a40!important;color:#dbe8f5!important;border:1px solid #304963!important}.btn-light:hover{background:#223750!important;border-color:#466381!important}.btn-peach{background:#2a3442!important;color:#ffc36b!important;border:1px solid #5a4930!important}.btn-peach:hover{background:#3a3e42!important;border-color:#a56b22!important}.btn-orange,.btn-conn{background:linear-gradient(135deg,#f59e0b,#fb923c)!important;color:#111a27!important;border:1px solid #f8b44a!important;box-shadow:0 5px 16px rgba(245,158,11,.18);font-weight:800}.btn-orange:hover,.btn-conn:hover{background:linear-gradient(135deg,#fbbf24,#fb923c)!important;box-shadow:0 7px 20px rgba(245,158,11,.28)}
 .local-sync-button,.save-manager-button,.operation-log-button{background:#16263a!important;color:#c7d7e9!important;border:1px solid #304862!important;border-radius:9px!important}.local-sync-button:hover,.save-manager-button:hover,.operation-log-button:hover{background:#213750!important}.local-sync-help,.local-sync-status,.preset-help,.log-msg{color:var(--ui-faint)!important}.log-msg.log-success{color:var(--ui-success)!important}.log-msg.log-error{color:var(--ui-danger)!important}.log-msg.log-running,.log-msg.log-queued,.log-msg.log-pending{color:#fbbf24!important}.operation-log-count{background:#30445d!important;color:#e7f0f8!important}
-.feature-preset-dock{padding:10px 12px!important;border:1px solid #5b4828!important;border-radius:11px!important;background:linear-gradient(100deg,rgba(56,43,23,.92),rgba(39,32,24,.92))!important;box-shadow:0 5px 16px rgba(0,0,0,.16)}.feature-preset-dock .preset-title{color:#ffd18a!important}.feature-preset-dock .preset-help{color:#af9a7a!important}
 .panel{color:var(--ui-text)!important}.cards{gap:15px!important}.card{background:linear-gradient(145deg,rgba(23,38,59,.96),rgba(15,27,43,.96))!important;border:1px solid #273d59!important;border-radius:var(--ui-radius)!important;box-shadow:var(--ui-shadow)!important;backdrop-filter:blur(10px)}.card:hover{border-color:#355372!important}.card-title{color:var(--ui-text)!important;font-weight:750!important}.card-title span{color:var(--ui-muted)!important}
 .row input,.row select,.row textarea,input,select,textarea{background:#0d192a!important;color:var(--ui-text)!important;border-color:#304863!important}.row input::placeholder,input::placeholder,textarea::placeholder{color:#71869d!important}.row input:focus,.row select:focus,.row textarea:focus{border-color:#5d89b5!important}
 .ti{color:#fff!important;background:#0d192a!important}.ts{color:var(--ui-muted)!important}.lock-btn{background:#1a2a40!important;border:1px solid #304963!important;color:#fbbf24!important}
@@ -251,7 +248,7 @@ button:disabled{cursor:not-allowed!important;opacity:.48;transform:none!importan
 [style*="#8C7C6E"],[style*="#B8A89A"],[style*="#9A806F"],[style*="#A18E7E"],[style*="#A88C68"],[style*="#92755F"]{color:var(--ui-muted)!important}
 [style*="background:#fff"],[style*="background:#FFF"],[style*="background: #fff"],[style*="background: #FFF"]{background:#13243a!important}
 @media(max-width:900px){.sidebar{width:196px;flex-basis:196px}.main{padding-left:18px!important;padding-right:18px!important}#top-command-dock{margin-left:-18px!important;margin-right:-18px!important;padding-left:18px!important;padding-right:18px!important}.cards{grid-template-columns:1fr}.wide{grid-column:auto}}
-@media(max-width:640px){body{font-size:14px}.sidebar{width:70px;flex-basis:70px;padding:18px 8px}.logo{font-size:0;text-align:center;padding:3px 0 24px}.logo:before{content:"CW";font-size:18px;color:#fff}.logo:after{display:none}.nav-item{justify-content:center;padding:0;margin:5px 0;font-size:0}.nav-item>span{font-size:18px}.sidebar-footer{font-size:0;text-align:center;padding:12px 0}.sidebar-footer:after{content:"1.0";font:600 10px "Segoe UI";color:#71869d}.main{padding:16px 12px!important}#top-command-dock{margin:-16px -12px 14px!important;padding:12px!important}.feature-preset-dock .preset-help,.local-sync-help{display:none}.log-msg{width:100%;margin-left:0}.header h1,.item-toolbar-main h1{font-size:20px!important}.card{padding:15px!important}.row{gap:7px}.row input{max-width:100%}.gold-economy-grid,.mana-control-grid,.xp-control-grid{grid-template-columns:1fr!important}}
+@media(max-width:640px){body{font-size:14px}.sidebar{width:70px;flex-basis:70px;padding:18px 8px}.logo{font-size:0;text-align:center;padding:3px 0 24px}.logo:before{content:"CW";font-size:18px;color:#fff}.logo:after{display:none}.nav-item{justify-content:center;padding:0;margin:5px 0;font-size:0}.nav-item>span{font-size:18px}.sidebar-footer{font-size:0;text-align:center;padding:12px 0}.sidebar-footer:after{content:"1.0";font:600 10px "Segoe UI";color:#71869d}.main{padding:16px 12px!important}#top-command-dock{margin:-16px -12px 14px!important;padding:12px!important}.local-sync-help{display:none}.log-msg{width:100%;margin-left:0}.header h1,.item-toolbar-main h1{font-size:20px!important}.card{padding:15px!important}.row{gap:7px}.row input{max-width:100%}.gold-economy-grid,.mana-control-grid,.xp-control-grid{grid-template-columns:1fr!important}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
 </style>
 <style id="uiPolishV1Final" media="not all">
@@ -390,17 +387,6 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <button class="operation-log-button" onclick="openOperationLog()" title="查看本次修改器会话的操作记录"><span aria-hidden="true">≡</span> 操作记录<span class="operation-log-count" id="operationLogCount">0</span></button>
         <button id="updateVersionChip" class="update-version-chip" type="button" onclick="openUpdateCenter()" title="当前版本与启动时检查到的 GitHub 最新版本" aria-label="打开更新中心"><span>当前 <b id="updateCurrentVersion">v1.0.0</b> · 最新 <b id="updateLatestVersion">未检查</b></span></button>
         <span id="logText" class="log-msg"></span>
-    </div>
-    <div class="feature-preset-dock" aria-label="功能预设快捷栏">
-        <span class="preset-title">💾 功能预设</span>
-        <select id="featurePresetSelect" title="选择已保存的功能预设"><option value="">选择预设</option></select>
-        <button class="btn btn-orange" onclick="applyFeaturePreset()">恢复</button>
-        <button class="btn btn-light" onclick="setDefaultFeaturePreset()" title="下次连接游戏后自动恢复此预设">设为默认</button>
-        <input id="featurePresetName" maxlength="40" placeholder="新预设名称">
-        <button class="btn btn-peach" onclick="saveFeaturePreset()">保存当前</button>
-        <button class="btn btn-light" onclick="deleteFeaturePreset()" title="删除选中的预设">删除</button>
-        <button class="btn btn-light" onclick="refreshFeaturePresets()" title="刷新预设列表" style="padding:8px 10px">↻</button>
-        <span id="featurePresetStatus" class="preset-help">保存时间、速度、法力上限锁定、常用物品和地图标记</span>
     </div>
     </div>
     <div class="panel active" id="panel-basic">
@@ -1244,11 +1230,6 @@ var allItems = [];
 var _itemStates = {};
 var _itemQuickSettings = [];
 var _itemView = 'all';
-var _featurePresets = [];
-var _defaultFeaturePresetName = '';
-var _defaultPresetAutoPending = false;
-var _defaultPresetAutoRunning = false;
-var _defaultPresetAutoAttempts = 0;
 var _manaMaxLocked = false;
 var _tick = 0;
 var _dwarfCache = [];
@@ -1298,7 +1279,6 @@ var _writeSafetyUiActions = {
     'xp_to_next':['setXpToNextLevel'],
     'write_timer':['modifyTimer'], 'set_game_time':['setGameTime','setGameTimePreset'],
     'set_game_speed':['setGameSpeed','setGameSpeedPreset'],
-    'apply_feature_preset':['applyFeaturePreset'],
     'apply_dwarf_equipment_preset':['applyDwarfEquipmentPreset'],
     'apply_dwarf_training_preset':['applyDwarfTrainingPreset'],
     'spawn_native_dwarf':['openDwarfSpawnModal','submitDwarfSpawn'],
@@ -1345,13 +1325,13 @@ var _gameWriteMethods = new Set([
     'map_replace','map_replace_front','map_apply_cells','map_set_water','map_set_explored','map_explore_all','map_fill','map_clear',
     'set_portal_timer','add_portal_time','set_timer_lock','toggle_portal_lock','close_portal','spawn_monster_portal','end_current_monster_portal_event','force_pandora_event','restore_pandora_events','set_pandora_spawn_timer',
     'write_gold','gold_apply_operation','set_gold_economy_rule','mana_apply_operation','mana_apply_max_operation','set_mana_reserve_rule','xp_apply_progress','write_mana','write_mana_max','write_xp','xp_to_next','write_timer','set_game_time','set_game_speed',
-    'save_skills','native_skill_upgrade','apply_skill_targets','heal_all','full_sat','save_dwarf','save_dwarf_fields','save_dwarf_personal_skills','save_dwarf_personal_skill_slots','save_dwarf_equipment','apply_dwarf_equipment_preset','apply_dwarf_training_preset','modify_item_qty','undo_operation','apply_item_quick_settings','apply_feature_preset',
+    'save_skills','native_skill_upgrade','apply_skill_targets','heal_all','full_sat','save_dwarf','save_dwarf_fields','save_dwarf_personal_skills','save_dwarf_personal_skill_slots','save_dwarf_equipment','apply_dwarf_equipment_preset','apply_dwarf_training_preset','modify_item_qty','undo_operation','apply_item_quick_settings',
     'pet_house','pet_infinite','pet_spawn','spawn_direct_pet','spawn_direct_pets','remove_pet','set_pet_limit_override','clear_pet_limit_override','toggle_other_feature',
     'set_dwarf_name','spawn_native_dwarf','modify_shop_entry','native_shop_purchase_one','unlock_recipe','set_tech_node_state','set_magic_value','cast_magic_collect','cast_magic_collect_full_map','save_recipe_grid','sync_recipe_grid_to_local','set_map_write_enabled',
-    'toggle_lock','toggle_gold_lock','toggle_mana_lock','toggle_xp_lock','set_mana_max_lock','set_default_feature_preset',
+    'toggle_lock','toggle_gold_lock','toggle_mana_lock','toggle_xp_lock','set_mana_max_lock',
     'confirm_offline_save_edit','restore_save_snapshot'
 ]);
-var _nonPolicyGameWriteMethods = new Set(['connect','connect_pid','disconnect','set_default_feature_preset']);
+var _nonPolicyGameWriteMethods = new Set(['connect','connect_pid','disconnect']);
 var _policyControlledWriteMethods = new Set(Array.from(_gameWriteMethods).filter(function(method){
     return !_nonPolicyGameWriteMethods.has(method);
 }));
@@ -1364,7 +1344,7 @@ var _operationNames = {
     connect:'连接游戏', connect_pid:'连接游戏', disconnect:'断开游戏',
     write_gold:'修改金币', gold_apply_operation:'金币即时操作', set_gold_economy_rule:'金币经济规则', mana_apply_operation:'当前法力操作', mana_apply_max_operation:'法力上限操作', set_mana_reserve_rule:'法力保留规则', xp_apply_progress:'等级与经验进度操作', write_mana:'修改法力', write_mana_max:'修改法力上限', write_xp:'修改经验', write_timer:'修改倒计时', set_game_time:'调整游戏时间', set_game_speed:'调整全局速度',
     heal_all:'全员回血', full_sat:'全员补饱食度', save_dwarf:'保存矮人', save_dwarf_fields:'保存矮人属性', save_dwarf_equipment:'保存矮人装备', apply_dwarf_equipment_preset:'应用全体预设装备', apply_skill_targets:'快捷应用技能等级', set_dwarf_name:'修改矮人名称', spawn_native_dwarf:'原生矮人生成',
-    modify_item_qty:'修改物品数量', apply_item_quick_settings:'批量修改常用物品', apply_feature_preset:'恢复功能预设', modify_shop_entry:'修改商店物品', unlock_recipe:'解锁配方', save_recipe_grid:'保存配方材料',
+    modify_item_qty:'修改物品数量', apply_item_quick_settings:'批量修改常用物品', modify_shop_entry:'修改商店物品', unlock_recipe:'解锁配方', save_recipe_grid:'保存配方材料',
     set_tech_node_state:'修改科技树节点', set_magic_value:'修改魔法参数', cast_magic_collect:'原生收集魔法', cast_magic_collect_full_map:'无耗蓝全图收集',
     native_shop_purchase_one:'哥布林商店原生购买', spawn_direct_pet:'直接生成宠物', spawn_direct_pets:'批量生成宠物', remove_pet:'移除宠物', set_pet_limit_override:'设置宠物上限', clear_pet_limit_override:'恢复自动宠物上限', set_map_write_enabled:'切换地图编辑',
     map_replace:'替换地图方块', map_replace_front:'修改地图外层', map_apply_cells:'填充地图区域', map_set_water:'修改地图水位', map_set_explored:'修改探索状态', map_explore_all:'全图标记已探索', map_fill:'全图填充', map_clear:'清空地图',
@@ -2671,13 +2651,13 @@ function applyItemsReadResult(result, source) {
         var emptyList=document.getElementById('itemList');
         if (emptyList) emptyList.innerHTML='<div style="color:#8C7C6E;text-align:center;padding:24px;font-size:13px"><b>当前存档没有可扫描的仓库物品</b><br><span style="display:inline-block;margin-top:7px;color:#B8A89A">这是一次成功读取，不是数量为 0 或扫描失败。</span></div>';
         var emptyCount=document.getElementById('ic'); if(emptyCount) emptyCount.textContent='（当前存档没有数据）';
-        refreshItemQuickSettings(); refreshFeaturePresets();
+        refreshItemQuickSettings();
         return true;
     }
     allItems=result.data; _itemStates={};
     for (var si=0; si<allItems.length; si++) { var ii=allItems[si]; _itemStates[ii.id]={lock:ii.lock||'off',fav:ii.fav||'off',world:ii.world||'off',scrap:ii.scrap||'off'}; }
     var count=document.getElementById('ic'); if(count) count.textContent=String(allItems.length)+'种';
-    filterItems(); refreshItemQuickSettings(); refreshFeaturePresets();
+    filterItems(); refreshItemQuickSettings();
     return true;
 }
 function refreshWavePortalEventState(done){
@@ -3089,112 +3069,6 @@ function setGameSpeedPreset(value){
     document.getElementById('gameSpeedValue').value = String(value);
     setGameSpeed();
 }
-function refreshFeaturePresets(selectedName) {
-    var select = document.getElementById('featurePresetSelect');
-    if (!select) return;
-    var wanted = selectedName == null ? select.value : selectedName;
-    call('get_feature_presets', function(presets) {
-        _featurePresets = Array.isArray(presets) ? presets : [];
-        var defaultPreset = _featurePresets.find(function(preset){ return preset && preset.is_default; });
-        _defaultFeaturePresetName = defaultPreset ? defaultPreset.name : '';
-        select.textContent = '';
-        var placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = '选择已保存的预设'; select.appendChild(placeholder);
-        _featurePresets.forEach(function(preset) {
-            var option = document.createElement('option'); option.value = preset.name;
-            var info = [];
-            if (preset.speed != null) info.push('速度');
-            if (preset.item_count) info.push(preset.item_count + ' 物品');
-            if (preset.pin_count) info.push(preset.pin_count + ' 标记');
-            if (preset.equipment_count) info.push(preset.equipment_count + ' 装备槽');
-            option.textContent = preset.name + (preset.is_default ? '（默认）' : '') + (info.length ? (' · ' + info.join(' / ')) : ''); select.appendChild(option);
-        });
-        select.value = wanted || _defaultFeaturePresetName || '';
-        tryAutoApplyDefaultFeaturePreset();
-        var status = document.getElementById('featurePresetStatus');
-        if (status) status.textContent = _featurePresets.length ? ('已保存 ' + _featurePresets.length + ' 个预设') : '保存时间、速度、常用物品和地图标记';
-    });
-}
-function tryAutoApplyDefaultFeaturePreset(){
-    if (!_defaultPresetAutoPending || _defaultPresetAutoRunning || !_defaultFeaturePresetName || !_mapData) return;
-    if (!_gameTimeState) {
-        if (_defaultPresetAutoAttempts++ >= 12) { _defaultPresetAutoPending=false; log('默认预设已选中，但游戏时间尚未就绪，请手动点击恢复', 'warning'); return; }
-        refreshGameTimeControls(false);
-        scheduleUiTimeout(tryAutoApplyDefaultFeaturePreset, 500);
-        return;
-    }
-    _defaultPresetAutoPending=false;
-    _defaultPresetAutoRunning=true;
-    var name=_defaultFeaturePresetName, select=document.getElementById('featurePresetSelect');
-    if (select) select.value=name;
-    call('apply_feature_preset', function(result){
-        _defaultPresetAutoRunning=false;
-        if (result && result.ok) {
-            setDwarfEquipmentPresetSelection(result.dwarf_equipment || {});
-            if (Array.isArray(result.pins) && result.map_key && result.map_key === _mapPinsKey) { _mapPins=result.pins; mapRefreshPins(); scheduleMapDraw(); }
-            refreshItemQuickSettings();
-            refreshManaMaxLock();
-            refreshGameTimeControls(false);
-            log('默认预设“'+name+'”已自动恢复', 'success');
-        } else {
-            log('默认预设恢复不完整，请手动检查：'+((result&&result.error)||''), 'warning');
-        }
-    }, name, _mapPinsKey || '');
-}
-function setDefaultFeaturePreset(){
-    var select=document.getElementById('featurePresetSelect'), name=select && select.value;
-    if (!name) { log('请先选择一个预设', 'warning'); return; }
-    call('set_default_feature_preset', function(result){
-        if (!result || !result.ok) { log('设置默认预设失败：'+((result&&result.error)||''), 'error'); return; }
-        _defaultFeaturePresetName=name;
-        refreshFeaturePresets(name);
-        log('已设置默认预设：“'+name+'”', 'success');
-    }, name);
-}
-function saveFeaturePreset() {
-    var input = document.getElementById('featurePresetName'), name = input.value.trim();
-    if (!name) { log('请先填写预设名称', 'warning'); input.focus(); return; }
-    call('save_feature_preset', function(result) {
-        if (!result || !result.ok) { log('保存预设失败：' + ((result && result.error) || ''), 'error'); return; }
-        input.value = '';
-        refreshFeaturePresets(name);
-        var detail = [];
-        detail.push(result.time_saved ? '时间和速度' : '物品和标记（时间未读取）');
-        detail.length = 0;
-        detail.push('速度、法力上限锁定、物品和地图标记');
-        if (result.item_count) detail.push(result.item_count + ' 项常用物品');
-        if (result.pin_count) detail.push(result.pin_count + ' 个标记');
-        if (result.equipment_count) detail.push(result.equipment_count + ' 个装备槽选择');
-        log('已保存预设“' + name + '”：' + detail.join('、'), 'success');
-    }, name, _mapPinsKey || '', _mapPins || [], getDwarfEquipmentPresetSelection());
-}
-function applyFeaturePreset() {
-    var select = document.getElementById('featurePresetSelect'), name = select.value;
-    if (!name) { log('请选择要恢复的预设', 'warning'); return; }
-    call('apply_feature_preset', function(result) {
-        if (!result) { log('恢复预设没有返回结果', 'error'); return; }
-        setDwarfEquipmentPresetSelection(result.dwarf_equipment || {});
-        if (Array.isArray(result.pins) && result.map_key && result.map_key === _mapPinsKey) {
-            _mapPins = result.pins; mapRefreshPins(); scheduleMapDraw();
-        }
-        refreshItemQuickSettings();
-        refreshGameTimeControls(false);
-        refreshManaMaxLock();
-        scanItems();
-        var messages = result.messages || [];
-        log(result.ok ? ('已恢复预设“' + name + '”') : ('预设已部分恢复：' + (messages.join('；') || '请查看游戏状态')), result.ok ? 'success' : 'warning');
-    }, name, _mapPinsKey || '');
-}
-function deleteFeaturePreset() {
-    var select = document.getElementById('featurePresetSelect'), name = select.value;
-    if (!name) { log('请选择要删除的预设', 'warning'); return; }
-    showConfirm('确定删除预设“' + name + '”？', function(ok) {
-        if (!ok) return;
-        call('delete_feature_preset', function(result) {
-            if (result) { refreshFeaturePresets(); log('已删除预设“' + name + '”', 'success'); }
-            else log('删除预设失败', 'error');
-        }, name);
-    });
-}
 var _portalRefreshTimer = null;
 function portalTimeText(seconds){
     seconds = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -3388,9 +3262,6 @@ function toggleConnect() {
             clearBasicState('已断开');
             _timerLocks={countdown:{enabled:false,target:null},game_time:{enabled:false,target:null},game_speed:{enabled:false,target:null},pandora:{enabled:false,target:null}};
             updateTimerLockButtons();
-            _defaultPresetAutoPending=false;
-            _defaultPresetAutoRunning=false;
-            _defaultPresetAutoAttempts=0;
             _manaMaxLocked=false;
             updateManaMaxLockButton();
             // A disconnected session must never keep the previous process's
@@ -3457,9 +3328,6 @@ function doConnect(pid) {
                 setTopMagicStatus('待打开');
                 setMagicQuickStatus('打开魔法页后定位');
             } else if (r.magic_scanning) setTopMagicStatus('定位中');
-            _defaultPresetAutoPending=true;
-            _defaultPresetAutoRunning=false;
-            _defaultPresetAutoAttempts=0;
             refreshWriteSafetyPolicy();
             // Do not immediately pile map/item/creature scans on top of the
             // single time-object locator.  On a normal save it is ready in
@@ -3474,7 +3342,7 @@ function doConnect(pid) {
                     mapDropCache();
                     refreshCreatureList(false);
                     scanItems();
-                    mapScan(false, function(){ tryAutoApplyDefaultFeaturePreset(); });
+                    mapScan(false);
                     refreshOtherFeatures();
                     refreshManaMaxLock();
                     refreshTimerLocks();
@@ -8054,14 +7922,13 @@ function beginUiShutdown(){
     _mapScanning=false; _mapRegionScanning=false; _mapEditing=false;
     _dwarfRefreshBusy=false; _itemScanBusy=false; _itemRefreshBusy=false;
     _mapStatusScanning=false; _pandoraRuntimeBusy=false;
-    _defaultPresetAutoPending=false; _defaultPresetAutoRunning=false;
 }
 /* Keep decorative labels monochrome and let the SVG navigation/icon system
    carry the visual language.  Lock controls are deliberately excluded because
    their lock state is a user-facing control, not decoration. */
 function normalizeDecorativeUiIcons(root){
     var host=root||document;
-    var selectors='.card-title,.modal-title,.header h1,.item-command-dock h1,.feature-preset-dock .preset-title,.pandora-director-title,.magic-card-summary b,.dwarf-section-head b,.map-protection-state,.btn';
+    var selectors='.card-title,.modal-title,.header h1,.item-command-dock h1,.pandora-director-title,.magic-card-summary b,.dwarf-section-head b,.map-protection-state,.btn';
     function stripLeadingIcon(value){
         var text=String(value||'');
         while(text){

@@ -241,7 +241,6 @@ DEFAULT_CONFIG = {
     "dwarf_names": {},
     "fav_items": [],
     "favorite_items": [],
-    "feature_presets": [],
     "item_quick_settings": {},
     "mana_max_lock": {"enabled": False, "target": None},
     "map_pins": {},
@@ -254,7 +253,6 @@ DEFAULT_CONFIG = {
     "gold_economy_presets": {},
     "pandora_override": {},
     "recipe_edit_log": [],
-    "default_feature_preset": "",
 }
 
 
@@ -3277,7 +3275,6 @@ class Api:
     # %LOCALAPPDATA%\CraftWorldModifier\config\user_data.json store.
     # beside map pins so a game restart never loses a prepared item profile.
     ITEM_QUICK_LIMIT = 80
-    FEATURE_PRESET_LIMIT = 30
     MANA_MAX_LOCK_INTERVAL = 0.45
     MANA_MAX_LOCK_LIMIT = 10000000.0
     _mana_max_lock_guard = threading.RLock()
@@ -3904,6 +3901,15 @@ class Api:
             if migrated:
                 self._write_user_config_unlocked(user)
                 print("已将旧版用户配置迁移到 %LOCALAPPDATA%\\CraftWorldModifier\\config\\user_data.json")
+        # 功能预设已从正式版移除。清理旧用户配置中的预设和默认预设，
+        # 防止历史预设在连接游戏时继续恢复并触发旧的物品写入。
+        if isinstance(user, dict):
+            obsolete_feature_preset_keys = ("feature_presets", "default_feature_preset")
+            if any(key in user for key in obsolete_feature_preset_keys):
+                user = dict(user)
+                for key in obsolete_feature_preset_keys:
+                    user.pop(key, None)
+                self._write_user_config_unlocked(user)
         return _merge_config(defaults, user)
 
     def _read_config(self):
@@ -14611,143 +14617,6 @@ class Api:
         """Batch apply all saved common-item settings in a single safe request."""
         return self._apply_item_quick_entries(self._read_item_quick_settings())
 
-    def get_feature_presets(self):
-        """List compact summaries; full contents stay in user_data.json until applied."""
-        try:
-            config = self._read_config()
-            presets = config.get("feature_presets", [])
-            default_name = str(config.get("default_feature_preset", "")).strip()
-            result = []
-            for preset in presets if isinstance(presets, list) else []:
-                if not isinstance(preset, dict):
-                    continue
-                name = str(preset.get("name", "")).strip()
-                if not name:
-                    continue
-                items = self._clean_item_quick_settings(preset.get("items", {}))
-                pins = self._clean_map_pins(preset.get("pins", []))
-                equipment = self._clean_dwarf_equipment_preset(preset.get("dwarf_equipment", {}))
-                result.append({"name": name[:40], "time": None, "speed": preset.get("speed"),
-                               "item_count": len(items), "pin_count": len(pins), "map_key": str(preset.get("map_key", "")),
-                               "is_default": name == default_name,
-                               "mana_max_locked": self._clean_mana_max_lock(preset.get("mana_max_lock")).get("enabled", False),
-                               "equipment_count": len(equipment)})
-            return result[:self.FEATURE_PRESET_LIMIT]
-        except Exception:
-            return []
-
-    def save_feature_preset(self, name, map_key="", pins=None, dwarf_equipment=None):
-        """Save current settings and the *selection* of the all-dwarves gear preset."""
-        try:
-            name = " ".join(str(name or "").split())[:40]
-            if not name:
-                return {"ok": False, "error": "请填写预设名称"}
-            time_state = self.get_game_time_state()
-            speed_value = None
-            if isinstance(time_state, dict) and time_state.get("ok"):
-                speed_value = float(time_state.get("speed", 1.0))
-            map_key = str(map_key or "")
-            if not map_key.startswith("world-"):
-                map_key, pins = "", []
-            clean_pins = self._clean_map_pins(pins)
-            quick_items = self._read_item_quick_settings()
-            clean_equipment = self._clean_dwarf_equipment_preset(dwarf_equipment)
-            record = {"name": name, "speed": speed_value,
-                      "items": quick_items, "map_key": map_key, "pins": clean_pins,
-                      "mana_max_lock": self.get_mana_max_lock(), "dwarf_equipment": clean_equipment}
-
-            def update(cfg):
-                presets = cfg.get("feature_presets", [])
-                presets = [item for item in presets if isinstance(item, dict) and str(item.get("name", "")).strip() != name]
-                presets.append(record)
-                if len(presets) > self.FEATURE_PRESET_LIMIT:
-                    presets = presets[-self.FEATURE_PRESET_LIMIT:]
-                cfg["feature_presets"] = presets
-
-            if not self._update_config(update):
-                return {"ok": False, "error": "写入用户配置失败"}
-            return {"ok": True, "time_saved": False, "item_count": len(quick_items), "pin_count": len(clean_pins),
-                    "equipment_count": len(clean_equipment)}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def delete_feature_preset(self, name):
-        try:
-            name = str(name or "").strip()
-            if not name:
-                return False
-            def update(cfg):
-                cfg["feature_presets"] = [item for item in (cfg.get("feature_presets", []) or [])
-                                          if not isinstance(item, dict) or str(item.get("name", "")).strip() != name]
-                if str(cfg.get("default_feature_preset", "")).strip() == name:
-                    cfg["default_feature_preset"] = ""
-            return bool(self._update_config(update))
-        except Exception:
-            return False
-
-    def apply_feature_preset(self, name, current_map_key=""):
-        """Restore one profile.  Map pins are restored only to their own world."""
-        try:
-            name = str(name or "").strip()
-            preset = next((item for item in (self._read_config().get("feature_presets", []) or [])
-                           if isinstance(item, dict) and str(item.get("name", "")).strip() == name), None)
-            if not preset:
-                return {"ok": False, "error": "找不到该预设"}
-            result = {"ok": True, "name": name, "time": None, "speed": None, "items": None,
-                      "pins": None, "map_key": "", "mana_max_lock": None,
-                      # This is intentionally returned only as UI state.  A
-                      # profile restore must never equip every dwarf without a
-                      # separate explicit click in the equipment-preset panel.
-                      "dwarf_equipment": self._clean_dwarf_equipment_preset(preset.get("dwarf_equipment", {})),
-                      "messages": []}
-            if preset.get("speed") is not None:
-                result["speed"] = self.set_game_speed(preset["speed"])
-                if not result["speed"].get("ok"):
-                    result["ok"] = False
-                    result["messages"].append("速度未恢复")
-            if "mana_max_lock" in preset:
-                lock = self._clean_mana_max_lock(preset.get("mana_max_lock"))
-                result["mana_max_lock"] = self.set_mana_max_lock(lock["enabled"], lock["target"])
-                if not result["mana_max_lock"].get("ok"):
-                    result["ok"] = False
-                    result["messages"].append("法力上限锁定未恢复")
-            settings = self._clean_item_quick_settings(preset.get("items", {}))
-            if settings:
-                # Make this profile's item setup become the visible common
-                # setup as well, then apply it against freshly scanned slots.
-                if not self._update_config(lambda cfg: cfg.update({"item_quick_settings": settings})):
-                    result["ok"] = False
-                    result["messages"].append("常用物品设置未写入配置文件")
-                result["items"] = self._apply_item_quick_entries(settings)
-                if not result["items"].get("ok"):
-                    result["ok"] = False
-                    result["messages"].append("部分物品未恢复")
-            saved_key = str(preset.get("map_key", ""))
-            saved_pins = self._clean_map_pins(preset.get("pins", []))
-            if saved_key and saved_key == str(current_map_key or ""):
-                if self.save_map_pins(saved_key, saved_pins):
-                    result["pins"], result["map_key"] = saved_pins, saved_key
-                else:
-                    result["ok"] = False
-                    result["messages"].append("地图标记未写入配置文件")
-            elif saved_key:
-                result["messages"].append("地图标记仅会恢复到保存它的同一张地图")
-            return result
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def set_default_feature_preset(self, name):
-        try:
-            name = str(name or "").strip()
-            if name and not any(isinstance(item, dict) and str(item.get("name", "")).strip() == name
-                                for item in (self._read_config().get("feature_presets", []) or [])):
-                return {"ok": False, "error": "找不到该预设"}
-            if not self._update_config(lambda cfg: cfg.update({"default_feature_preset": name})):
-                return {"ok": False, "error": "无法保存默认预设"}
-            return {"ok": True, "name": name}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
     # ==================== 宠物屋运行时读取（V1，CE 实测） ====================
     V1_PET_HOUSE_VTABLE_RVA = 0xBC56B8
     PET_HOUSE_STATE_OFF = 0x1CC
@@ -19890,7 +19759,7 @@ _EXPERIMENTAL_WRITE_FEATURES = {
     'save_dwarf': '旧版矮人属性写入',
     'save_dwarf_personal_skills': '旧版个人技能写入',
     'apply_dwarf_equipment_preset': '全体装备预设',
-    'apply_item_quick_settings': '常用物品批量写入', 'apply_feature_preset': '功能预设应用',
+    'apply_item_quick_settings': '常用物品批量写入',
     'pet_house': '宠物按屋生成', 'pet_infinite': '宠物无限生成',
     'pet_spawn': '宠物生成', 'remove_pet': '单只宠物原生死亡移除',
     'set_pet_limit_override': '宠物上限本局覆盖', 'clear_pet_limit_override': '恢复自动宠物上限',
@@ -19968,12 +19837,11 @@ _GAME_WRITE_ENDPOINTS = (
     "set_portal_timer", "add_portal_time", "toggle_portal_lock", "close_portal", "spawn_monster_portal", "end_current_monster_portal_event", "force_pandora_event", "restore_pandora_events", "set_pandora_spawn_timer", "set_timer_lock",
     "write_gold", "gold_apply_operation", "set_gold_economy_rule", "mana_apply_operation", "mana_apply_max_operation", "set_mana_reserve_rule", "xp_apply_progress", "write_mana", "write_mana_max", "write_xp", "write_timer", "set_game_time", "set_game_speed",
     "save_skills", "native_skill_upgrade", "apply_skill_targets", "heal_all", "full_sat", "save_dwarf", "save_dwarf_fields", "save_dwarf_personal_skills", "save_dwarf_personal_skill_slots", "save_dwarf_equipment", "apply_dwarf_equipment_preset", "apply_dwarf_training_preset", "modify_item_qty", "undo_operation",
-    "apply_item_quick_settings", "apply_feature_preset",
+    "apply_item_quick_settings",
     "pet_house", "pet_infinite", "pet_spawn", "spawn_direct_pet", "spawn_direct_pets", "remove_pet", "set_pet_limit_override", "clear_pet_limit_override", "toggle_other_feature",
     "set_dwarf_name", "spawn_native_dwarf", "modify_shop_entry", "native_shop_purchase_one", "unlock_recipe", "set_tech_node_state", "set_magic_value", "cast_magic_collect", "cast_magic_collect_full_map", "save_recipe_grid", "sync_recipe_grid_to_local",
     "toggle_lock", "toggle_gold_lock", "toggle_mana_lock", "toggle_xp_lock", "set_mana_max_lock", "xp_to_next",
     "confirm_offline_save_edit", "restore_save_snapshot",
-    "set_default_feature_preset",
 )
 for _endpoint_name in _GAME_WRITE_ENDPOINTS:
     setattr(Api, _endpoint_name, _serialized_game_write(getattr(Api, _endpoint_name)))
