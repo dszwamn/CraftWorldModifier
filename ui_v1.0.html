@@ -3448,7 +3448,10 @@ function doConnect(pid) {
                 (r.magic_scanning ? '定位中' : (Number.isInteger(Number(r.magic)) ? String(r.magic) : '读取失败'));
             extra.textContent = "\u2714\uFE0F " + connectionReadLabel('矮人',r.dwarves,r.dwarves_state)
                 + " | " + connectionReadLabel('物品',r.items,r.items_state)
-                + " | 魔法: " + magicConnectionState;
+                + " | 魔法: " + magicConnectionState
+                + (r.native_layout && r.native_layout.recognized
+                    ? " | 原生调用: 可用"
+                    : " | 原生调用: 未匹配（相关生成功能保持保护）");
             log("");
             if (r.magic_unloaded) {
                 setTopMagicStatus('待打开');

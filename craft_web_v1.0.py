@@ -1,5 +1,5 @@
 ### 1. 导入与常量
-import webview, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys
+import webview, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys, random
 import urllib.parse, urllib.request, urllib.error, zipfile, tempfile, subprocess, io
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -839,7 +839,7 @@ V1_OTHER_FEATURE_PATCH_PROFILES = {
     },
     "steam-v1-local-20260202": {
         "sha256": "9adfdd40816e8a820a1cbc3967401e3fa0eb59c85e6c7475b30227b0d956ab6c",
-        "label": "已识别低版本（2026-02-02）",
+        "label": "当前版本已识别",
         "patches": _other_feature_patch_variant(OTHER_FEATURE_PATCHES, {
             "infinite_items": -0xA0,
             "mega_xp": -0xF0,
@@ -2999,6 +2999,141 @@ def _scan_magic_items(pm_obj, cancelled=None):
 
 
 class Api:
+    # Native calls are grouped behind one runtime layout.  Nearby CraftWorld
+    # builds are not guaranteed to move by one global delta: compiler changes
+    # can move each code block independently.  Keep exact executable
+    # fingerprints and per-symbol deltas here; an unknown binary remains
+    # read-only until a complete signature profile is added.
+    V1_NATIVE_LAYOUT_PROFILES = {
+        "steam-v1-build-21776357": {
+            "sha256": "9ed44877dbc1b7ee59bbcbc5eaa15e8bd168c432ee8e422030d2245f4e0f8fbd",
+            "label": "Steam 构建 21776357",
+            "deltas": {},
+        },
+        "steam-v1-local-20260202": {
+            "sha256": "9adfdd40816e8a820a1cbc3967401e3fa0eb59c85e6c7475b30227b0d956ab6c",
+            "label": "原生调用可用",
+            # This build has independent code-block movement.  In particular,
+            # the portal entity slow-update routine moved by -0x90 while the
+            # always-running dispatcher stayed at the same RVA.
+            "deltas": {
+                "WAVE_PORTAL_UPDATE_ENTRY_RVA": -0x20,
+                "WAVE_PORTAL_UPDATE_RVA": -0x20,
+                "WAVE_PORTAL_DAY_CLOSE_RVA": -0x20,
+                "WAVE_PORTAL_CLOSE_POST_RVA": -0x20,
+                "WAVE_PORTAL_ENTITY_SLOW_RVA": -0x90,
+                "WAVE_PORTAL_COUNT_RVA": -0x20,
+                "WAVE_PORTAL_DELAY_RVA": -0x20,
+                "WAVE_PORTAL_READY_RVA": -0x20,
+                "WAVE_PORTAL_POSITION_RVA": -0x20,
+                "WAVE_PORTAL_COUNT_CLEANUP_RVA": -0x20,
+                "WAVE_PORTAL_DO_ACTION_RVA": -0x20,
+                "WAVE_PORTAL_CLOSE_RVA": -0x20,
+                # PetHouseEntity::GetMaxPetCount moved independently of the
+                # wave/dispatcher code in this build.  Do not inherit the
+                # old 0x6020C0 entry point (it is inside the caller body).
+                "PET_MAX_COUNT_RVA": -0x30,
+                "V1_CHAR_LEVELS_ADD_EXP_RVA": -0xF0,
+                "PERSONAL_SKILL_NATIVE_ADD_RVA": -0xC0,
+                "V1_LIBRARY_UPGRADE_RVA": -0x30,
+                "PET_DIRECT_FACTORY_RVA": -0x10,
+                # MainWarehouseEntity's public worker-request entry moves
+                # with its internal CreateWorker implementation in this
+                # executable.  Calling the request entry is required: it
+                # establishes the game-owned pending/event state before the
+                # regular warehouse update performs the actual creation.
+                "V1_NATIVE_DWARF_REQUEST_RVA": -0x30,
+                "V1_NATIVE_DWARF_SPAWN_RVA": -0x30,
+            },
+        },
+    }
+    _v1_native_layout = {"key": "unknown", "label": "未收录版本",
+                         "recognized": False, "sha256": "", "error": "尚未检查"}
+
+    def _apply_v1_native_layout(self):
+        """Select a complete native-call layout for the connected EXE.
+
+        This is intentionally fingerprint-only.  It prevents a nearby build
+        from inheriting the latest Steam RVAs merely because its file name
+        looks similar.  The selected deltas are applied to instance fields so
+        reconnecting another game in the same modifier process resets cleanly.
+        """
+        profile = None
+        exe_path = ""
+        digest = ""
+        try:
+            import psutil as _psutil
+            exe_path = _psutil.Process(int(pm.process_id)).exe()
+            with open(exe_path, "rb") as handle:
+                hasher = hashlib.sha256()
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(block)
+                digest = hasher.hexdigest()
+            for key, candidate in self.V1_NATIVE_LAYOUT_PROFILES.items():
+                if candidate.get("sha256", "").lower() == digest.lower():
+                    profile = (key, candidate)
+                    break
+        except Exception as exc:
+            self._v1_native_layout = {"key": "unknown", "label": "未收录版本",
+                                      "recognized": False, "sha256": digest,
+                                      "error": "无法读取 EXE 指纹：%s" % exc}
+            return self._v1_native_layout
+
+        if not profile:
+            self._v1_native_layout = {"key": "unknown", "label": "未收录版本",
+                                      "recognized": False, "sha256": digest,
+                                      "error": "没有匹配的原生调用布局；原生调度功能保持保护"}
+            return self._v1_native_layout
+
+        key, definition = profile
+        deltas = definition.get("deltas", {})
+        # Explicit base values keep this independent of any previous
+        # connection's instance overrides.
+        base_values = {
+            "WAVE_PORTAL_UPDATE_ENTRY_RVA": 0x5B9890,
+            "WAVE_PORTAL_UPDATE_RVA": 0x5B98C5,
+            "WAVE_PORTAL_DAY_CLOSE_RVA": 0x5B990B,
+            "WAVE_PORTAL_CLOSE_POST_RVA": 0x5B6446,
+            "WAVE_PORTAL_ENTITY_SLOW_RVA": 0x852BD5,
+            "WAVE_PORTAL_COUNT_RVA": 0x5B6AAD,
+            "WAVE_PORTAL_DELAY_RVA": 0x5B6B3E,
+            "WAVE_PORTAL_READY_RVA": 0x5B9F83,
+            "WAVE_PORTAL_POSITION_RVA": 0x5B6AE5,
+            "WAVE_PORTAL_COUNT_CLEANUP_RVA": 0x5B6BA2,
+            "WAVE_PORTAL_DO_ACTION_RVA": 0x5B67F0,
+            "WAVE_PORTAL_CLOSE_RVA": 0x5B6190,
+            "PET_MAX_COUNT_RVA": 0x6020C0,
+            "V1_CHAR_LEVELS_ADD_EXP_RVA": 0x31CEE0,
+            "PERSONAL_SKILL_NATIVE_ADD_RVA": 0x68F8B0,
+            "V1_LIBRARY_UPGRADE_RVA": 0x5034E0,
+            "PET_DIRECT_FACTORY_RVA": 0x5AC950,
+            "V1_NATIVE_DWARF_REQUEST_RVA": 0x55B8A0,
+            "V1_NATIVE_DWARF_SPAWN_RVA": 0x55A490,
+        }
+        for name, base in base_values.items():
+            setattr(self, name, int(base) + int(deltas.get(name, 0)))
+        self.WAVE_PORTAL_HOOKS = (
+            (self.WAVE_PORTAL_UPDATE_RVA, b"\x33\xC0\x89\x85\x70\xFF\xFF\xFF", "update"),
+            (self.PERSONAL_SKILL_TICK_RVA, b"\xD9\x41\x18\xC3\xCC", "personal_tick"),
+            (self.WAVE_PORTAL_DAY_CLOSE_RVA, b"\x8B\xCF\xE8\x7E\xC8\xFF\xFF", "day_close"),
+            (self.WAVE_PORTAL_CLOSE_POST_RVA, b"\x8B\x4E\x3C\x8D\x7E\x38", "close_post"),
+            (self.WAVE_PORTAL_ENTITY_SLOW_RVA, b"\x83\x78\x64\x00\x75\x07", "portal_slow"),
+            (self.WAVE_PORTAL_COUNT_RVA, b"\x39\x5D\xF0\x0F\x8E\xEC\x00\x00\x00", "portal_count"),
+            (self.WAVE_PORTAL_DELAY_RVA, b"\xF3\x0F\x11\x09\x89\x71\x0C\x89\x41\x10\xC6\x41\x14\x00", "portal_delay"),
+            (self.WAVE_PORTAL_READY_RVA, b"\xF3\x0F\x10\x04\x31\xF3\x0F\x5C\xC2", "portal_ready"),
+            (self.WAVE_PORTAL_POSITION_RVA, b"\x8B\x08\x8B\x40\x04", "position"),
+        )
+        self._v1_native_layout = {"key": key, "label": definition["label"],
+                                  "recognized": True, "sha256": digest,
+                                  "error": "", "exe_path": exe_path,
+                                  "deltas": dict(deltas)}
+        return self._v1_native_layout
+
+    def get_native_layout_status(self):
+        """Expose only the verified layout state; never expose guessed RVAs."""
+        return {"ok": bool(self._v1_native_layout.get("recognized")),
+                **dict(self._v1_native_layout)}
+
     # The runtime ShopDialog keeps the selected category and product index in
     # these fields.  They are used only for a read-only native-selection probe
     # until the full UI Event ABI is reproduced.
@@ -4965,6 +5100,7 @@ class Api:
                 # A full game restart restores the clean image safely.
                 pm = None; connected = False; dwarf_cache = []; item_cache = []
                 return {"success":False,"error":"检测到旧版修改器遗留的存档代码补丁；请完全退出并重新启动游戏后再连接"}
+            native_layout = self._apply_v1_native_layout()
             doctor = self._run_compatibility_doctor()
             self.scan_dwarves_stable()
             self.scan_items()
@@ -4990,6 +5126,7 @@ class Api:
                     "dwarves_state": dwarf_state,
                     "items_state": item_state,
                     "magic":None,"magic_scanning":False,"magic_unloaded":True,"doctor":doctor,
+                    "native_layout": native_layout,
                     "game_version": game_version}
         except Exception as e:
             return {"success":False,"error":str(e)}
@@ -5016,6 +5153,8 @@ class Api:
         self._clear_timer_locks()
         self._dispose_wave_portal_controller()
         self._v2_cache = None
+        self._v1_native_layout = {"key": "unknown", "label": "未收录版本",
+                                  "recognized": False, "sha256": "", "error": "已断开游戏"}
         self._other_feature_profile_cache = {"pid": 0, "exe_path": "", "profile": None}
         global pm, connected, dwarf_cache, item_cache
         try:
@@ -5916,6 +6055,30 @@ class Api:
     V2_PORTAL_SIGNATURE = b"\x00\x00\xC8\x42\x00\x00\x48\x43"  # +0x184=100.0, +0x188=200.0
     V2_PORTAL_SCAN_TTL = 5.0
 
+    # The visible magic-portal slot table was never validated against the
+    # current 1.11.011 object manager.  The values at ITEM_BASE+0x194 contain
+    # non-object integers/strings in this build, so treating them as entity
+    # pointers can corrupt unrelated memory and later crash the game.  Keep
+    # the UI entry, but make every read/write report the exact state until a
+    # real vtable/container sample is verified.  Monster-wave lifecycle uses
+    # a separate native manager and is not affected by this guard.
+    MAGIC_PORTAL_OBJECT_LAYOUT_PROFILES = {
+        "steam-v1-local-20260202": False,
+    }
+
+    def _magic_portal_object_layout_status(self):
+        if not connected or pm is None:
+            return False, self.STATUS_DISCONNECTED, "未连接游戏"
+        key = str(self._v1_native_layout.get("key") or "")
+        if not self._v1_native_layout.get("recognized"):
+            return False, self.STATUS_UNSUPPORTED, "当前游戏版本未匹配已验证的传送门对象布局"
+        if not self.MAGIC_PORTAL_OBJECT_LAYOUT_PROFILES.get(key, False):
+            return False, self.STATUS_UNVERIFIED, (
+                "当前版本的魔法传送门对象容器尚未通过验证；为避免再次崩溃，"
+                "暂不读取或写入单门倒计时。红门整场事件仍使用独立的原生波次链。"
+            )
+        return True, self.STATUS_VERIFIED, ""
+
     def _scan_v2_portal_objects(self):
         """Scan writable private heaps for active magic portal objects (V2).
 
@@ -6018,8 +6181,9 @@ class Api:
     def _portal_entries(self):
         """Enumerate active magic portal objects (V1 slot table / V2 heap scan)."""
         global pm, connected
-        if not connected or pm is None:
-            return None, "未连接"
+        layout_ok, _, layout_error = self._magic_portal_object_layout_status()
+        if not layout_ok:
+            return None, layout_error
         try:
             entries = {}
             current_samples = {}
@@ -6081,6 +6245,10 @@ class Api:
         if entries is None:
             if not connected or pm is None:
                 state = self.STATUS_DISCONNECTED
+            elif str(error or "").startswith("当前版本的魔法传送门"):
+                state = self.STATUS_UNVERIFIED
+            elif str(error or "").startswith("当前游戏版本未匹配"):
+                state = self.STATUS_UNSUPPORTED
             else:
                 state = self.STATUS_STALE
             return {"ok": False, "state": state,
@@ -6108,7 +6276,36 @@ class Api:
                 return entry
         return None
 
+    def _read_verified_magic_portal(self, object_addr):
+        """Revalidate a portal object while the process is paused.
+
+        A slot-table address is only a candidate identity.  The object can be
+        destroyed/reused between a list refresh and a write, so every future
+        verified layout must recheck its signature, kind, activity and timer
+        immediately before and after the mutation.
+        """
+        try:
+            object_addr = int(object_addr)
+            f1 = pm.read_float(object_addr + self.PORTAL_SIG_OFF)
+            f2 = pm.read_float(object_addr + self.PORTAL_SIG_OFF + 4)
+            kind = pm.read_int(object_addr + self.PORTAL_KIND_OFF)
+            timer = pm.read_float(object_addr + self.PORTAL_TIMER_OFF)
+            active_flag = pm.read_int(object_addr + self.PORTAL_ACTIVE_OFF)
+            if (f1 is None or f2 is None or kind is None or timer is None
+                    or active_flag is None or abs(float(f1) - 100.0) > 0.001
+                    or abs(float(f2) - 200.0) > 0.001 or (int(kind) & 0xFF) != 1
+                    or not math.isfinite(float(timer)) or float(timer) < -0.01
+                    or float(timer) > 36000.0 or float(timer) <= 0.01):
+                return None
+            return {"object": object_addr, "timer": float(timer),
+                    "active_flag": int(active_flag)}
+        except Exception:
+            return None
+
     def set_portal_timer(self, object_addr, seconds):
+        layout_ok, state, layout_error = self._magic_portal_object_layout_status()
+        if not layout_ok:
+            return {"ok": False, "state": state, "error": layout_error}
         blocked = self._require_high_risk_world_write("传送门倒计时写入")
         if blocked:
             return {"ok": False, "error": blocked}
@@ -6121,14 +6318,30 @@ class Api:
                 return {"ok": False, "error": "传送门已消失，请刷新"}
             hnd = self._suspend(pm.process_id)
             try:
+                latest = self._read_verified_magic_portal(entry["object"])
+                if not latest:
+                    return {"ok": False, "state": self.STATUS_STALE,
+                            "error": "传送门对象在写入前已变化，未执行修改"}
+                old_timer = float(latest["timer"])
                 pm.write_float(entry["object"] + self.PORTAL_TIMER_OFF, seconds)
+                readback = self._read_verified_magic_portal(entry["object"])
+                if not readback or abs(float(readback["timer"]) - seconds) > 0.05:
+                    try:
+                        pm.write_float(entry["object"] + self.PORTAL_TIMER_OFF, old_timer)
+                    except Exception:
+                        pass
+                    return {"ok": False, "state": self.STATUS_FAILED,
+                            "error": "传送门倒计时写入读回失败，已尝试恢复原值"}
             finally:
                 self._resume(hnd)
-            return {"ok": True, "timer": seconds}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "timer": seconds}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
     def add_portal_time(self, object_addr, seconds=60):
+        layout_ok, state, layout_error = self._magic_portal_object_layout_status()
+        if not layout_ok:
+            return {"ok": False, "state": state, "error": layout_error}
         blocked = self._require_high_risk_world_write("传送门倒计时写入")
         if blocked:
             return {"ok": False, "error": blocked}
@@ -6144,6 +6357,9 @@ class Api:
         We intentionally change only that duration: clearing container slots or
         the object's active flag directly can leave dangling game references.
         """
+        layout_ok, state, layout_error = self._magic_portal_object_layout_status()
+        if not layout_ok:
+            return {"ok": False, "state": state, "error": layout_error}
         blocked = self._require_high_risk_world_write("关闭传送门")
         if blocked:
             return {"ok": False, "error": blocked}
@@ -6160,17 +6376,30 @@ class Api:
             try:
                 with self._portal_lock_guard:
                     self._portal_locks.pop(object_addr, None)
-                    latest = self._portal_by_object(object_addr)
+                    latest = self._read_verified_magic_portal(object_addr)
                     if not latest:
-                        return {"ok": True, "message": "传送门已关闭"}
+                        return {"ok": False, "state": self.STATUS_STALE,
+                                "error": "传送门对象在关闭前已变化，未执行修改"}
                     pm.write_float(object_addr + self.PORTAL_TIMER_OFF, 0.0)
+                    readback = pm.read_float(object_addr + self.PORTAL_TIMER_OFF)
+                    if readback is None or abs(float(readback)) > 0.05:
+                        try:
+                            pm.write_float(object_addr + self.PORTAL_TIMER_OFF, latest["timer"])
+                        except Exception:
+                            pass
+                        return {"ok": False, "state": self.STATUS_FAILED,
+                                "error": "传送门关闭写入读回失败，已尝试恢复原值"}
             finally:
                 self._resume(hnd)
-            return {"ok": True, "message": "已请求关闭传送门（游戏下一帧会自行清理）"}
+            return {"ok": True, "state": self.STATUS_VERIFIED,
+                    "message": "已请求关闭传送门（游戏下一帧会自行清理）"}
         except Exception as e:
             return {"ok": False, "error": "关闭传送门失败：%s" % e}
 
     def toggle_portal_lock(self, object_addr):
+        layout_ok, state, layout_error = self._magic_portal_object_layout_status()
+        if not layout_ok:
+            return {"ok": False, "state": state, "error": layout_error}
         blocked = self._require_high_risk_world_write("锁定传送门")
         if blocked:
             return {"ok": False, "error": blocked}
@@ -6198,6 +6427,11 @@ class Api:
         while (object_addr in self._portal_locks and
                self._runtime_session_current(session_generation, pm_obj)):
             try:
+                layout_ok, _, _ = self._magic_portal_object_layout_status()
+                if not layout_ok:
+                    with self._portal_lock_guard:
+                        self._portal_locks.pop(object_addr, None)
+                    return
                 hnd = self._suspend(pm_obj.process_id)
                 if hnd is None:
                     return
@@ -7990,13 +8224,19 @@ class Api:
     NATIVE_DWARF_SPAWN_QUEUE_GENDER_OFF = 0x388
     NATIVE_DWARF_SPAWN_QUEUE_RESULT_OFF = 0x38C
     NATIVE_DWARF_SPAWN_QUEUE_RETURN_OFF = 0x390
-    NATIVE_DWARF_SPAWN_QUEUE_STRING_BACKUP_OFF = 0x3A0
+    # A 24-byte MSVC small-string object consumed by the public worker
+    # request.  It lives in the controller data page for the duration of the
+    # request; unlike the former implementation, no warehouse field is
+    # patched or restored by the modifier.
+    NATIVE_DWARF_SPAWN_QUEUE_CLASS_STRING_OFF = 0x3A0
     NATIVE_DWARF_SPAWN_GENDER_RANDOM = 0
     NATIVE_DWARF_SPAWN_GENDER_MALE = 1
     NATIVE_DWARF_SPAWN_GENDER_FEMALE = 2
     # These runtime addresses were captured from a normal “level-up creates a
     # dwarf” event on the current Steam V1 process, then converted to RVAs.
     V1_MAIN_WAREHOUSE_VTABLE_RVA = 0xBBD258
+    V1_NATIVE_DWARF_REQUEST_RVA = 0x55B8A0
+    V1_NATIVE_DWARF_REQUEST_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
     V1_NATIVE_DWARF_SPAWN_RVA = 0x55A490
     V1_NATIVE_DWARF_SPAWN_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
     PET_DIRECT_QUEUE_TYPES = (
@@ -8309,7 +8549,7 @@ class Api:
         dwarf_spawn_gender = data + self.NATIVE_DWARF_SPAWN_QUEUE_GENDER_OFF
         dwarf_spawn_result = data + self.NATIVE_DWARF_SPAWN_QUEUE_RESULT_OFF
         dwarf_spawn_return = data + self.NATIVE_DWARF_SPAWN_QUEUE_RETURN_OFF
-        dwarf_spawn_string_backup = data + self.NATIVE_DWARF_SPAWN_QUEUE_STRING_BACKUP_OFF
+        dwarf_spawn_class_string = data + self.NATIVE_DWARF_SPAWN_QUEUE_CLASS_STRING_OFF
         pet_direct_manager = module_base + self.PET_DIRECT_MANAGER_PTR_RVA
         pet_direct_anchor = module_base + self.PET_DIRECT_SPAWN_ANCHOR_PTR_RVA
         manager_ptr = module_base + self.WAVE_PORTAL_MANAGER_RVA
@@ -8467,11 +8707,12 @@ class Api:
         w.branch(b"\xE9", "shop_from_pet")
 
         # Native dwarf creation is intentionally a small, one-shot request.
-        # MainWarehouseEntity remains the owner of the Worker factory, AI
-        # registration, spawn animation and default random attributes.  The
-        # only temporary override is its class string: ``worker`` for male,
-        # ``worker_female`` for female, or untouched for native random.  Its
-        # complete 24-byte SSO record is restored before returning.
+        # Do *not* call MainWarehouseEntity::CreateWorker() directly here.
+        # It is an internal completion routine and relies on state prepared by
+        # MainWarehouseEntity::RequestWorker().  Direct calls can return while
+        # creating no Worker at all.  Submit the same public request that the
+        # game's level-up and event paths use, then let the normal warehouse
+        # update create/register the Worker on a later game tick.
         w.mark("update_native_dwarf_spawn_request")
         w.b(0x83, 0x3D); w.u32(dwarf_spawn_request); w.b(0x01)
         w.branch(b"\x0F\x85", "native_dwarf_spawn_return")
@@ -8484,15 +8725,10 @@ class Api:
         w.b(0x8B, 0x01)                                                       # confirm MainWarehouseEntity vtable
         w.b(0x3D); w.u32(module_base + self.V1_MAIN_WAREHOUSE_VTABLE_RVA)
         w.branch(b"\x0F\x85", "native_dwarf_spawn_restore")
-        # A normal factory request is only accepted while no other Worker
-        # creation is already pending on this warehouse.
+        # A normal request is only accepted while no other Worker creation is
+        # already pending on this warehouse.
         w.b(0x80, 0xB9); w.u32(0x32A); w.b(0x00)
         w.branch(b"\x0F\x85", "native_dwarf_spawn_restore")
-        # Backup the warehouse's embedded std::string {buffer,length,capacity}
-        # so a forced gender never leaks into a later game-owned random spawn.
-        for offset in range(0, 24, 4):
-            w.b(0x8B, 0x81); w.u32(0x334 + offset)
-            w.b(0xA3); w.u32(dwarf_spawn_string_backup + offset)
         w.b(0xA1); w.u32(dwarf_spawn_gender)
         w.b(0x83, 0xF8, self.NATIVE_DWARF_SPAWN_GENDER_MALE)
         w.branch(b"\x0F\x84", "native_dwarf_spawn_male")
@@ -8500,38 +8736,31 @@ class Api:
         w.branch(b"\x0F\x84", "native_dwarf_spawn_female")
         w.branch(b"\xE9", "native_dwarf_spawn_call")
         w.mark("native_dwarf_spawn_male")
-        w.b(0xC7, 0x81); w.u32(0x334); w.u32(0x6B726F77)                     # "work"
-        w.b(0xC7, 0x81); w.u32(0x338); w.u32(0x00007265)                     # "er\\0"
-        w.b(0xC7, 0x81); w.u32(0x33C); w.u32(0)
-        w.b(0xC7, 0x81); w.u32(0x340); w.u32(0)
-        w.b(0xC7, 0x81); w.u32(0x344); w.u32(6)
-        w.b(0xC7, 0x81); w.u32(0x348); w.u32(0x0F)
+        # MSVC std::string SSO: inline bytes, length, capacity.
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x00); w.u32(0x6B726F77)  # "work"
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x04); w.u32(0x00007265)  # "er\\0"
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x08); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x0C); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x10); w.u32(6)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x14); w.u32(0x0F)
         w.branch(b"\xE9", "native_dwarf_spawn_call")
         w.mark("native_dwarf_spawn_female")
-        w.b(0xC7, 0x81); w.u32(0x334); w.u32(0x6B726F77)                    # "work"
-        w.b(0xC7, 0x81); w.u32(0x338); w.u32(0x6D65665F)                    # "_fem"
-        w.b(0xC7, 0x81); w.u32(0x33C); w.u32(0x00656C61)                    # "ale\\0"
-        w.b(0xC7, 0x81); w.u32(0x340); w.u32(0)
-        w.b(0xC7, 0x81); w.u32(0x344); w.u32(13)
-        w.b(0xC7, 0x81); w.u32(0x348); w.u32(0x0F)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x00); w.u32(0x6B726F77)  # "work"
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x04); w.u32(0x6D65665F)  # "_fem"
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x08); w.u32(0x00656C61)  # "ale\\0"
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x0C); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x10); w.u32(13)
+        w.b(0xC7, 0x05); w.u32(dwarf_spawn_class_string + 0x14); w.u32(0x0F)
         w.mark("native_dwarf_spawn_call")
-        w.b(0xC6, 0x81); w.u32(0x32A); w.b(0x01)                             # request=1
-        # Natural Worker creation enters this function with both ECX and EDI
-        # set to MainWarehouseEntity*.  Preserve that native calling context;
-        # the pushad above restores the hook caller's EDI after this request.
-        w.b(0x89, 0xCF)                                                       # mov edi, ecx
-        w.relative(b"\xE8", module_base + self.V1_NATIVE_DWARF_SPAWN_RVA)
-        w.b(0xA3); w.u32(dwarf_spawn_return)
-        # ECX is volatile across MainWarehouseEntity::CreateWorker().  The
-        # previous controller restored the temporary gender string through
-        # whatever value the callee left in ECX, producing the crash seen at
-        # the controller code-cave offset.  Reload the verified warehouse
-        # pointer before writing the 24-byte SSO backup back.
+        # bool MainWarehouseEntity::RequestWorker(const std::string& type)
+        # (thiscall, reference argument on stack).  The method writes the
+        # pending state and schedules its own native completion flow.
+        w.b(0x68); w.u32(dwarf_spawn_class_string)
         w.b(0x8B, 0x0D); w.u32(dwarf_spawn_warehouse)                       # ecx=MainWarehouseEntity*
-        for offset in range(0, 24, 4):
-            w.b(0xA1); w.u32(dwarf_spawn_string_backup + offset)
-            w.b(0x89, 0x81); w.u32(0x334 + offset)
-        w.b(0xC7, 0x05); w.u32(dwarf_spawn_result); w.u32(1)
+        w.relative(b"\xE8", module_base + self.V1_NATIVE_DWARF_REQUEST_RVA)
+        w.b(0x0F, 0xB6, 0xC0)                                                 # bool AL -> EAX
+        w.b(0xA3); w.u32(dwarf_spawn_return)
+        w.b(0xA3); w.u32(dwarf_spawn_result)
         w.mark("native_dwarf_spawn_restore")
         w.b(0x61, 0x9D)
         w.mark("native_dwarf_spawn_return")
@@ -8886,7 +9115,7 @@ class Api:
         # The original caller has both ECX and EAX pointing at the behaviour
         # object when it issues the call.  Reproduce that non-ABI detail too.
         w.b(0x89, 0xC8)                                                      # eax=ecx
-        w.relative(b"\xE8", module_base + V1_LIBRARY_UPGRADE_RVA)
+        w.relative(b"\xE8", module_base + self.V1_LIBRARY_UPGRADE_RVA)
         w.b(0xC7, 0x05); w.u32(library_result); w.u32(1)                    # native handler returned
         w.mark("update_library_restore")
         w.b(0x61, 0x9D)                                                    # popad / popfd
@@ -8995,7 +9224,7 @@ class Api:
         w.b(0x89, 0x45, 0xF0)                                               # [ebp-10]=eax
         w.mark("portal_count_original")
         w.b(0x39, 0x5D, 0xF0)                                               # cmp [ebp-10],ebx
-        w.relative(b"\x0F\x8E", module_base + 0x5B6BA2)                   # jng native cleanup
+        w.relative(b"\x0F\x8E", module_base + self.WAVE_PORTAL_COUNT_CLEANUP_RVA)  # jng native cleanup
         w.relative(b"\xE9", module_base + self.WAVE_PORTAL_COUNT_RVA + 9)
 
         # The normal game staggers each door by its EBX loop index.  Only while
@@ -9486,6 +9715,10 @@ class Api:
             return None, "请先连接游戏"
         if self._detect_v2():
             return None, "当前传送门功能仅支持 Steam 原版"
+        if not self._v1_native_layout.get("recognized"):
+            self._apply_v1_native_layout()
+        if not self._v1_native_layout.get("recognized"):
+            return None, "当前 CraftWorld.exe 未匹配已验证的原生调用布局；不会猜测地址或安装调度器"
         try:
             process_id = int(pm.process_id)
             module_base = int(get_base())
@@ -11955,10 +12188,11 @@ class Api:
     def spawn_native_dwarf(self, gender="random", name=None, skills=None):
         """Create one Worker through MainWarehouseEntity's normal game path.
 
-        Python submits only a compact request.  The game owns object allocation,
-        AI-vector registration, spawn effects and its random defaults; optional
-        name and personal skills are applied only after a fresh live-object
-        readback confirms the newly created Worker.
+        Python submits only the same public RequestWorker request used by the
+        game.  The normal warehouse update owns allocation, AI-vector
+        registration, spawn effects and random defaults; optional name and
+        skills are applied only after a fresh live-object readback confirms the
+        newly created Worker.
         """
         if not connected or not pm:
             return {"ok": False, "state": self.STATUS_DISCONNECTED,
@@ -12003,6 +12237,15 @@ class Api:
             elif normalized_gender != name_gender:
                 return {"ok": False, "error": "所选名字池与性别选择不一致"}
 
+        # MainWarehouseEntity::CreateWorker consumes a concrete class string;
+        # this build does not expose a reliable "random gender" sentinel to
+        # that native path.  Resolve the UI's random choice once before the
+        # request, so the injected call always receives either ``worker`` or
+        # ``worker_female`` and the post-create type check remains exact.
+        if normalized_gender == "random":
+            normalized_gender = random.choice(("male", "female"))
+            gender_code = gender_codes[normalized_gender][1]
+
         selected_skills, seen_skills = [], set()
         if skills is None:
             skills = []
@@ -12033,10 +12276,10 @@ class Api:
                 return {"ok": False, "error": "游戏连接已失效，请重新连接后再试"}
             try:
                 module_base = int(get_base())
-                native_address = module_base + self.V1_NATIVE_DWARF_SPAWN_RVA
-                if (pm.read_bytes(native_address, len(self.V1_NATIVE_DWARF_SPAWN_PREFIX)) !=
-                        self.V1_NATIVE_DWARF_SPAWN_PREFIX):
-                    return {"ok": False, "error": "矮人原生创建函数与当前游戏版本不匹配"}
+                request_address = module_base + self.V1_NATIVE_DWARF_REQUEST_RVA
+                if (pm.read_bytes(request_address, len(self.V1_NATIVE_DWARF_REQUEST_PREFIX)) !=
+                        self.V1_NATIVE_DWARF_REQUEST_PREFIX):
+                    return {"ok": False, "error": "矮人原生请求函数与当前游戏版本不匹配"}
                 warehouse, warehouse_error = self._find_v1_main_warehouse(module_base)
                 if not warehouse:
                     return {"ok": False, "error": warehouse_error}
@@ -12079,8 +12322,31 @@ class Api:
             if native_result != 1:
                 return {"ok": False, "error": "游戏没有确认原生矮人生成请求"}
 
+            # RequestWorker only schedules the game-owned completion path.
+            # Require the live pending flag to return to zero before scanning
+            # the Worker vector; the accepted request itself is not success.
+            # The request is normally consumed on the following warehouse
+            # update, but the UI / pause state can defer that tick for several
+            # seconds.  Two seconds was short enough to report a false
+            # failure immediately before the game registered the new Worker.
+            settle_deadline = time.monotonic() + 6.0
+            while time.monotonic() < settle_deadline:
+                try:
+                    pending_now = int(pm.read_bytes(int(warehouse["address"]) + 0x32A, 1)[0])
+                except Exception:
+                    pending_now = 1
+                if pending_now == 0:
+                    break
+                time.sleep(0.03)
+            if pending_now != 0:
+                return {"ok": False, "created": False, "queued": True,
+                        "state": "等待游戏更新",
+                        "error": "矮人生成请求已被游戏接受，但仍在等待游戏更新；若游戏暂停，请继续运行后刷新生物列表"}
+
             new_worker = None
-            deadline = time.monotonic() + 2.4
+            # The normal completion path may take more than one update tick
+            # when a spawn animation/event task is already being processed.
+            deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 current_workers = self._v1_dwarf_set()
                 candidates = [worker for worker in current_workers - before_workers
@@ -12099,8 +12365,8 @@ class Api:
                             "error": "检测到多个同时新增的矮人，已停止后续参数写入；请刷新列表确认"}
                 time.sleep(0.06)
             if not new_worker:
-                return {"ok": False, "created": True,
-                        "error": "游戏已执行创建，但未能可靠定位新增矮人；请刷新生物列表确认"}
+                return {"ok": False, "created": False,
+                        "error": "游戏接受了生成请求，但未确认新增矮人；未写入名字或技能"}
 
             # Wait for the new object to become visible in the same validated
             # Worker vector before touching its optional parameters.
@@ -14688,57 +14954,19 @@ class Api:
             return None, "怪物活动列表读取失败：%s" % exc
 
     def _read_available_pet_addresses(self, base, active_addresses):
-        """Keep only active Pets that pass the game's own availability test.
+        """Return EnemyManager membership without calling an inferred predicate.
 
-        An EnemyManager vector entry can outlive a visible creature while its
-        death/despawn transition is still pending.  EnemyManager::Counter()
-        calls IEnemyBase::Battle::IsAvailable before treating an entry as
-        countable, so this uses the same predicate on the game update thread.
-        Any queue/controller failure returns ``None`` rather than hiding a
-        legitimate pet from the player.
+        The manager vector is the authoritative, read-only live-world list.
+        A former extra ``IsAvailable`` call entered an ABI-dependent battle
+        helper.  Its entry bytes happened to match in an older executable but
+        its ``this`` layout did not, which could crash battle update after a
+        pet was created.  Membership plus the Pet object/component checks made
+        by callers removes stale heap allocations without executing that
+        unsafe helper.
         """
         if active_addresses is None:
             return None
-        if not active_addresses:
-            return set()
-        try:
-            controller, error = self._ensure_wave_portal_controller()
-            if not controller:
-                return None
-            data = int(controller["data"])
-            request = data + self.PET_AVAILABLE_QUERY_REQUEST_OFF
-            target_addr = data + self.PET_AVAILABLE_QUERY_TARGET_OFF
-            result_addr = data + self.PET_AVAILABLE_QUERY_RESULT_OFF
-            status_addr = data + self.PET_AVAILABLE_QUERY_STATUS_OFF
-            pending = (
-                self.WAVE_PORTAL_END_REQUEST_OFF, self.LIBRARY_QUEUE_REQUEST_OFF,
-                self.MAGIC_QUEUE_REQUEST_OFF, self.RECIPE_QUEUE_REQUEST_OFF,
-                self.PERSONAL_SKILL_QUEUE_REQUEST_OFF, self.PET_DIRECT_QUEUE_REQUEST_OFF,
-                self.PET_REMOVE_QUEUE_REQUEST_OFF, self.PET_LIMIT_QUERY_REQUEST_OFF,
-            )
-            if int(pm.read_int(request) or 0) or any(int(pm.read_int(data + off) or 0) for off in pending):
-                return None
-            component_vtable = int(base) + self.V1_PET_COMPONENT_VTABLE_RVA
-            available = set()
-            for pet in sorted(active_addresses):
-                component = int(pet) + self.PET_COMPONENT_OFF
-                if (not self._pandora_pointer_ok(component) or
-                        int(pm.read_int(component) or 0) != component_vtable):
-                    continue
-                pm.write_int(target_addr, component)
-                pm.write_int(result_addr, 0)
-                pm.write_int(status_addr, 0)
-                pm.write_int(request, 1)
-                deadline = time.monotonic() + 0.7
-                while time.monotonic() < deadline and int(pm.read_int(request) or 0):
-                    time.sleep(0.008)
-                if int(pm.read_int(request) or 0) or int(pm.read_int(status_addr) or 0) != 1:
-                    return None
-                if int(pm.read_int(result_addr) or 0) == 1:
-                    available.add(int(pet))
-            return available
-        except Exception:
-            return None
+        return set(active_addresses)
 
     def _read_pet_house_record(self, obj, vtable):
         try:
@@ -15055,6 +15283,12 @@ class Api:
         """Temporarily replace GetMaxPetCount with a bounded constant."""
         if not connected or not pm:
             return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "未连接游戏"}
+        # This endpoint writes executable code directly.  A nearby build may
+        # have the same surrounding bytes while the function entry moved;
+        # never fall back to the class default on an unrecognised EXE.
+        if not self._v1_native_layout.get("recognized"):
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "当前游戏版本未匹配已验证的宠物上限函数布局；不会猜测写入地址"}
         try: value = int(value)
         except Exception: return {"ok": False, "state": self.STATUS_FAILED, "error": "宠物上限必须是整数"}
         if not (self.PET_MAX_OVERRIDE_MIN <= value <= self.PET_MAX_OVERRIDE_MAX):
@@ -15154,6 +15388,15 @@ class Api:
         if not controller:
             return {"ok": False, "state": self.STATUS_FAILED, "error": error}
         try:
+            # Some compatible builds create and register the object normally
+            # but do not leave the EntityFactory result in EAX.  Record the
+            # game-owned active list before publishing the one-shot request so
+            # its post-call delta is the fallback readback, not a guessed
+            # success.
+            active_before = self._read_active_pet_addresses(int(validated["base"]))
+            if active_before is None:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "生成前无法读取宠物活动实体列表；未发送请求"}
             data = int(controller["data"])
             request = data + self.PET_DIRECT_QUEUE_REQUEST_OFF
             name_addr = data + self.PET_DIRECT_QUEUE_NAME_OFF
@@ -15176,21 +15419,42 @@ class Api:
             if int(pm.read_int(request) or 0) != 0:
                 return {"ok": False, "state": self.STATUS_FAILED,
                         "error": "游戏更新线程没有响应宠物生成请求"}
-            pet = int(pm.read_int(result) or 0)
-            if not self._pandora_pointer_ok(pet):
-                return {"ok": False, "state": self.STATUS_FAILED,
-                        "error": "游戏拒绝了该宠物生成请求（没有返回实体）"}
             expected_vtable = int(validated["base"]) + self.PET_DIRECT_VTABLE_RVA
-            if int(pm.read_int(pet) or 0) != expected_vtable:
+            component_vtable = int(validated["base"]) + self.V1_PET_COMPONENT_VTABLE_RVA
+            pet = int(pm.read_int(result) or 0)
+            verified_pet = None
+            if self._pandora_pointer_ok(pet):
+                direct = self._read_live_pet_record(pet, expected_vtable,
+                                                     component_vtable, None)
+                if direct and direct.get("pet_type") == pet_type:
+                    verified_pet = int(direct["address"])
+            # Poll only the already game-owned EnemyManager vector.  Never
+            # declare success from a queue flag alone: exactly one new, fully
+            # validated Pet of the requested type must be visible there.
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                active_after = self._read_active_pet_addresses(int(validated["base"]))
+                if active_after is not None:
+                    candidates = []
+                    for address in sorted(set(active_after) - set(active_before)):
+                        row = self._read_live_pet_record(address, expected_vtable,
+                                                         component_vtable, active_after)
+                        if row and row.get("pet_type") == pet_type:
+                            candidates.append(int(row["address"]))
+                    if len(candidates) == 1:
+                        verified_pet = candidates[0]
+                        break
+                    if len(candidates) > 1:
+                        return {"ok": False, "state": self.STATUS_FAILED,
+                                "error": "生成后出现多个同类宠物，无法安全确认本次对象"}
+                time.sleep(0.02)
+            if not verified_pet:
                 return {"ok": False, "state": self.STATUS_FAILED,
-                        "error": "原生工厂返回的不是已确认的宠物实体，已停止后续操作"}
-            if pm.read_bytes(pet + self.PET_DIRECT_TYPE_OFF, len(raw)) != raw:
-                return {"ok": False, "state": self.STATUS_FAILED,
-                        "error": "宠物实体类型读回不一致，已停止后续操作"}
+                        "error": "原生请求已被处理，但活动实体列表未确认生成结果"}
             return {"ok": True, "state": self.STATUS_VERIFIED,
-                    "pet_type": pet_type, "address": pet,
+                    "pet_type": pet_type, "address": verified_pet,
                     "spawn_x": int(validated["x"]), "spawn_y": int(validated["y"]),
-                    "message": "已通过游戏原生实体工厂生成 1 只宠物"}
+                    "message": "已通过游戏原生实体工厂生成 1 只宠物，并由活动实体列表读回确认"}
         except Exception as exc:
             return {"ok": False, "state": self.STATUS_FAILED,
                     "error": "宠物原生生成失败：%s" % exc}
