@@ -90,6 +90,9 @@ APP_ID = "crafttheworld-modifier"
 # performs one display-only check after startup; it never downloads or applies
 # an update until the user explicitly chooses to do so.
 UPDATE_RELEASE_API_URL = "https://api.github.com/repos/dszwamn/CraftWorldModifier/releases/latest"
+# GitHub's REST API is rate-limited per public IP.  Keep a browser-facing
+# fallback that can discover the latest tag without consuming API quota.
+UPDATE_RELEASE_PAGE_URL = "https://github.com/dszwamn/CraftWorldModifier/releases/latest"
 UPDATE_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 UPDATE_MAX_PACKAGE_BYTES = 300 * 1024 * 1024
 UPDATE_ALLOWED_SOURCE_NAMES = frozenset({
@@ -3538,7 +3541,8 @@ class Api:
                     if total > int(limit):
                         raise ValueError("远程文件超过允许大小限制")
                     chunks.append(chunk)
-                return b"".join(chunks), str(url)
+                resolved_url = response.geturl() if hasattr(response, "geturl") else str(url)
+                return b"".join(chunks), str(resolved_url)
         path = str(url or "")
         if parsed.scheme == "file":
             path = urllib.request.url2pathname(parsed.path)
@@ -3548,6 +3552,62 @@ class Api:
             raise ValueError("本地文件超过允许大小限制")
         with open(path, "rb") as handle:
             return handle.read(), path
+
+    def _read_update_manifest_from_release_page(self, api_source=""):
+        """Read the latest tag and checksum through GitHub's release page.
+
+        This path is used when the unauthenticated REST API returns 403 due
+        to the shared network IP exhausting its 60 requests/hour quota.  The
+        release page redirects to the concrete tag, and the published
+        SHA256SUMS.txt supplies the same integrity value used by the API path.
+        """
+        try:
+            page_source = self._update_url(UPDATE_RELEASE_PAGE_URL)
+            if not page_source:
+                return None, "备用 Release 页面地址无效"
+            _, resolved = self._update_stream_bytes(page_source, 8 * 1024 * 1024)
+            parsed = urllib.parse.urlparse(resolved)
+            match = re.search(r"/releases/tag/([^/?#]+)", parsed.path or "")
+            if not match:
+                return None, "备用 Release 页面没有返回有效版本标签"
+            tag = urllib.parse.unquote(match.group(1)).strip()
+            version = tag.lstrip("vV")
+            if not self._update_version_tuple(version):
+                return None, "备用 Release 页面没有返回有效版本号"
+            base = "https://github.com/dszwamn/CraftWorldModifier/releases/download/%s/" % urllib.parse.quote(tag, safe="")
+            checksum_url = base + "SHA256SUMS.txt"
+            checksum_raw, checksum_resolved = self._update_stream_bytes(checksum_url, 64 * 1024)
+            checksum_text = checksum_raw.decode("utf-8-sig", errors="replace")
+            checksum_match = re.search(
+                r"(?im)^\s*([0-9a-f]{64})\s+\*?CraftWorldModifier\.exe\s*$",
+                checksum_text,
+            )
+            if not checksum_match:
+                return None, "备用 Release 页面没有返回有效 EXE 校验值"
+            package_url = base + "CraftWorldModifier.exe"
+            return {
+                "app_id": APP_ID,
+                "version": version,
+                "channel": "stable",
+                "published_at": "",
+                "notes": "通过 GitHub Release 页面读取（API 暂时受限）；下载前仍会校验 SHA-256。",
+                "package": {
+                    "url": package_url,
+                    "sha256": checksum_match.group(1).lower(),
+                    "size": 0,
+                    "format": "exe",
+                },
+                "feed_url": api_source or UPDATE_RELEASE_PAGE_URL,
+                "resolved_feed_url": resolved,
+                "fallback": True,
+                "checksum_url": checksum_resolved,
+            }, ""
+        except urllib.error.HTTPError as exc:
+            return None, "备用 Release 页面读取失败：HTTP %s" % exc.code
+        except urllib.error.URLError as exc:
+            return None, "备用 Release 页面读取失败：%s" % exc.reason
+        except Exception as exc:
+            return None, "备用 Release 页面读取失败：%s" % exc
 
     def _update_feed_url(self, supplied=""):
         """Return the immutable built-in release endpoint.
@@ -3610,6 +3670,11 @@ class Api:
         except urllib.error.HTTPError as exc:
             if int(getattr(exc, "code", 0) or 0) == 404:
                 return None, "GitHub 暂未发布可用版本"
+            if int(getattr(exc, "code", 0) or 0) == 403:
+                fallback, fallback_error = self._read_update_manifest_from_release_page(source)
+                if fallback:
+                    return fallback, ""
+                return None, "读取内置更新服务失败：HTTP 403（GitHub API 限流；%s）" % (fallback_error or "备用通道不可用")
             return None, "读取内置更新服务失败：HTTP %s" % exc.code
         except urllib.error.URLError as exc:
             return None, "读取内置更新服务失败：%s" % exc.reason
