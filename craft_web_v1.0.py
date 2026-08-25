@@ -3943,17 +3943,25 @@ class Api:
             "  exit 1",
             "}",
         ])
+        launcher_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_launcher_%s.cmd" % uuid.uuid4().hex)
         try:
             # Windows PowerShell 5.1 needs the UTF-8 BOM; without it a path or
             # Chinese diagnostic text is decoded as the legacy code page and
             # the helper can fail to parse before it ever reaches Copy-Item.
             with open(script_path, "w", encoding="utf-8-sig", newline="\r\n") as handle:
                 handle.write("\r\n".join(script_lines) + "\r\n")
-            flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
-            subprocess.Popen([
-                "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-WindowStyle", "Hidden", "-File", script_path,
-            ], close_fds=True, creationflags=flags)
+            # A direct child of the PyInstaller host can be terminated with
+            # that host.  Use ``start`` from a short-lived cmd wrapper so the
+            # PowerShell worker is a separate process before the host exits.
+            launcher_lines = [
+                "@echo off",
+                'start "" /b powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s"' % script_path.replace('"', '""'),
+                'del "%~f0"',
+            ]
+            with open(launcher_path, "w", encoding="utf-8", newline="\r\n") as handle:
+                handle.write("\r\n".join(launcher_lines) + "\r\n")
+            flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            subprocess.Popen(["cmd.exe", "/d", "/c", launcher_path], close_fds=True, creationflags=flags)
             threading.Thread(target=self._close_after_update, name="ctw-update-exit", daemon=True).start()
             return {"ok": True, "restarting": True, "version": ready.get("version"),
                     "message": "更新已排队；修改器退出后将自动替换并重新启动。若失败，可查看 updates\\update.log。"}
