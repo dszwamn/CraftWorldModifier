@@ -2,7 +2,7 @@
 <html lang="zh-CN"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>打造世界修改器 v1.0</title>
+<title>打造世界修改器 v1.0.1</title>
 <style>
 .wave-portal-close{background:#F6E9DF;color:#765847;border:1px solid #E7CFC0;box-shadow:none}
 .wave-portal-close:hover{background:#F0DCCD;border-color:#DDB5A2}
@@ -13,14 +13,14 @@
 #manaControlNew>details{display:none!important}
 :root{--titlebar-height:38px}
 body{font-family:"Microsoft YaHei",-apple-system,sans-serif;background:linear-gradient(135deg,#FFF0E8 0%,#FFE8E0 30%,#FFF5F0 70%,#FFF0F0 100%);height:100vh;padding-top:var(--titlebar-height);display:flex;overflow:hidden;user-select:none}
-.app-titlebar{position:fixed;inset:0 0 auto 0;z-index:10001;height:var(--titlebar-height);display:flex;align-items:center;background:linear-gradient(100deg,#FFF9F4 0%,#FFF2E9 52%,#FDE9DD 100%);border-bottom:1px solid #E8D5C8;box-shadow:0 1px 8px rgba(103,76,55,.10);color:#514238;cursor:default}
+.app-titlebar{position:fixed;inset:0 0 auto 0;z-index:10001;height:var(--titlebar-height);display:flex;align-items:center;background:linear-gradient(100deg,#FFF9F4 0%,#FFF2E9 52%,#FDE9DD 100%);border-bottom:1px solid #E8D5C8;box-shadow:0 1px 8px rgba(103,76,55,.10);color:#514238;cursor:default;contain:paint;transform:translateZ(0);-webkit-app-region:drag}
 .app-titlebar-brand{height:100%;display:flex;align-items:center;gap:8px;padding:0 12px 0 14px;min-width:252px;font-size:13px;font-weight:800;letter-spacing:.025em;white-space:nowrap}
 .app-titlebar-icon{width:23px;height:23px;display:block;flex:0 0 auto;filter:drop-shadow(0 1px 1px rgba(96,58,27,.13))}
 .app-titlebar-version{padding:2px 6px;border:1px solid #E8C9A4;border-radius:999px;background:#FFF7EA;color:#A86723;font:700 10px/1 "Segoe UI",sans-serif;letter-spacing:.06em}
 .app-titlebar-drag-copy{color:#9A806F;font-size:11px;font-weight:600;letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .app-titlebar-spacer{flex:1;align-self:stretch;min-width:24px}
-.app-window-controls{display:flex;align-self:stretch;margin-left:auto}
-.app-window-control{width:46px;min-width:46px;height:var(--titlebar-height);padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;color:#715E51!important;box-shadow:none!important;display:grid;place-items:center;cursor:pointer;transition:background-color .14s ease,color .14s ease!important}
+.app-window-controls{display:flex;align-self:stretch;margin-left:auto;-webkit-app-region:no-drag}
+.app-window-control{width:46px;min-width:46px;height:var(--titlebar-height);padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;color:#715E51!important;box-shadow:none!important;display:grid;place-items:center;cursor:pointer;transition:background-color .14s ease,color .14s ease!important;-webkit-app-region:no-drag}
 .app-window-control:hover{background:#F3E2D7!important;color:#46362C!important;transform:none!important}
 .app-window-control:active{background:#EBD3C5!important;transform:none!important}
 .app-window-control.close:hover{background:#C7473F!important;color:#FFF!important}
@@ -96,7 +96,7 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .dh{display:grid;grid-template-columns:40px minmax(96px,1fr) 30px 86px 86px 68px 60px minmax(128px,.8fr) 58px;padding:8px 12px;font-size:14px;color:#B8A89A;gap:8px;border-bottom:1px solid #E0D6CC}
 .di{display:grid;grid-template-columns:40px minmax(96px,1fr) 30px 86px 86px 68px 60px minmax(128px,.8fr) 58px;padding:8px 12px;border-bottom:1px solid #F0EBE6;font-size:15px;color:#5C4E40;gap:8px;cursor:pointer}
 .di:hover{background:rgba(255,107,53,0.04)}
-.dwarf-list.creature-list .dh,.dwarf-list.creature-list .di{grid-template-columns:105px minmax(120px,.82fr) minmax(220px,1.55fr) 92px 92px minmax(128px,.92fr) 68px;align-items:center}.dwarf-list.creature-list .di{cursor:default}.dwarf-list.creature-list .di:has(button){cursor:pointer}
+.dwarf-list.creature-list .dh,.dwarf-list.creature-list .di{grid-template-columns:105px minmax(120px,.82fr) minmax(220px,1.55fr) 92px 92px minmax(128px,.92fr) 76px;align-items:center}.dwarf-list.creature-list .di{cursor:pointer}.dwarf-list.creature-list .di button{min-width:56px;font-size:13px;line-height:1.15}
 .creature-filterbar,.creature-selection-panel{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 10px;padding:9px 10px;border:1px solid #E8DED5;border-radius:9px;background:#FFFCF8}.creature-filterbar input,.creature-filterbar select{height:32px;padding:0 9px;border:1px solid #E0D6CC;border-radius:7px;background:#fff;color:#5C4E40;font:13px inherit;outline:none}.creature-filterbar input{width:220px}.creature-filterbar input:focus,.creature-filterbar select:focus{border-color:#FF9C2C}.creature-selection-panel{display:none;background:linear-gradient(100deg,#FFF8EC,#FFFDF9);border-color:#E8C98A}.creature-selection-panel.active{display:flex}.creature-selection-title{font-weight:800;color:#75522B;font-size:14px}.creature-selection-meta{font-size:12px;color:#8C7C6E}.creature-state-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap;background:#F0EBE6;color:#776558}.creature-state-badge.normal,.creature-state-badge.active{background:#E2F2DF;color:#4E8048}.creature-state-badge.injured{background:#FFF0D9;color:#A96A22}.creature-state-badge.pending{background:#EDE8F6;color:#75668F}.dwarf-list.creature-list .di.creature-selected{background:#FFF1D7;box-shadow:inset 3px 0 0 #FF9C2C}.dwarf-list.creature-list .di.creature-row{cursor:pointer}
 .item-viewbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px;padding:9px 11px;border:1px solid #E8DED5;border-radius:10px;background:linear-gradient(105deg,#FFFCF8,#FFF8F1)}.item-viewbar-label{font-size:12px;font-weight:800;color:#8C6C50;margin-right:2px}.item-view-chip{height:31px;padding:0 11px;border:1px solid #E4D5C7;border-radius:999px;background:#fff;color:#6D5845;font:13px inherit;cursor:pointer;white-space:nowrap}.item-view-chip:hover{border-color:#E3A24E;background:#FFF7EA}.item-view-chip.active{background:#FF9C2C;border-color:#FF9C2C;color:#fff;font-weight:800;box-shadow:0 2px 5px rgba(188,112,33,.18)}.item-view-summary{font-size:12px;color:#A98C6A;margin-left:auto}
 .item-header{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
@@ -350,9 +350,9 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 </head>
 <body>
 <div class="app-titlebar pywebview-drag-region" ondblclick="titlebarToggleMaximize(event)" aria-label="打造世界修改器窗口标题栏">
-    <div class="app-titlebar-brand" aria-label="打造世界修改器 v1.0">
+    <div class="app-titlebar-brand" aria-label="打造世界修改器 v1.0.1">
         <svg class="app-titlebar-icon" aria-hidden="true" viewBox="0 0 32 32"><defs><linearGradient id="appIconBg" x1="4" y1="3" x2="28" y2="30" gradientUnits="userSpaceOnUse"><stop stop-color="#F49A3D"/><stop offset="1" stop-color="#C45F25"/></linearGradient><linearGradient id="appIconGem" x1="12" y1="10" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#FFF2AF"/><stop offset="1" stop-color="#FFD258"/></linearGradient></defs><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8" fill="url(#appIconBg)"/><path d="M7 24.5 21.4 10.1M9 8.5c4.2-2.1 8.9-1.5 12.5.6M19.6 9.2c2.1 3.6 2.7 8.3.6 12.5" stroke="#4B3024" stroke-width="3.15" stroke-linecap="round"/><path d="m16.4 9.6 2.2-2.2a2.05 2.05 0 0 1 2.9 0l2.1 2.1a2.05 2.05 0 0 1 0 2.9l-2.2 2.2" fill="none" stroke="#4B3024" stroke-width="2.35" stroke-linecap="round"/><path d="m16 14.1 4.7 4.7-4.7 6.4-4.7-6.4L16 14.1Z" fill="url(#appIconGem)" stroke="#75442A" stroke-width="1.35" stroke-linejoin="round"/><path d="m16 14.1 0 11.1m-4.7-6.4h9.4" stroke="#A35B2E" stroke-width="1.05" stroke-linejoin="round"/></svg>
-        <span>打造世界修改器</span><span class="app-titlebar-version">v1.0</span>
+        <span>打造世界修改器</span><span class="app-titlebar-version">v1.0.1</span>
     </div>
     <span class="app-titlebar-drag-copy" aria-hidden="true">Craft The World Modifier</span>
     <div class="app-titlebar-spacer" aria-hidden="true"></div>
@@ -370,7 +370,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
     <div class="nav-item" onclick="switchTab('magic')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m14 4 6 6M5 19l7.5-7.5M3 21l3-1 12-12-2-2L4 18l-1 3Z"/><path d="M18 15v6M15 18h6"/></svg></span> 魔法</div>
     <div class="nav-item" onclick="switchTab('other')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3Z"/><path d="m19 15 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7L19 15Z"/></svg></span> 其它功能</div>
     <div class="nav-item" onclick="switchTab('map')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg></span> 地图</div>
-    <div class="sidebar-footer" aria-label="项目与作者信息"><a class="sidebar-footer-link" href="https://github.com/dszwamn/CraftWorldModifier" onclick="openProjectGithub(event)" title="打开 GitHub 开源项目页面">开源项目</a><span class="sidebar-footer-contact" aria-label="QQ：2941791497"><span aria-hidden="true">🐧</span>：2941791497</span><span class="sidebar-footer-version">v1.0 · 正式版</span></div>
+    <div class="sidebar-footer" aria-label="项目与作者信息"><a class="sidebar-footer-link" href="https://github.com/dszwamn/CraftWorldModifier" onclick="openProjectGithub(event)" title="打开 GitHub 开源项目页面">开源项目</a><span class="sidebar-footer-contact" aria-label="QQ：2941791497"><span aria-hidden="true">🐧</span>：2941791497</span><span class="sidebar-footer-version">v1.0.1 · 正式版</span></div>
 </div>
 <div class="main">
     <div id="top-command-dock">
@@ -385,7 +385,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <button id="saveManagerBtn" class="save-manager-button" onclick="openSaveManager()" title="只能在 CraftWorld.exe 关闭后备份、校验和恢复"><span aria-hidden="true">▣</span> 离线存档</button>
         <button id="worldDiagnosticsBtn" class="save-manager-button" onclick="openWorldDiagnostics()" title="查看任务与世界运行时状态" style="display:none"><span aria-hidden="true">◎</span> 世界诊断</button>
         <button class="operation-log-button" onclick="openOperationLog()" title="查看本次修改器会话的操作记录"><span aria-hidden="true">≡</span> 操作记录<span class="operation-log-count" id="operationLogCount">0</span></button>
-        <button id="updateVersionChip" class="update-version-chip" type="button" onclick="openUpdateCenter()" title="当前版本与启动时检查到的 GitHub 最新版本" aria-label="打开更新中心"><span>当前 <b id="updateCurrentVersion">v1.0.0</b> · 最新 <b id="updateLatestVersion">未检查</b></span></button>
+        <button id="updateVersionChip" class="update-version-chip" type="button" onclick="openUpdateCenter()" title="当前版本与启动时检查到的 GitHub 最新版本" aria-label="打开更新中心"><span>当前 <b id="updateCurrentVersion">v1.0.1</b> · 最新 <b id="updateLatestVersion">未检查</b></span></button>
         <span id="logText" class="log-msg"></span>
     </div>
     </div>
@@ -656,9 +656,9 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <input id="mapRow" value="50" style="width:58px;height:34px;padding:0 8px;border:1px solid #E0D6CC;border-radius:6px;font-size:14px;font-family:inherit;color:#333;outline:none">
             <span style="color:#6B5B4F;font-size:14px">列</span>
             <input id="mapCol" value="115" style="width:58px;height:34px;padding:0 8px;border:1px solid #E0D6CC;border-radius:6px;font-size:14px;font-family:inherit;color:#333;outline:none">
-            <button class="btn btn-peach" data-map-write onclick="mapReplaceInput()" style="display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 18px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;vertical-align:middle">替换</button>
+            <button class="btn btn-peach" data-map-write onclick="mapReplaceInput()" title="选择修改内层、外层或两个图层" style="display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 18px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;vertical-align:middle">替换</button>
             <button class="btn btn-light" data-map-write onclick="mapClearInput()" style="display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 14px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;vertical-align:middle">清空此格</button>
-            <span id="mapInfo" style="color:#B8A89A;font-size:13px"></span>
+            <span id="mapInfo" style="display:block;margin-top:6px;padding:8px 10px;border:1px solid #E2D6CC;border-radius:7px;background:#FFFCF8;color:#5C4E40;font-size:14px;font-weight:600;line-height:1.5;white-space:normal"></span>
         </div>
         <div class="map-toolbar" aria-label="地图工具栏">
             <div class="map-tool-group"><span class="map-tool-label">视图</span>
@@ -735,6 +735,19 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <div class="map-modal-actions">
             <button class="btn btn-light" onclick="mapMarkModalCell()" title="为当前行列添加带名称的地图标记" style="padding:7px 12px">📍 标记</button><button class="btn btn-light" data-map-write onclick="mapClearModal()" style="padding:7px 12px">清空此格</button><span class="map-modal-spacer"></span><button class="btn btn-light" onclick="mapCancelModal()" style="padding:7px 14px">取消</button><button class="btn btn-orange" data-map-write onclick="mapApplyModal()" style="padding:7px 14px">替换此格</button><button class="btn btn-orange" data-map-write onclick="mapApplyModalSelection()" style="padding:7px 14px">应用到框选</button>
         </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="mapReplaceModal" onclick="if(event.target===this)mapCloseReplaceModal()">
+    <div class="modal-box map-modal-box" role="dialog" aria-modal="true" aria-labelledby="mapReplaceTitle">
+        <div class="map-modal-head"><div><div id="mapReplaceTitle" class="modal-title">替换地图方块</div><div id="mapReplacePosition" style="font-size:13px;color:#8C7C6E;margin-top:4px">—</div></div><button class="btn btn-light" onclick="mapCloseReplaceModal()" style="padding:7px 13px">关闭</button></div>
+        <div class="map-modal-section">
+            <div class="map-modal-section-title">替换目标</div>
+            <div id="mapReplaceBlockInfo" style="color:#6B5B4F;font-size:13px;line-height:1.55"></div>
+            <div class="modal-field" style="margin-top:12px"><label for="mapReplaceLayer">要修改的图层</label><select id="mapReplaceLayer" style="width:100%;height:36px;padding:0 9px;border:1px solid #DDD;border-radius:7px;font:14px inherit;background:#fff;color:#333"><option value="inner">只替换内层（背景方块）</option><option value="front">只替换外层（实体方块）</option><option value="both">整个替换（内层和外层都替换）</option></select></div>
+        </div>
+        <div class="map-modal-section"><div class="map-modal-section-title">说明</div><div style="font-size:12px;color:#8C7C6E;line-height:1.55">替换会使用地图顶部当前选中的方块。仅修改所选图层；水量和探索状态保持不变。</div></div>
+        <div class="map-modal-actions"><button class="btn btn-light" onclick="mapCloseReplaceModal()" style="padding:8px 15px">取消</button><button class="btn btn-orange" data-map-write onclick="mapConfirmReplaceModal()" style="padding:8px 16px">确认替换</button></div>
     </div>
 </div>
 
@@ -1644,7 +1657,7 @@ function updateCenterSetStatus(text,kind){var el=document.getElementById('update
 function updateCenterSetDetail(text){var el=document.getElementById('updateCenterDetail');if(el)el.textContent=String(text||'');}
 function updateQuickState(current,latest,state){
     var currentEl=document.getElementById('updateCurrentVersion'),latestEl=document.getElementById('updateLatestVersion'),chip=document.getElementById('updateVersionChip');
-    if(currentEl)currentEl.textContent='v'+String(current||'1.0.0').replace(/^v/i,'');
+    if(currentEl)currentEl.textContent='v'+String(current||'1.0.1').replace(/^v/i,'');
     if(latestEl)latestEl.textContent=String(latest||'未检查');
     if(chip){if(state)chip.setAttribute('data-state',state);else chip.removeAttribute('data-state');}
 }
@@ -1660,7 +1673,7 @@ function updateCenterRender(result){
     if(stage)stage.disabled=!(result&&result.ok&&result.available&&result.package_ready);
     if(apply)apply.disabled=!(result&&result.staged&&result.staged.files&&result.staged.files.length);
     if(!result)return;
-    var current=result.current_version||result.version||'1.0.0',latest=result.latest_version||result.version||'未检查';
+    var current=result.current_version||result.version||'1.0.1',latest=result.latest_version||result.version||'未检查';
     if(!result.ok){updateQuickState(current,'检查失败','error');updateQuickButtonState(null);updateCenterSetStatus(result.error||'更新检查失败','error');return;}
     if(result.staged){updateQuickState(current,result.staged.version,'available');updateQuickButtonState(result);updateCenterSetStatus('已暂存 '+result.staged.version+'，等待应用。','pending');updateCenterSetDetail('文件：'+(result.staged.files||[]).join('、'));return;}
     if(!result.available){var state=latest===current?'latest':'';updateQuickState(current,latest,state);updateQuickButtonState(result);updateCenterSetStatus(latest==='未发布'?'GitHub 暂未发布可用版本。':'当前版本 '+current+' 已是最新。',latest==='未发布'?'':'ok');updateCenterSetDetail(result.message||'');return;}
@@ -1669,7 +1682,7 @@ function updateCenterRender(result){
 function openUpdateCenter(){
     var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.add('active');
     call('get_update_info',function(info){
-        var current=(info&&info.version)||'1.0.0';
+        var current=(info&&info.version)||'1.0.1';
         if(info&&info.staged){_updateCheck={ok:true,current_version:current,staged:info.staged};updateCenterRender(_updateCheck);return;}
         if(_updateCheck){updateCenterRender(_updateCheck);return;}
         if(_updateAutoCheckInFlight){updateCenterSetStatus('正在后台检查 GitHub Releases…','pending');updateCenterSetDetail('检查完成后，顶部“最新版本”会自动更新。');return;}
@@ -1679,16 +1692,25 @@ function openUpdateCenter(){
 }
 function closeUpdateCenter(){var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.remove('active');}
 function checkModifierUpdate(){var quick=document.getElementById('updateVersionChip');if(quick){quick.disabled=true;quick.title='正在检查 GitHub Releases…';}updateCenterSetStatus('正在检查 GitHub Releases…','pending');updateCenterSetDetail('');call('check_for_update',function(r){if(quick){quick.disabled=false;quick.title='点击打开更新中心';}_updateCheck=r;updateCenterRender(r);});}
-function stageModifierUpdate(){updateCenterSetStatus('正在下载并校验更新包…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'暂存更新失败','error');return;}updateCenterSetStatus('更新包已校验并暂存。','ok');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));updateQuickState(r.current_version||'1.0.0',r.version,'available');updateQuickButtonState({ok:true,staged:{version:r.version}});var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包已暂存：'+r.version,'success');});}
+function stageModifierUpdate(){updateCenterSetStatus('正在下载并校验更新包…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'暂存更新失败','error');return;}updateCenterSetStatus('更新包已校验并暂存。','ok');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));updateQuickState(r.current_version||'1.0.1',r.version,'available');updateQuickButtonState({ok:true,staged:{version:r.version}});var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包已暂存：'+r.version,'success');});}
 function applyModifierUpdate(){updateCenterSetStatus('正在安排重启更新…','pending');call('apply_staged_update',function(r){if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'应用更新失败','error');return;}updateCenterSetStatus(r.message||'更新已排队；即将重启。','ok');log('修改器更新已排队，准备重启','success');scheduleUiTimeout(function(){beginUiShutdown();},350);});}
 var _updateAutoCheckInFlight=false;
+var _updateAutoCheckSeq=0;
 function autoCheckModifierUpdateDisplayOnly(currentVersion){
     if(_updateAutoCheckInFlight)return;
+    var seq=++_updateAutoCheckSeq, settled=false;
     _updateAutoCheckInFlight=true;
+    var watchdog=scheduleUiTimeout(function(){
+        if(settled||seq!==_updateAutoCheckSeq)return;
+        settled=true; _updateAutoCheckInFlight=false;
+        updateQuickState(currentVersion||'1.0.1','检查超时','error');
+        updateQuickButtonState(null);
+    },8000);
     call('check_for_update',function(result){
-        _updateAutoCheckInFlight=false;
-        _updateCheck=result||{ok:false,current_version:currentVersion||'1.0.0',error:'更新检查没有返回结果'};
-        var current=(result&&result.current_version)||currentVersion||'1.0.0';
+        if(settled||seq!==_updateAutoCheckSeq)return;
+        settled=true; _updateAutoCheckInFlight=false; if(watchdog)clearTimeout(watchdog);
+        _updateCheck=result||{ok:false,current_version:currentVersion||'1.0.1',error:'更新检查没有返回结果'};
+        var current=(result&&result.current_version)||currentVersion||'1.0.1';
         if(!result||!result.ok){updateQuickState(current,'检查失败','error');updateQuickButtonState(null);return;}
         var latest=result.latest_version||result.version||'未发布';
         var state=result.available?'available':(latest===current?'latest':'');
@@ -1697,15 +1719,24 @@ function autoCheckModifierUpdateDisplayOnly(currentVersion){
     });
 }
 function initializeUpdateStatus(){
+    var initialized=false;
+    updateQuickState('1.0.1','准备检查','checking');
     call('get_update_info',function(info){
-        if(!info||!info.ok)return;
-        var current=info.version||'1.0.0';
+        initialized=true;
+        if(!info||!info.ok){
+            scheduleUiTimeout(function(){autoCheckModifierUpdateDisplayOnly((info&&info.version)||'1.0.1');},250);
+            return;
+        }
+        var current=info.version||'1.0.1';
         if(info.staged){_updateCheck={ok:true,current_version:current,staged:info.staged};updateQuickState(current,info.staged.version,'available');updateQuickButtonState(_updateCheck);return;}
         updateQuickState(current,'检查中…','checking');
         // Let the first paint settle before opening the network request.  This
         // remains display-only and never enters the normal operation log.
         scheduleUiTimeout(function(){autoCheckModifierUpdateDisplayOnly(current);},900);
     });
+    scheduleUiTimeout(function(){
+        if(!initialized&&!_updateAutoCheckInFlight)autoCheckModifierUpdateDisplayOnly('1.0.1');
+    },1200);
 }
 function clearOperationLog(){ _operationLog=[]; setTopLog(null); renderOperationLog(); }
 function operationLogText(){
@@ -1936,7 +1967,7 @@ function syncLocalData(chooseFolder) {
         if (result && result.needs_path && !chooseFolder) {
             setLocalSyncStatus('未自动定位到游戏目录', true);
             log((result.error || '未自动定位到游戏目录') + '；请选择游戏目录', 'warning');
-            if (window.confirm('没有自动定位到 Craft The World 游戏目录。\n\n请选择包含 CraftWorld.exe 与 data 文件夹的位置。')) syncLocalData(true);
+            showConfirm('没有自动定位到 Craft The World 游戏目录。\n\n请选择包含 CraftWorld.exe 与 data 文件夹的位置。',function(ok){if(ok)syncLocalData(true);},{title:'选择游戏目录'});
             return;
         }
         if (result && result.cancelled) {
@@ -2854,7 +2885,19 @@ function portalDirectorAddHistory(kind,text){_portalDirectorHistory.push({at:Dat
 function portalDirectorRenderHistory(){var host=document.getElementById('portalDirectorHistory');if(!host)return;host.innerHTML=_portalDirectorHistory.length?_portalDirectorHistory.slice().reverse().map(function(row){return '<div class="portal-director-history-row"><small>'+portalDirectorTime(row.at)+'</small><span>'+escapeHtml(row.kind)+'</span><span>'+escapeHtml(row.text)+'</span></div>';}).join(''):'<div class="portal-director-history-row"><small>—</small><span>尚无记录</span><span>创建、结束和状态恢复会记录在这里。</span></div>';}
 function portalDirectorRenderPoints(){var host=document.getElementById('portalDirectorPoints');if(!host)return;host.innerHTML=_portalDirectorPoints.length?_portalDirectorPoints.map(function(point,index){return '<div class="portal-director-point">#'+(index+1)+' · 列 '+point[0]+'，行 '+point[1]+'</div>';}).join(''):'<div class="portal-director-point">尚未生成场景落点。</div>';}
 function portalDirectorRenderState(result,timer){var host=document.getElementById('portalDirectorState');if(!host)return;_portalDirectorState=result||null;var locked=!!((_timerLocks.countdown||{}).enabled),phase='空闲';if(result&&result.active)phase='红门事件进行中';else if(Number(timer)>0)phase='倒计时中';var source=result&&result.event_source==='modifier'?'修改器创建':result&&result.event_source==='native'?'自然生成':'—';var lines=['状态：'+phase,'来源：'+source,'倒计时：'+(isFinite(Number(timer))?Math.max(0,Number(timer)).toFixed(1)+' 秒':'读取失败')];if(result&&result.active){lines.push('门记录：'+result.portal_count+'；波次实体：'+result.spawn_entities);if(result.remaining!==null&&result.remaining!==undefined)lines.push('预计剩余：'+Number(result.remaining).toFixed(1)+' 秒');}if(locked)lines.push('倒计时已暂停（锁定）');if(result&&result.reason)lines.push(result.reason);host.textContent=lines.join('　');var input=document.getElementById('portalDirectorSeconds');if(input&&document.activeElement!==input&&isFinite(Number(timer)))input.value=Math.max(0,Math.round(Number(timer)));var pause=document.getElementById('portalDirectorPauseBtn');if(pause){pause.textContent=locked?'恢复倒计时':'暂停倒计时';pause.className=locked?'btn btn-light':'btn btn-orange';}}
-function refreshPortalDirector(){portalDirectorStatus('正在读取事件状态…',false);call('get_monster_portal_event_state',function(event){if(!event||!event.ok){portalDirectorStatus((event&&event.error)||'红门事件读取失败',true);portalDirectorRenderState(null,NaN);return;}call('read_timer',function(timer){var parts=String(timer||'').split(':'),seconds=parts.length===2?Number(parts[0])*60+Number(parts[1]):NaN;portalDirectorRenderState(event,seconds);portalDirectorStatus(event.active?'已读取活动红门事件':'已读取倒计时状态',false);refreshTimerLocks();});});}
+var _portalDirectorReadBusy=false;
+function refreshPortalDirector(){
+    if(_portalDirectorReadBusy)return;
+    _portalDirectorReadBusy=true; portalDirectorStatus('正在读取事件状态…',false);
+    call('get_monster_portal_event_state',function(event){
+        if(!event||!event.ok){_portalDirectorReadBusy=false;portalDirectorStatus((event&&event.error)||'红门事件读取失败',true);portalDirectorRenderState(null,NaN);return;}
+        call('read_timer',function(timer){
+            _portalDirectorReadBusy=false;
+            var parts=String(timer||'').split(':'),seconds=parts.length===2?Number(parts[0])*60+Number(parts[1]):NaN;
+            portalDirectorRenderState(event,seconds);portalDirectorStatus(event.active?'已读取活动红门事件':'已读取倒计时状态',false);refreshTimerLocks();
+        });
+    });
+}
 function portalDirectorRefreshLive(){if(document.getElementById('portalDirectorModal').classList.contains('active'))refreshPortalDirector();}
 function portalDirectorSetCountdownValue(seconds){var input=document.getElementById('portalDirectorSeconds');if(input)input.value=String(seconds);portalDirectorSetCountdown();}
 function portalDirectorSetCountdown(){var seconds=Number(document.getElementById('portalDirectorSeconds').value);if(!isFinite(seconds)||seconds<0){log('请输入 0 或以上的倒计时秒数','warning');return;}call('write_timer',function(result){if(!writeResultOk(result)){portalDirectorStatus('倒计时设置失败：'+writeResultError(result,'未知错误'),true);return;}portalDirectorAddHistory('倒计时','设置为 '+Math.round(seconds)+' 秒');log('红门倒计时已设置','success');refreshBasicState(false);refreshPortalDirector();},seconds);}
@@ -3518,6 +3561,12 @@ function renderCreatureList(){
     var host=document.getElementById('dwarfList');
     if(!host) return;
     host.classList.add('creature-list');
+    host.onclick=function(e){
+        var target=e&&e.target, row=target&&target.closest?target.closest('.creature-row'):null;
+        if(!row||target.closest('button'))return;
+        var id=row.getAttribute('data-creature-id');
+        if(id)selectCreature(id,e);
+    };
     var data=_creatureListData||{}, list=Array.isArray(data.creatures)?data.creatures:[];
     var filtered=list.filter(function(row){return row.creature_type===_creatureCategory && creatureRowMatchesFilter(row);});
     var count=document.getElementById('dc');
@@ -3541,15 +3590,15 @@ function renderCreatureList(){
         host.innerHTML='<div style="color:#8C7C6E;text-align:center;padding:30px;font-size:13px">'+escapeHtml(message)+'</div>';
         return;
     }
-    var h='<div class="dh"><span>类型</span><span># / ID</span><span>名称 / 种类</span><span style="text-align:right">列</span><span style="text-align:right">行</span><span style="text-align:center">血量 / 饱食</span><span style="text-align:center">操作</span></div>';
-    filtered.forEach(function(row){
+    var healthHeader=_creatureCategory==='dwarf'?'血量 / 饱食':'血量 / 上限';
+    var h='<div class="dh"><span>类型</span><span>#</span><span>名称 / 种类</span><span style="text-align:right">列</span><span style="text-align:right">行</span><span style="text-align:center">'+healthHeader+'</span><span style="text-align:center">操作</span></div>';
+    filtered.forEach(function(row,displayIndex){
         var stableId=creatureStableId(row), selected=stableId && stableId===_selectedCreatureId;
-        var clickArg=escapeHtml(JSON.stringify(stableId));
         var state=creatureRowState(row), stateBadge=creatureStateBadge(state);
         var rowClass='di creature-row'+(selected?' creature-selected':'');
         if(row.creature_type==='dwarf'){
-            h+='<div class="'+rowClass+'" onclick="selectCreature('+clickArg+',event)" ondblclick="showDwarfModal('+Number(row.idx)+')">';
-            h+='<span>🧙 矮人</span><span>#'+Number(row.idx)+'</span><span>'+escapeHtml(row.name||'未命名')+'</span>';
+            h+='<div class="'+rowClass+'" data-creature-id="'+escapeHtml(String(stableId))+'" ondblclick="showDwarfModal('+Number(row.idx)+')">';
+            h+='<span>🧙 矮人</span><span>'+String(displayIndex+1)+'</span><span>'+escapeHtml(row.name||'未命名')+'</span>';
             h+='<span style="text-align:right">'+creatureGridCell(row,'col')+'</span><span style="text-align:right">'+creatureGridCell(row,'row')+'</span>';
             var dwarfHealth=creatureVerifiedHealth(row);
             var dwarfHpText=dwarfHealth.verified?(formatCreatureHealthNumber(dwarfHealth.hp)+' / '+formatCreatureHealthNumber(dwarfHealth.max)+' · 饱食 '+safeReadValue(row.sat)):'— · 饱食 '+safeReadValue(row.sat);
@@ -3559,9 +3608,12 @@ function renderCreatureList(){
             h+='<span style="text-align:center"><button class="btn btn-light" onclick="locateDwarf('+Number(row.idx)+',event)" ondblclick="event.stopPropagation()" title="定位矮人">📍</button></span></div>';
         }else if(row.creature_type==='pet'){
             var address=String(row.address||'');
-            h+='<div class="'+rowClass+'" onclick="selectCreature('+clickArg+',event)"><span>🐾 宠物</span><span>'+escapeHtml(address||'—')+'</span><span>'+escapeHtml(row.pet_type||row.name||'未识别宠物')+'</span>';
-            h+='<span style="text-align:right">待定位</span><span style="text-align:right">待定位</span>';
-            h+='<span style="text-align:center">'+escapeHtml(row.status||'活动')+' '+stateBadge+'</span><span style="text-align:center">只读</span></div>';
+            var petNames={basilisk_pet:'青蛙人',catowl_pet:'猫头鹰宠物',crip_catowl_pet:'骷髅猫头鹰宠物',imp_pet:'小鬼宠物'};
+            var petName=petNames[row.pet_type]||row.name||row.pet_type||'未识别宠物';
+            var petLoc=creatureCanLocate(row), petHp=creatureVerifiedHealth(row);
+            h+='<div class="'+rowClass+'" data-creature-id="'+escapeHtml(String(stableId))+'"><span>🐾 宠物</span><span>'+String(displayIndex+1)+'</span><span>'+escapeHtml(petName)+'</span>';
+            h+='<span style="text-align:right">'+(petLoc?creatureGridCell(row,'col'):'待定位')+'</span><span style="text-align:right">'+(petLoc?creatureGridCell(row,'row'):'待定位')+'</span>';
+            h+='<span style="text-align:center">'+(petHp.verified?(formatCreatureHealthNumber(petHp.hp)+' / '+formatCreatureHealthNumber(petHp.max)):'血量待验证')+' '+stateBadge+'</span><span style="text-align:center">'+(petLoc?'<button class="btn btn-light" onclick="locateCreature(\''+escapeHtml(String(row.stable_id||row.address||''))+'\',event)" ondblclick="event.stopPropagation()" title="在地图中定位">📍</button>':'只读')+'</span></div>';
         }else{
             var monsterAddress=String(row.address||'');
             var monsterName=String(row.name||'未命名怪物对象');
@@ -3572,7 +3624,7 @@ function renderCreatureList(){
             if(localId) monsterTitle+=' · 本地定义 '+localId+(Number.isFinite(localHp)?(' · 基础生命 '+localHp):'');
             var creatureIcon=row.creature_type==='monster'?'👹 怪物':'🦌 其它生物';
             var displayName=escapeHtml(monsterName)+(localId?'<small style="display:block;color:#9A806F">'+escapeHtml(localId)+(Number.isFinite(localHp)?(' · 本地基础生命 '+localHp):'')+'</small>':'');
-            h+='<div class="'+rowClass+'" onclick="selectCreature('+clickArg+',event)"><span>'+creatureIcon+'</span><span>'+escapeHtml(monsterAddress||'—')+'</span><span title="'+escapeHtml(monsterTitle)+'">'+displayName+'</span>';
+            h+='<div class="'+rowClass+'" data-creature-id="'+escapeHtml(String(stableId))+'"><span>'+creatureIcon+'</span><span>'+String(displayIndex+1)+'</span><span title="'+escapeHtml(monsterTitle)+'">'+displayName+'</span>';
             var coordsOk=creatureCanLocate(row);
             var coordsText=row.coords_state==='未落地'?'未落地':'待定位';
             h+='<span style="text-align:right" title="'+escapeHtml(row.coords_reason||'')+'">'+(coordsOk?creatureGridCell(row,'col'):coordsText)+'</span><span style="text-align:right" title="'+escapeHtml(row.coords_reason||'')+'">'+(coordsOk?creatureGridCell(row,'row'):coordsText)+'</span>';
@@ -3584,6 +3636,14 @@ function renderCreatureList(){
     host.innerHTML=h;
 }
 function creatureStableId(row){return String((row&&((row.stable_id||row.address)||((row.creature_type||'creature')+':'+(row.idx||''))))||'');}
+function creatureDisplayName(row){
+    if(!row)return '生物';
+    if(row.creature_type==='pet'){
+        var names={basilisk_pet:'青蛙人',catowl_pet:'猫头鹰宠物',crip_catowl_pet:'骷髅猫头鹰宠物',imp_pet:'小鬼宠物'};
+        return names[row.pet_type]||row.name||row.pet_type||'未识别宠物';
+    }
+    return row.name||row.pet_type||row.address||'生物';
+}
 function creatureResolvedGridCell(row,key){
     // The backend normally sends grid coordinates. During a short map-cache
     // refresh it may send only the already-verified world X/Y pair, while the
@@ -3632,7 +3692,7 @@ function creatureRowMatchesFilter(row){
     var scope=String((document.getElementById('creatureMapScope')||{}).value||'all');
     var state=creatureRowState(row);
     if(query){
-        var haystack=[row.name,row.pet_type,row.creature_id,row.address,row.stable_id,row.vtable_rva].map(function(v){return String(v||'').toLowerCase();}).join(' ');
+        var haystack=[creatureDisplayName(row),row.name,row.pet_type,row.creature_id,row.address,row.stable_id,row.vtable_rva].map(function(v){return String(v||'').toLowerCase();}).join(' ');
         if(haystack.indexOf(query)<0) return false;
     }
     if(scope==='selection' && !creatureInCurrentMapSelection(row)) return false;
@@ -3681,7 +3741,7 @@ function renderCreatureSelectionPanel(){
     var follow=_creatureFollowId===creatureStableId(row);
     var selectionStateBadge=row.creature_type==='dwarf'?'':creatureStateBadge(state);
     panel.classList.add('active');
-    panel.innerHTML='<span class="creature-selection-title">当前选中：'+escapeHtml(row.name||row.pet_type||row.address||'生物')+'</span>'+selectionStateBadge+
+    panel.innerHTML='<span class="creature-selection-title">当前选中：'+escapeHtml(creatureDisplayName(row))+'</span>'+selectionStateBadge+
         '<span class="creature-selection-meta">列 '+col+' / 行 '+r+' · '+hp+'</span>'+
         (locatable?'<button class="btn btn-light" onclick="locateSelectedCreature()">📍 地图定位</button><button class="btn '+(follow?'btn-peach':'btn-light')+'" onclick="toggleCreatureFollow()">'+(follow?'停止跟随':'持续跟随')+'</button>':'<span class="creature-selection-meta">当前对象尚无已验证地图坐标</span>')+
         '<button class="btn btn-light" onclick="clearCreatureSelection()">取消选择</button>';
@@ -3690,7 +3750,7 @@ function focusCreatureOnMap(row,openMap,recenter){
     if(!creatureCanLocate(row)){log('该生物坐标未通过验证，不能定位','warning');return false;}
     var col=Math.floor(Number(row.col)), r=Math.floor(Number(row.row));
     _mapFocusedDwarf=-1;
-    _mapFocusedCreature={stableId:creatureStableId(row),name:String(row.name||row.pet_type||'生物'),col:col,row:r};
+    _mapFocusedCreature={stableId:creatureStableId(row),name:String(creatureDisplayName(row)),col:col,row:r};
     if(openMap) switchTab('map');
     function center(map){
         if(!map||!map.width||!map.height){log('地图读取失败，无法定位生物','warning');return;}
@@ -3703,9 +3763,9 @@ function locateSelectedCreature(){var row=findCreatureById(_selectedCreatureId);
 function toggleCreatureFollow(){
     var row=findCreatureById(_selectedCreatureId); if(!row)return;
     var id=creatureStableId(row);
-    if(_creatureFollowId===id){_creatureFollowId='';renderCreatureSelectionPanel();log('已停止跟随 '+String(row.name||row.pet_type||'生物'),'info');return;}
+    if(_creatureFollowId===id){_creatureFollowId='';renderCreatureSelectionPanel();log('已停止跟随 '+String(creatureDisplayName(row)),'info');return;}
     if(!focusCreatureOnMap(row,true,true))return;
-    _creatureFollowId=id; renderCreatureSelectionPanel(); log('已开始持续跟随 '+String(row.name||row.pet_type||'生物'),'success');
+    _creatureFollowId=id; renderCreatureSelectionPanel(); log('已开始持续跟随 '+String(creatureDisplayName(row)),'success');
 }
 function syncCreatureFollow(){
     if(!_creatureFollowId) return;
@@ -3752,7 +3812,7 @@ function locateCreature(stableId,event){
     _selectedCreatureId=creatureStableId(row);
     if(focusCreatureOnMap(row,true,true)){
         renderCreatureSelectionPanel();
-        log('已定位 '+String(row.name||row.address||'生物')+'：列'+creatureGridCell(row,'col')+' 行'+creatureGridCell(row,'row'),'success');
+        log('已定位 '+String(creatureDisplayName(row))+'：列'+creatureGridCell(row,'col')+' 行'+creatureGridCell(row,'row'),'success');
     }
 }
 function refreshDwarfListLegacy(){
@@ -4615,7 +4675,7 @@ function scanItems() {
         // 扫描后自动启动数量实时刷新
         if (!_itemAutoTimer) {
             _itemAutoTimer = setInterval(function(){ refreshItemQty(); }, 2000);
-            log("物品数量自动刷新已启动 (2秒/次)");
+            log("物品数量自动刷新已启动（仅物品栏可见时读取，2秒/次）");
         }
     });
     call("scan_recipes", function(result){
@@ -4629,7 +4689,8 @@ function scanItems() {
 }
 var _itemAutoTimer = null;
 function refreshItemQty() {
-    if (_itemRefreshBusy || _itemScanBusy || _uiClosing || !allItems.length || !_itemReadState || !_itemReadState.ok) return;
+    var itemPanel=document.getElementById('panel-item');
+    if ((itemPanel&&!itemPanel.classList.contains('active')) || _itemRefreshBusy || _itemScanBusy || _uiClosing || !allItems.length || !_itemReadState || !_itemReadState.ok) return;
     _itemRefreshBusy=true;
     call("refresh_items", function(n){
         if (!n) {
@@ -4650,7 +4711,15 @@ function refreshItemQty() {
                     allItems[ai].qty = qtyMap[allItems[ai].id];
                 }
             }
-            filterItems();
+            if(itemPanel&&itemPanel.classList.contains('active')){
+                var st=(document.getElementById('searchType')||{}).value||'', state=_filterState||{};
+                // A name/category search does not change row membership when
+                // quantities change, so update only the visible quantity
+                // cells.  Rebuild the table only for quantity/stock filters,
+                // which actually depend on the new values.
+                if(st!=='qty' && !state.hasStock && _itemView!=='stock') updateItemQuantityCells();
+                else filterItems();
+            }
         }, 0);
     });
 }
@@ -4962,8 +5031,8 @@ function clearProof() {
     document.getElementById("proofInput").value = "";
 }
 function editItemQty(id) {
-    var v = prompt("\u4fee\u6539\u6570\u91cf - " + id + ":\n\u8f93\u5165\u65b0\u6570\u91cf:");
-    if (!v || isNaN(v)) return;
+    showPrompt('修改物品数量 - '+id,'请输入新的非负整数数量：','',function(v){
+    if (v===null || v==='' || isNaN(v)) return;
     call("modify_item_qty", function(r){
         if (r && r.ok) {
             var suffix = r.operation_id ? "\uff1b\u5373\u65f6\u8bfb\u56de\u901a\u8fc7\uff0c\u91cd\u8fdb\u5b58\u6863\u540e\u8bf7\u5728\u64cd\u4f5c\u8bb0\u5f55\u4e2d\u590d\u6838" : "";
@@ -4973,7 +5042,7 @@ function editItemQty(id) {
         } else {
             log("\u4fee\u6539\u5931\u8d25: " + id + "\uff1a" + ((r && r.error) || "\u672a\u901a\u8fc7\u5199\u5165\u6821\u9a8c"), "error");
         }
-    }, id, parseInt(v, 10));
+    }, id, parseInt(v, 10)); });
 }
 function batch999() {
     log("V1.0 \u5df2\u5173\u95ed\u6279\u91cf\u7269\u54c1\u5199\u5165\uff1b\u8bf7\u6bcf\u6b21\u4ec5\u4fee\u6539\u4e00\u4e2a\u5df2\u626b\u63cf\u5806\u53e0\u3002", "warning");
@@ -4995,24 +5064,26 @@ function globalRefreshTick(){
         // Only the unified endpoint may refresh the visible creature roster.
         // The legacy dwarf endpoint has a single hp value and previously raced
         // this read, causing 8 / 8 to alternate with 8.0.
-        if (!_focusPaused && _tick % 4 == 0 && !_creatureRefreshBusy) {
+        var dwarfPanel=document.getElementById('panel-dwarf'), itemPanelForTick=document.getElementById('panel-item');
+        if (!_focusPaused && _tick % 8 == 0 && dwarfPanel && dwarfPanel.classList.contains('active') && !_creatureRefreshBusy) {
             refreshCreatureList(false,true);
         }
         // scanItems starts the dedicated 2-second quantity refresh.  Do not
         // make the global timer launch a second overlapping item read.
-        if (!_focusPaused && _tick % 6 == 0 && !_itemAutoTimer) refreshItemQty();
-        if (!_focusPaused && _magicRefreshRequested && _tick % 8 == 0) refreshMagicItems(false);
+        if (!_focusPaused && _tick % 6 == 0 && !_itemAutoTimer && document.getElementById('panel-item')&&document.getElementById('panel-item').classList.contains('active')) refreshItemQty();
+        var magicPanelForTick=document.getElementById('panel-magic');
+        if (!_focusPaused && _magicRefreshRequested && _tick % 8 == 0 && magicPanelForTick && magicPanelForTick.classList.contains('active')) refreshMagicItems(false);
         if (_tick % 8 == 0) refreshBasicState(false);
         if (!_focusPaused && _tick % 2 == 0) refreshGameTimeControls(false);
         if (_tick % 4 == 0 && document.getElementById('goldEconomyModal').classList.contains('active')) refreshGoldEconomyLive();
         if (_tick % 4 == 0 && document.getElementById('manaControlModal').classList.contains('active')) refreshManaControlLive();
         if (_tick % 4 == 0 && document.getElementById('xpControlModal').classList.contains('active')) refreshXpControlLive();
-        if (_tick % 4 == 0 && document.getElementById('portalDirectorModal').classList.contains('active')) portalDirectorRefreshLive();
+        if (_tick % 2 == 0 && document.getElementById('portalDirectorModal').classList.contains('active')) portalDirectorRefreshLive();
         // Pet objects can die or expire without a modifier action. Keep the
         // always-visible panel synchronized through the cheap cached read;
         // the backend escalates to one full heap scan only when an address
         // fails its vtable/component validity check.
-        if (_tick % 4 == 0) refreshPetManagerLive();
+        if (_tick % 8 == 0 && !(itemPanelForTick && itemPanelForTick.classList.contains('active'))) refreshPetManagerLive();
     }
     refreshDwarfModal();
 }
@@ -5023,7 +5094,7 @@ function startUiRefreshTimers(){
 }
 function stopUiRefreshTimers(){
     [_portalRefreshTimer, _pandoraRuntimeTimer, _itemAutoTimer, _globalRefreshTimer, _mapLiveTimer].forEach(function(timer){ if(timer) clearInterval(timer); });
-    _portalRefreshTimer=null; _pandoraRuntimeTimer=null; _itemAutoTimer=null; _globalRefreshTimer=null; _mapLiveTimer=null; _pandoraRuntimeBusy=false;
+    _portalRefreshTimer=null; _pandoraRuntimeTimer=null; _itemAutoTimer=null; _globalRefreshTimer=null; _mapLiveTimer=null; _pandoraRuntimeBusy=false; _portalDirectorReadBusy=false;
 }
 document.addEventListener("focusin", function(e){
     if (e.target.tagName === "INPUT") {
@@ -5143,8 +5214,10 @@ function switchTab(name){
     document.querySelectorAll(".panel").forEach(function(p){p.classList.remove("active");});
     document.querySelectorAll(".nav-item").forEach(function(n){n.classList.remove("active");});
     document.getElementById("panel-"+name).classList.add("active");
-    var sel = "[onclick*=\"" + name + "\"]";
-    var el = document.querySelector(sel);
+    var el = null;
+    document.querySelectorAll('.nav-item').forEach(function(node){
+        if(!el && String(node.getAttribute('onclick')||'').indexOf("switchTab('"+name+"')")>=0) el=node;
+    });
     if (el) el.classList.add("active");
     if (name === "other") refreshOtherFeatures();
     if (name === "dwarf") refreshCreatureList(false);
@@ -6076,7 +6149,7 @@ function refreshCatList() {
             var safeName = escapeHtml(cats[i]);
             h += "<tr style=\"border-bottom:1px solid #F0EBE6\">";
             h += "<td style=\"padding:8px 6px;font-size:14px;color:#5C4E40;cursor:pointer\" data-name=\"" + safeName + "\" onclick=\"inlineEditCat(this)\">" + safeName + "</td>";
-            h += "<td style=\"width:40px;padding:4px;text-align:center\"><button class=\"btn btn-light\" data-name=\"" + safeName + "\" onclick=\"deleteCategory(this)\" style=\"padding:4px 8px;font-size:12px;color:#C62828;cursor:pointer\">\uD83D\uDDD1\uFE0F</button></td>";
+            h += "<td style=\"width:52px;padding:4px;text-align:center\"><button class=\"btn btn-light category-delete-btn\" data-name=\"" + safeName + "\" title=\"删除分类\" aria-label=\"删除分类\" onclick=\"deleteCategory(this)\" style=\"padding:4px 8px;font-size:12px;color:#C62828;cursor:pointer\">删除</button></td>";
             h += "</tr>";
         }
         h += "</table>";
@@ -6127,12 +6200,21 @@ function addCategory() {
     }, name);
 }
 function renameCategory(oldName) {
-    var newName = prompt("重命名分类: " + oldName + "\n新名称:", oldName);
+    showPrompt('重命名分类','请输入新名称：',oldName,function(newName){
     if (newName && newName !== oldName) {
         call("rename_category", function(r) {
             if (r) { log("已重命名: " + oldName + " -> " + newName); refreshCatList(); }
             else log("重命名失败");
         }, oldName, newName);
+    }
+    });
+}
+function updateItemQuantityCells(){
+    var host=document.getElementById('itemList'); if(!host)return;
+    var rows=host.querySelectorAll('.ii');
+    for(var i=0;i<rows.length;i++){
+        var id=rows[i].getAttribute('data-id'), item=itemById(id);
+        if(item&&rows[i].children[3]) rows[i].children[3].textContent=String(item.qty===undefined?'—':item.qty);
     }
 }
 function deleteCategory(btn) {
@@ -6150,16 +6232,38 @@ function deleteCategory(btn) {
 
 
 var _confirmCallback = null;
+var _promptCallback = null;
 
-function showConfirm(msg, callback) {
+function showConfirm(msg, callback, options) {
+    options = options || {};
     _confirmCallback = callback;
-    document.getElementById("confirmMsg").textContent = msg;
+    var title=document.getElementById("confirmTitle"), message=document.getElementById("confirmMsg");
+    if(title) title.textContent=options.title || '⚠️ 确认操作';
+    if(message) message.textContent=String(msg || '');
     document.getElementById("confirmModal").classList.add("active");
 }
 
 function confirmResult(ok) {
     document.getElementById("confirmModal").classList.remove("active");
-    if (_confirmCallback) _confirmCallback(ok);
+    var callback=_confirmCallback; _confirmCallback=null;
+    if (callback) callback(!!ok);
+}
+
+function showPrompt(title, message, initialValue, callback) {
+    _promptCallback=callback;
+    var modal=document.getElementById('promptModal'), heading=document.getElementById('promptTitle'), copy=document.getElementById('promptMsg'), input=document.getElementById('promptInput');
+    if(!modal || !input){ if(callback) callback(null); return; }
+    if(heading) heading.textContent=title || '输入内容';
+    if(copy) copy.textContent=String(message || '');
+    input.value=initialValue===undefined || initialValue===null ? '' : String(initialValue);
+    modal.classList.add('active');
+    scheduleUiTimeout(function(){input.focus();input.select();},0);
+}
+
+function promptResult(value) {
+    var modal=document.getElementById('promptModal'); if(modal) modal.classList.remove('active');
+    var callback=_promptCallback; _promptCallback=null;
+    if(callback) callback(value===null || value===undefined ? null : String(value));
 }
 
 
@@ -6342,12 +6446,21 @@ function toggleItemSelect(el) {
 
 <div class="modal-overlay" id="confirmModal">
     <div class="modal-box" style="width:340px">
-        <div class="modal-title">⚠️ 确认操作</div>
+        <div class="modal-title" id="confirmTitle">⚠️ 确认操作</div>
         <p id="confirmMsg" style="font-size:15px;color:#5C4E40;margin:10px 0 20px;text-align:center"></p>
         <div class="modal-btns" style="justify-content:center;gap:12px">
             <button class="btn btn-peach" onclick="confirmResult(true)" style="padding:8px 28px;font-size:14px">确定</button>
             <button class="btn btn-light" onclick="confirmResult(false)" style="padding:8px 28px;font-size:14px">取消</button>
         </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="promptModal" onclick="if(event.target===this)promptResult(null)">
+    <div class="modal-box" style="width:420px" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+        <div class="modal-title" id="promptTitle">输入内容</div>
+        <p id="promptMsg" style="white-space:pre-line;font-size:14px;color:#5C4E40;margin:10px 0 12px;line-height:1.5"></p>
+        <input id="promptInput" type="text" style="width:100%;height:38px;padding:0 10px;border:1px solid #E0D6CC;border-radius:7px;font:14px inherit;box-sizing:border-box" onkeydown="if(event.key==='Enter')promptResult(this.value);if(event.key==='Escape')promptResult(null)">
+        <div class="modal-btns" style="justify-content:flex-end;gap:10px;margin-top:16px"><button class="btn btn-light" onclick="promptResult(null)" style="padding:8px 20px">取消</button><button class="btn btn-peach" onclick="promptResult(document.getElementById('promptInput').value)" style="padding:8px 20px">确定</button></div>
     </div>
 </div>
 
@@ -6423,7 +6536,7 @@ var _modalCell = null;
 var _mapTool = 'pan', _selection = null, _selectionCells = new Set(), _selectionDrag = null, _mapEditing = false;
 var _mapWriteRequestGeneration = 0, _mapWriteChanging = false;
 var _mapHistory = [], _mapFuture = [];
-var _mapView = 'composite', _mapLabels = 'none', _mapPins = [], _mapPinsKey = '', _editingPin = -1, _mapFocusedDwarf = -1, _mapFocusedCreature = null;
+var _mapView = 'composite', _mapLabels = 'none', _mapPins = [], _mapPinsKey = '', _editingPin = -1, _mapFocusedDwarf = -1, _mapFocusedCreature = null, _mapFocusedCell = null;
 var _mapLoadedCells = null, _mapLayers = {ground:true,underground:true,water:true,buildings:true,entities:true,markers:true}, _mapLastReadAt = 0, _mapCacheMode = 'none', _mapViewportTimer = 0;
 var _mapRenderFrame = 0, _mapDataVersion = 0, _mapRasterCache = null, _mapRasterKey = '', _mapMiniCache = null, _mapMiniKey = '';
 function mapBlocksLoad(){
@@ -6623,6 +6736,7 @@ function mapDropCache(){
     _mapPins=[];
     _mapFocusedDwarf=-1;
     _mapFocusedCreature=null;
+    _mapFocusedCell=null;
     _selection=null;
     _selectionCells.clear();
     invalidateMapCaches();
@@ -6922,7 +7036,7 @@ function drawMap(){
             var i = r * _mapData.width + c;
             if (!mapCellLoaded(i)) continue;
             var id = _mapView === 'entities' ? _mapData.front[i] : _mapData.w2[i];
-            ctx.fillText(id === 0xFFFF ? '' : id.toString(16).toUpperCase(), _ox + (c + 0.5) * _z, _oy + (r + 0.5) * _z);
+            ctx.fillText(id === 0xFFFF ? '' : String(Math.trunc(Number(id))), _ox + (c + 0.5) * _z, _oy + (r + 0.5) * _z);
         }
     }
     if (_mapLabels !== 'none' && _z >= 24){
@@ -6934,7 +7048,7 @@ function drawMap(){
             ctx.font = Math.max(8, Math.min(13, _z * 0.18)) + 'px sans-serif';
             ctx.fillStyle = 'rgba(255,255,255,0.96)';
             var primary = _mapView === 'entities' ? _mapData.front[i] : _mapData.w2[i];
-            var text = _mapLabels === 'ids' ? (primary === 0xFFFF ? '' : primary.toString(16).toUpperCase()) : mapName(primary);
+            var text = _mapLabels === 'ids' ? (primary === 0xFFFF ? '' : String(Math.trunc(Number(primary)))) : mapName(primary);
             ctx.fillText(text.slice(0, 8), x, y);
             if (_mapView === 'composite' && _mapLabels === 'names' && _mapData.front[i] !== 0xFFFF){
                 ctx.fillStyle = 'rgba(22,28,35,0.92)';
@@ -6949,7 +7063,23 @@ function drawMap(){
     }
     drawMapPins(ctx);
     drawDwarfMarkers(ctx);
+    drawMapFocusedCell(ctx);
     drawMiniMap();
+}
+function drawMapFocusedCell(ctx){
+    var target=_mapFocusedCell;
+    if(!target || !_mapData) return;
+    var row=Number(target.row), col=Number(target.col);
+    if(!Number.isInteger(row)||!Number.isInteger(col)||row<0||col<0||row>=_mapData.height||col>=_mapData.width)return;
+    var x=_ox+col*_z, y=_oy+row*_z;
+    if(x+_z<0||y+_z<0||x>ctx.canvas.width||y>ctx.canvas.height)return;
+    ctx.save();
+    ctx.fillStyle='rgba(255,154,44,.30)'; ctx.fillRect(x,y,_z,_z);
+    ctx.strokeStyle='#ff9a2c'; ctx.lineWidth=Math.max(2,Math.min(4,_z*.16)); ctx.strokeRect(x+.5,y+.5,Math.max(0,_z-1),Math.max(0,_z-1));
+    var arm=Math.max(5,Math.min(14,_z*.32)); ctx.strokeStyle='#fff2d8'; ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(x+_z/2-arm,y+_z/2);ctx.lineTo(x+_z/2+arm,y+_z/2);ctx.moveTo(x+_z/2,y+_z/2-arm);ctx.lineTo(x+_z/2,y+_z/2+arm);ctx.stroke();
+    if(_z>=10){ctx.fillStyle='#fff2d8';ctx.font='bold 11px sans-serif';ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillText(String(target.label||'定位目标')+'  行'+row+' 列'+col,x+4,y-3);}
+    ctx.restore();
 }
 function drawDwarfMarkers(ctx){
     if (!_mapLayers.markers) return;
@@ -7027,10 +7157,25 @@ function mapInfo(row, col){
     if(!mapCellLoaded(i)) return '坐标 '+row+'，'+col+'：当前视口未读取（缓存数据未覆盖此格）';
     var wl=_mapData.water[i]&0x1F, inn=_mapData.w2[i], out=_mapData.front[i];
     var explored=(_mapData.explored&&_mapData.explored[i])?'已探索':'未探索';
-    return '坐标 '+row+'，'+col+' | '+explored+
-        ' | 地表(w2)：'+mapName(inn)+' ['+(inn===0xFFFF?'FFFF':inn.toString(16).toUpperCase())+']'+
-        ' | 实体(front)：'+mapOuterName(out)+' ['+(out===0xFFFF?'FFFF':out.toString(16).toUpperCase())+']'+
-        (wl?' | 水量 '+wl:'')+' | 地下材质(bg)：'+_mapData.bg[i];
+    // Unknown blocks are represented by their decimal number only.  Older
+    // local translation entries sometimes contained a literal "ID 123";
+    // strip that presentation prefix here so the map never shows "ID" twice.
+    var innerName=String(mapName(inn)||'').replace(/^ID\s*/i,'').trim();
+    var outerName=String(mapOuterName(out)||'').replace(/^ID\s*/i,'').trim();
+    return '行 '+row+' · 列 '+col+'　|　'+explored+
+        '　|　内层：'+innerName+'（'+mapDecimalId(inn)+'）'+
+        '　|　外层：'+outerName+'（'+mapDecimalId(out)+'）'+
+        (wl?'　|　水量 '+wl:'');
+}
+function mapDecimalId(value){
+    var n=Number(value);
+    if(!Number.isFinite(n))return '未知';
+    return String(Math.trunc(n));
+}
+function mapSetFocusedCell(row, col, label){
+    if (!_mapData) return;
+    _mapFocusedCell = {row:Number(row), col:Number(col), label:String(label || '定位目标')};
+    scheduleMapDraw();
 }
 var mapCanvasEl = document.getElementById('mapCanvas');
 if (mapCanvasEl){
@@ -7038,6 +7183,7 @@ if (mapCanvasEl){
         var p = mapCellFromEvent(e);
         if(!p) return;
         g('mapRow', p.row); g('mapCol', p.col);
+        mapSetFocusedCell(p.row, p.col, '当前选择');
         document.getElementById('mapInfo').textContent = mapInfo(p.row, p.col);
     });
     mapCanvasEl.addEventListener('dblclick', function(e){
@@ -7183,6 +7329,27 @@ function mapReadModalPatch(){
     if (water < 0) water = 0; if (water > 31) water = 31;
     return {inner:inner, front:outer, bg:mapBgFor(inner), water:water};
 }
+function mapOpenReplaceModal(row, col){
+    row=Number(row); col=Number(col);
+    if(!_mapData||!Number.isInteger(row)||!Number.isInteger(col))return;
+    var i=row*_mapData.width+col, inner=_mapData.w2[i], outer=_mapData.front[i];
+    var pos=document.getElementById('mapReplacePosition'), info=document.getElementById('mapReplaceBlockInfo');
+    if(pos)pos.textContent='行'+row+' 列'+col;
+    if(info)info.textContent='当前：内层 '+mapName(inner)+'（'+inner+'） · 外层 '+mapOuterName(outer)+'（'+outer+'）';
+    var sel=document.getElementById('mapReplaceLayer');if(sel)sel.value='inner';
+    document.getElementById('mapReplaceModal').classList.add('active');
+}
+function mapCloseReplaceModal(){var modal=document.getElementById('mapReplaceModal');if(modal)modal.classList.remove('active');}
+function mapConfirmReplaceModal(){
+    if(mapWriteBlocked('替换此格'))return;
+    if(!_modalCell||!_mapData){mapCloseReplaceModal();return;}
+    var row=_modalCell.row,col=_modalCell.col,id=parseInt((document.getElementById('mapBlock')||{}).value,10);
+    if(!Number.isInteger(id)){log('请先在顶部方块列表选择替换目标','warning');return;}
+    var layer=(document.getElementById('mapReplaceLayer')||{}).value||'inner',patch={};
+    if(layer==='inner'||layer==='both'){patch.inner=id;patch.bg=mapBgFor(id);}
+    if(layer==='front'||layer==='both')patch.front=id;
+    mapCommitPatch(row,col,row,col,patch,'替换'+(layer==='both'?'内外层':layer==='front'?'外层':'内层'),function(ok){if(ok){mapCloseReplaceModal();mapCancelModal();}});
+}
 function mapWriteBlocked(action){
     var message=writePolicyMessage('map_apply_cells');
     if(message){
@@ -7201,7 +7368,8 @@ function mapApplyModal(){
     if (mapWriteBlocked('编辑此格')) return;
     if(!_modalCell) return;
     var row = _modalCell.row, col = _modalCell.col;
-    mapCommitPatch(row, col, row, col, mapReadModalPatch(), '编辑格子', function(ok){ if(ok) mapCancelModal(); });
+    var oldModal=document.getElementById('mapModal'); if(oldModal) oldModal.style.display='none';
+    mapOpenReplaceModal(row,col);
 }
 function mapApplyModalSelection(){
     if (mapWriteBlocked('区域替换')) return;
@@ -7220,9 +7388,26 @@ function mapSetExploredCells(cells, explored, label, done){
         if (!Number.isInteger(row) || !Number.isInteger(col) || seen.has(key) || row < 0 || col < 0 || row >= _mapData.height || col >= _mapData.width) return;
         seen.add(key);
         var index = row * _mapData.width + col;
-        before.push({row:row, col:col, inner:_mapData.w2[index], front:_mapData.front[index], bg:_mapData.bg[index], water:_mapData.water[index] & 31});
+        before.push({row:row, col:col, index:index});
     });
-    mapCommitCells(before, {explored:!!explored}, label, done);
+    if (!before.length) return;
+    var limit=Math.max(1,Math.floor((_mapData&&_mapData.edit_limit)||128)), next=0;
+    _mapEditing=true;
+    function writeBatch(){
+        if(next>=before.length){
+            _mapEditing=false; scheduleMapDraw();
+            if(done) done(true);
+            log(label+'：'+before.length+' 格');
+            return;
+        }
+        var batch=before.slice(next,next+limit).map(function(c){return {row:c.row,col:c.col};});
+        invokeApi('map_set_explored',[batch,!!explored],function(result){
+            if(!result||!result.ok){_mapEditing=false;log(label+'失败：'+((result&&result.error)||'未知错误'),'error');if(done)done(false);return;}
+            batch.forEach(function(c){var idx=c.row*_mapData.width+c.col;if(_mapData.explored) _mapData.explored[idx]=explored?1:0;if(_mapData.bg) _mapData.bg[idx]=explored?(_mapData.bg[idx]&~0x02):(_mapData.bg[idx]|0x02);});
+            next+=batch.length; scheduleUiTimeout(writeBatch,0);
+        },null);
+    }
+    writeBatch();
 }
 function mapSetExploredModal(explored){
     if (!_modalCell) return;
@@ -7241,18 +7426,17 @@ function mapExploreAll(){
     if (mapWriteBlocked('全图标记已探索')) return;
     if (!_mapData || !_mapData.width || !_mapData.height){ log('请先读取当前地图'); return; }
     var total=Number(_mapData.width)*Number(_mapData.height);
-    if (!confirm('将当前地图全部 '+total+' 格标记为已探索。\n\n只修改探索状态，不改方块、地形或水。是否继续？')) return;
-    call('map_explore_all', function(result){
+    showConfirm('将当前地图全部 '+total+' 格标记为已探索。\n\n只修改探索状态，不改方块、地形或水。是否继续？', function(yes){ if(!yes)return; call('map_explore_all', function(result){
         if (!result || !result.ok){ log('全图探索失败：'+((result&&result.error)||'未知错误'),'error'); return; }
         log(result.message || ('已将 '+total+' 格标记为已探索'),'success');
         mapScan();
-    });
+    }); }, {title:'全图标记已探索'});
 }
 function mapClearModal(){
     if (mapWriteBlocked('清空此格')) return;
     if(!_modalCell) return;
     var row = _modalCell.row, col = _modalCell.col;
-    mapCommitPatch(row, col, row, col, {inner:0xFFFF, front:0xFFFF, bg:0, water:0}, '清空格子', function(ok){ if(ok) mapCancelModal(); });
+    showConfirm('清空行'+row+' 列'+col+' 的内层、外层和水量？',function(yes){if(!yes)return;mapCommitPatch(row,col,row,col,{inner:0xFFFF,front:0xFFFF,bg:0,water:0},'清空格子',function(ok){if(ok)mapCancelModal();});},{title:'清空此格'});
 }
 function mapMarkModalCell(){
     if (!_modalCell) return;
@@ -7263,34 +7447,31 @@ function mapMarkModalCell(){
 function mapReplaceInput(){
     if (mapWriteBlocked('替换此格')) return;
     var row = parseInt(g('mapRow'))||0, col = parseInt(g('mapCol'))||0;
-    var id = parseInt(g('mapBlock'))||0;
-    mapCommitPatch(row, col, row, col, {inner:id, bg:mapBgFor(id)}, '替换格子');
+    _modalCell={row:row,col:col};
+    mapOpenReplaceModal(row,col);
 }
 function mapClearInput(){
     if (mapWriteBlocked('清空此格')) return;
     var row = parseInt(g('mapRow'))||0, col = parseInt(g('mapCol'))||0;
-    if (!confirm('清空 行'+row+' 列'+col+' 的内层、外层和水量？')) return;
-    mapCommitPatch(row, col, row, col, {inner:0xFFFF, front:0xFFFF, bg:0, water:0}, '清空格子');
+    showConfirm('清空 行'+row+' 列'+col+' 的内层、外层和水量？',function(yes){if(yes)mapCommitPatch(row,col,row,col,{inner:0xFFFF,front:0xFFFF,bg:0,water:0},'清空格子');},{title:'清空此格'});
 }
 function mapFill(){
     var blocked=writePolicyMessage('map_fill'); if(blocked){log('地图写入'+blocked,'warning');return;}
     if (!_mapData || !_mapData.write_enabled){ log('保护模式：全图填充已暂停，避免造成延迟崩溃'); return; }
     var id = parseInt(g('mapBlock'))||0;
     var bg = mapBgFor(id);
-    if (!confirm('全图填充为 ' + id + '？将保留每格未识别字段；全图操作不支持会话撤销。')) return;
-    call('map_fill', function(r){
+    showConfirm('全图填充为 ' + id + '？将保留每格未识别字段；全图操作不支持会话撤销。',function(yes){if(!yes)return;call('map_fill',function(r){
         if(r && r.ok){ log('全图已填充 '+id); mapScan(); }
         else log('填充失败: ' + (r && r.error || ''));
-    }, bg, id, 0);
+    },bg,id,0);},{title:'全图填充'});
 }
 function mapClear(){
     var blocked=writePolicyMessage('map_clear'); if(blocked){log('地图写入'+blocked,'warning');return;}
     if (!_mapData || !_mapData.write_enabled){ log('保护模式：全图清空已暂停，避免造成延迟崩溃'); return; }
-    if (!confirm('确定清空整个地图？将保留每格未识别字段；全图操作不支持会话撤销。')) return;
-    call('map_clear', function(r){
+    showConfirm('确定清空整个地图？将保留每格未识别字段；全图操作不支持会话撤销。',function(yes){if(!yes)return;call('map_clear',function(r){
         if(r && r.ok){ log('地图已清空'); mapScan(); }
         else log('清空失败: ' + (r && r.error || ''));
-    });
+    });},{title:'清空地图'});
 }
 function mapSetTool(tool){
     _mapTool = tool;
@@ -7472,6 +7653,7 @@ function mapCenterOn(row, col, zoomIn){
     _ox = rect.width / 2 - (col + .5) * _z;
     _oy = H / 2 - (row + .5) * _z;
     g('mapRow', row); g('mapCol', col);
+    mapSetFocusedCell(row,col,'定位目标');
     document.getElementById('mapInfo').textContent = mapInfo(row, col);
     scheduleMapDraw(); mapRequestViewport(0);
 }
@@ -7500,6 +7682,7 @@ function mapFindSelectedResource(){
         if(!matches.length){ log('未找到资源 '+label+'（ID '+id+'）'); mapCacheStatus('实时视口缓存 · 未找到 '+label); return; }
         var first=matches[0];
         mapCenterOn(first.row,first.col,true);
+        mapSetFocusedCell(first.row,first.col,'资源定位');
         var suffix=result.truncated?'（仅显示前 '+matches.length+' 处）':'（共 '+matches.length+' 处）';
         document.getElementById('mapInfo').textContent='资源定位：'+label+' '+suffix+'；第一处在 '+first.row+'，'+first.col+'，字段 '+(first.layer==='inner'?'地表(w2)':'实体(front)');
         log('已定位资源 '+label+'：'+matches.length+' 处'+(result.truncated?'，结果已截断':'')+'；已跳转第一处','success');
@@ -7652,8 +7835,8 @@ function offlineSaveViewerInventoryHtml(){var data=_offlineSaveViewer.data||{},i
 function offlineSaveViewerTechnologyHtml(){var data=_offlineSaveViewer.data||{},tech=data.technology||{},query=offlineSaveViewerQuery();if(tech.state!=='已读取')return '<div class="save-manager-detail"><b>科技读取失败</b><br>'+escapeHtml(tech.reason||'未找到经连续记录校验的科技表。')+'</div>';var rows=(tech.nodes||[]).filter(function(row){var techText=[row.id,row.name,row.source,row.state_label].join(' ').toLowerCase();return !query||techText.indexOf(query)>=0;});var canEdit=data.game_state==='stopped';var html='<div class="save-manager-detail">已识别科技节点 '+escapeHtml(tech.count)+' 条；筛选后 '+rows.length+' 条。'+(tech.consistency_warning?'<br><span style="color:#A35A1B">'+escapeHtml(tech.consistency_warning)+'</span>':'')+'</div><table style="border-collapse:collapse;width:100%;font-size:13px"><thead><tr style="position:sticky;top:0;background:#F9F5F0"><th style="text-align:left;padding:8px">科技节点</th><th style="text-align:left;padding:8px">离线状态</th><th style="text-align:left;padding:8px">实时对照</th><th style="text-align:left;padding:8px">来源 / 进度</th><th style="padding:8px">操作</th></tr></thead><tbody>';rows.forEach(function(row){var live=row.live_compare||'实时未读取';var liveInfo=live+(row.live_state===undefined?'':'（实时状态 '+row.live_state+'）');html+='<tr style="border-top:1px solid #F0E7DE"><td style="padding:7px 8px"><button class="btn btn-light" data-offline-tech="'+offlineSaveViewerEscapeAttr(row.id)+'" style="padding:3px 7px;font-size:12px">'+escapeHtml(row.name||row.id)+'</button><br><small style="font-family:monospace;color:#8C7C6E">'+escapeHtml(row.id)+'</small></td><td style="padding:7px 8px">'+escapeHtml(row.state_label||'读取失败')+'<br><small style="color:#8C7C6E">状态值 '+escapeHtml(row.state)+'</small></td><td style="padding:7px 8px">'+escapeHtml(liveInfo)+'</td><td style="padding:7px 8px">'+escapeHtml(row.source||'本地科技语言表')+'<br><small style="color:#8C7C6E">进度 '+escapeHtml(Math.round(Number(row.progress||0)*100))+'% · 标志 '+escapeHtml(row.flags)+'</small></td><td style="padding:7px 8px;text-align:center">'+(canEdit?'<button class="btn btn-peach" data-offline-edit-tech="'+offlineSaveViewerEscapeAttr(row.id)+'" data-offline-before="'+escapeHtml(row.state)+'" style="padding:4px 8px;font-size:12px">预演状态</button>':'<small style="color:#8C7C6E">需关闭游戏</small>')+'</td></tr>';});return html+'</tbody></table>';}
 function offlineSaveViewerDiagnosticsHtml(){var data=_offlineSaveViewer.data||{},inv=data.inventory||{},tech=data.technology||{},errors=data.resource_read_errors||[];return '<div class="save-manager-detail"><dl><dt>读取时间</dt><dd>'+escapeHtml(data.read_at||'未知')+'</dd><dt>游戏状态</dt><dd>'+escapeHtml(data.game_state||'未知')+'</dd><dt>库存表</dt><dd>'+escapeHtml(inv.state||'读取失败')+' · '+escapeHtml(inv.table_start||inv.reason||'未知')+' · '+escapeHtml(inv.table_end||'未知')+'</dd><dt>科技表</dt><dd>'+escapeHtml(tech.state||'读取失败')+' · '+escapeHtml(tech.table_start||tech.reason||'未知')+' · '+escapeHtml(tech.table_end||'未知')+'</dd><dt>实时科技读取</dt><dd>'+escapeHtml(tech.live_status||'实时未读取')+'</dd></dl><p>'+escapeHtml(inv.diagnostic_note||tech.diagnostic_note||'解析位置仅用于当前文件诊断，不是固定偏移。')+'</p>'+(errors.length?'<p style="color:#A35A1B"><b>本地资源读取警告</b><br>'+errors.slice(0,12).map(function(row){return escapeHtml((row.file||'未知文件')+'：'+(row.error||'读取失败'));}).join('<br>')+'</p>':'<p>本地资源索引未报告读取错误。</p>')+'</div>';}
 function renderOfflineSaveViewer(){var slots=offlineSaveViewerSlots(),select=document.getElementById('offlineSaveViewerSlot'),host=document.getElementById('offlineSaveViewerContent');if(select){var old=_offlineSaveViewer.slot||select.value||'';select.innerHTML=slots.map(function(row){return '<option value="'+escapeHtml(row.slot_key)+'">'+escapeHtml(row.slot+' · '+(row.profile_label||'未知来源'))+'</option>';}).join('');select.value=old;if(!select.value&&slots.length)select.value=slots[0].slot_key;_offlineSaveViewer.slot=select.value||'';}offlineSaveViewerFile();if(!host)return;if(_offlineSaveViewer.busy){host.innerHTML='<div class="save-manager-detail">正在读取和校验离线存档；读取失败不会显示为 0 或空白。</div>';return;}if(!_offlineSaveViewer.data){host.innerHTML='<div class="save-manager-detail">尚未读取有效数据。请点击“重新读取”；如果失败会在顶部明确显示原因。</div>';return;}document.getElementById('offlineSaveInventoryTab').className='btn '+(_offlineSaveViewer.tab==='inventory'?'btn-orange':'btn-light');document.getElementById('offlineSaveTechnologyTab').className='btn '+(_offlineSaveViewer.tab==='technology'?'btn-orange':'btn-light');document.getElementById('offlineSaveDiagnosticsTab').className='btn '+(_offlineSaveViewer.tab==='diagnostics'?'btn-orange':'btn-light');host.innerHTML=_offlineSaveViewer.tab==='inventory'?offlineSaveViewerInventoryHtml():(_offlineSaveViewer.tab==='technology'?offlineSaveViewerTechnologyHtml():offlineSaveViewerDiagnosticsHtml());offlineSaveViewerWire(host);}
-function offlineSaveViewerEditInventory(id,before){var data=_offlineSaveViewer.data||{};if(data.game_state!=='stopped'){offlineSaveViewerStatus('请先关闭 CraftWorld.exe；游戏运行时禁止离线存档写入。',true);return;}var value=prompt('只修改已有且验证通过的库存条目：'+id+'\n当前数量：'+before+'\n请输入新的非负整数数量：',String(before));if(value===null)return;if(!/^\d+$/.test(String(value))){offlineSaveViewerStatus('库存数量必须是非负整数。',true);return;}offlineSaveViewerPrepare('inventory',id,value,before);}
-function offlineSaveViewerEditTechnology(id,before){var data=_offlineSaveViewer.data||{};if(data.game_state!=='stopped'){offlineSaveViewerStatus('请先关闭 CraftWorld.exe；游戏运行时禁止离线存档写入。',true);return;}var value=prompt('只修改一个已验证科技节点：'+id+'\n0=未解锁，1=可研究，2=已解锁\n当前状态：'+before,String(before));if(value===null)return;if(!/^[012]$/.test(String(value))){offlineSaveViewerStatus('科技状态只能是 0、1 或 2。',true);return;}offlineSaveViewerPrepare('technology',id,value,before);}
+function offlineSaveViewerEditInventory(id,before){var data=_offlineSaveViewer.data||{};if(data.game_state!=='stopped'){offlineSaveViewerStatus('请先关闭 CraftWorld.exe；游戏运行时禁止离线存档写入。',true);return;}showPrompt('编辑离线库存','只修改已验证条目 '+id+'；请输入新的非负整数数量：',String(before),function(value){if(value===null)return;if(!/^\d+$/.test(String(value))){offlineSaveViewerStatus('库存数量必须是非负整数。',true);return;}offlineSaveViewerPrepare('inventory',id,value,before);});}
+function offlineSaveViewerEditTechnology(id,before){var data=_offlineSaveViewer.data||{};if(data.game_state!=='stopped'){offlineSaveViewerStatus('请先关闭 CraftWorld.exe；游戏运行时禁止离线存档写入。',true);return;}showPrompt('编辑离线科技','0=未解锁，1=可研究，2=已解锁；当前 '+before,String(before),function(value){if(value===null)return;if(!/^[012]$/.test(String(value))){offlineSaveViewerStatus('科技状态只能是 0、1 或 2。',true);return;}offlineSaveViewerPrepare('technology',id,value,before);});}
 function offlineSaveViewerPrepare(kind,id,value,before){var slot=offlineSaveViewerSelectedSlot();if(!slot)return;if(!confirm('第一次确认：将先创建快照，并仅写入私有候选副本。\n\n正式 game*.sav 此时不会修改。\n\n继续预演？'))return;_offlineSaveViewer.busy=true;renderOfflineSaveViewer();offlineSaveViewerStatus('正在创建快照并验证候选副本…');var method=kind==='inventory'?'prepare_offline_inventory_edit':'prepare_offline_technology_edit';call(method,function(result){_offlineSaveViewer.busy=false;if(!result||!result.ok){offlineSaveViewerStatus((result&&result.error)||'候选副本预演失败，正式存档未修改。',true);renderOfflineSaveViewer();return;}var label=(result.name||result.id)+'：'+result.before+' → '+result.after;offlineSaveViewerStatus('候选副本已通过重新解析：'+label+'。正式存档尚未修改。',false);renderOfflineSaveViewer();if(!confirm('第二次确认：准备替换正式存档。\n\n目标：'+label+'\n\n工具会再次校验 game*.sav 和候选副本的 SHA-256，并创建替换前快照。\n\n确认替换？'))return;_offlineSaveViewer.busy=true;renderOfflineSaveViewer();offlineSaveViewerStatus('正在执行最终 SHA-256 校验与正式替换…');call('confirm_offline_save_edit',function(final){_offlineSaveViewer.busy=false;if(!final||!final.ok){offlineSaveViewerStatus((final&&final.error)||'正式存档替换失败。',true);renderOfflineSaveViewer();return;}offlineSaveViewerStatus((final.message||'正式存档已通过重新解析验证。')+' 已保留恢复快照。',false);offlineSaveViewerReload();},slot,result.token,'APPLY_OFFLINE_EDIT');},slot,id,value);}
 
 var _offlineInventoryGrant={item:null,busy:false};
@@ -7951,12 +8134,71 @@ function normalizeDecorativeUiIcons(root){
         return text;
     }
     host.querySelectorAll(selectors).forEach(function(el){
-        if(el.classList.contains('lock-btn')||el.classList.contains('write-safety-lock'))return;
+        if(el.classList.contains('lock-btn')||el.classList.contains('write-safety-lock')||el.classList.contains('category-delete-btn')||el.closest('.creature-row')||el.getAttribute('title')&&/定位/.test(el.getAttribute('title')))return;
         var walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT),node;
         var textNodes=[];
         while((node=walker.nextNode()))textNodes.push(node);
         textNodes.forEach(function(textNode){textNode.nodeValue=stripLeadingIcon(textNode.nodeValue);});
     });
+}
+// Custom confirmation overrides for the offline save tools.  They are
+// declared after the legacy handlers so no native browser confirm dialog is
+// reachable from the visible buttons.
+function saveManagerBackup(){
+    var slot=saveManagerSlot(); if(!saveManagerOffline()||!slot)return;
+    showConfirm('将为 '+slot.slot+' 创建新的时间戳快照。\n\n不会覆盖旧备份。\n\n继续吗？',function(yes){
+        if(!yes)return; _saveManager.busy=true; saveManagerActions();
+        call('backup_save_slot',function(result){_saveManager.busy=false;if(!result||!result.ok){saveManagerStatus((result&&result.error)||'备份失败',true);saveManagerActions();return;}log('已创建离线存档快照','success');refreshSaveManager();},slot.slot_key);
+    },{title:'创建存档快照'});
+}
+function saveManagerRestore(){
+    var slot=saveManagerSlot(),shot=saveManagerSnapshot(); if(!saveManagerOffline()||!slot||!shot)return;
+    showConfirm('第一次确认：即将用快照恢复 '+slot.slot+'。\n\n恢复前会先自动备份当前状态。\n\n继续吗？',function(first){
+        if(!first)return; _saveManager.busy=true; saveManagerActions();
+        call('prepare_save_restore',function(prep){
+            if(!prep||!prep.ok){_saveManager.busy=false;saveManagerStatus((prep&&prep.error)||'恢复准备失败',true);saveManagerActions();return;}
+            showConfirm('第二次确认：将写入存档文件。\n\n'+(prep.warning||'')+'\n\n确定恢复？',function(second){
+                if(!second){_saveManager.busy=false;saveManagerActions();return;}
+                call('restore_save_snapshot',function(result){_saveManager.busy=false;if(!result||!result.ok){saveManagerStatus((result&&result.error)||'恢复失败',true);saveManagerActions();return;}log('存档已恢复；已保留恢复前快照','success');refreshSaveManager();},shot.snapshot_id,prep.token,'RESTORE');
+            },{title:'确认写入存档'});
+        },shot.snapshot_id);
+    },{title:'恢复存档快照'});
+}
+function offlineSaveViewerPrepare(kind,id,value,before){
+    var slot=offlineSaveViewerSelectedSlot(); if(!slot)return;
+    showConfirm('第一次确认：将先创建快照，并仅写入私有候选副本。\n\n正式 game*.sav 此时不会修改。\n\n继续预演？',function(first){
+        if(!first)return; _offlineSaveViewer.busy=true; renderOfflineSaveViewer(); offlineSaveViewerStatus('正在创建快照并验证候选副本…');
+        var method=kind==='inventory'?'prepare_offline_inventory_edit':'prepare_offline_technology_edit';
+        call(method,function(result){
+            _offlineSaveViewer.busy=false;
+            if(!result||!result.ok){offlineSaveViewerStatus((result&&result.error)||'候选副本预演失败，正式存档未修改。',true);renderOfflineSaveViewer();return;}
+            var label=(result.name||result.id)+'：'+result.before+' → '+result.after;
+            offlineSaveViewerStatus('候选副本已通过重新解析：'+label+'。正式存档尚未修改。',false); renderOfflineSaveViewer();
+            showConfirm('第二次确认：准备替换正式存档。\n\n目标：'+label+'\n\n工具会再次校验 game*.sav 和候选副本的 SHA-256，并创建替换前快照。\n\n确认替换？',function(second){
+                if(!second)return; _offlineSaveViewer.busy=true; renderOfflineSaveViewer(); offlineSaveViewerStatus('正在执行最终 SHA-256 校验与正式替换…');
+                call('confirm_offline_save_edit',function(final){_offlineSaveViewer.busy=false;if(!final||!final.ok){offlineSaveViewerStatus((final&&final.error)||'正式存档替换失败。',true);renderOfflineSaveViewer();return;}offlineSaveViewerStatus((final.message||'正式存档已通过重新解析验证。')+' 已保留恢复快照。',false);offlineSaveViewerReload();},slot,result.token,'APPLY_OFFLINE_EDIT');
+            },{title:'确认替换正式存档'});
+        },slot,id,value);
+    },{title:'离线存档预演'});
+}
+function offlineInventoryGrantPrepare(){
+    if(_offlineInventoryGrant.busy)return; offlineInventoryGrantResolve();
+    var state=offlineInventoryGrantState(),slot=offlineSaveViewerSelectedSlot(),item=_offlineInventoryGrant.item,amount=offlineInventoryGrantQuantity();
+    if(!state.gameStopped){offlineInventoryGrantStatus('请先关闭 CraftWorld.exe。',true);return;}
+    if(!state.inventoryReady||!item||!amount||!slot){offlineInventoryGrantStatus('请选择已验证的现有条目并填写有效数量。',true);return;}
+    var before=Number(item.quantity),label=String(item.name||item.id)+'：'+before+' + '+amount+' = '+(before+amount);
+    showConfirm('第一次确认：将创建恢复快照，并写入私有候选副本。\n\n'+label+'\n\n正式 game*.sav 此时不会修改。\n\n继续预演？',function(first){
+        if(!first)return; offlineInventoryGrantSetBusy(true); offlineInventoryGrantStatus('正在创建快照并重新解析候选副本…',false);
+        call('prepare_offline_inventory_grant',function(result){
+            offlineInventoryGrantSetBusy(false); if(!result||!result.ok){offlineInventoryGrantStatus((result&&result.error)||'候选副本预演失败，正式存档未修改。',true);return;}
+            var finalLabel=String(result.name||item.name||result.id)+'：'+result.before+' + '+(result.added||amount)+' = '+result.after;
+            offlineInventoryGrantStatus('候选副本已通过重新解析：'+finalLabel+'。正式存档尚未修改。',false);
+            showConfirm('第二次确认：准备替换正式存档。\n\n'+finalLabel+'\n\n工具会再次校验 SHA-256，并创建替换前快照。\n\n确认替换？',function(second){
+                if(!second)return; offlineInventoryGrantSetBusy(true); offlineInventoryGrantStatus('正在执行最终校验与正式替换…',false);
+                call('confirm_offline_save_edit',function(final){offlineInventoryGrantSetBusy(false);if(!final||!final.ok){offlineInventoryGrantStatus((final&&final.error)||'正式存档替换失败。',true);return;}closeOfflineInventoryGrant();offlineSaveViewerStatus((final.message||'正式存档已通过重新解析验证。')+' 已保留恢复快照与操作日志。',false);offlineSaveViewerReload();},slot,result.token,'APPLY_OFFLINE_EDIT');
+            },{title:'确认替换正式存档'});
+        },slot,item.id,String(amount));
+    },{title:'离线库存预演'});
 }
 window.addEventListener('DOMContentLoaded',function(){
     normalizeDecorativeUiIcons(document);

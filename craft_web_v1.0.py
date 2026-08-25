@@ -7,6 +7,16 @@ from datetime import datetime, timezone
 from functools import wraps
 
 
+def _diagnostic(*parts):
+    """Write developer diagnostics without coupling them to the UI log."""
+    try:
+        sys.stderr.write(" ".join(str(part) for part in parts) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        # Diagnostics must never change the result of a game operation.
+        return None
+
+
 def _install_webview_disposal_guard():
     """Suppress only the known Edge/WebView2 close-race callback.
 
@@ -74,7 +84,7 @@ _install_webview_disposal_guard()
 
 
 DEFAULT_GAME_ROOT = r"D:\Steam\steamapps\common\CraftTheWorld"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_ID = "crafttheworld-modifier"
 # Public release metadata for the maintainer's GitHub repository.  The UI
 # performs one display-only check after startup; it never downloads or applies
@@ -359,7 +369,10 @@ def _load_mod_resource_translations():
     return result
 
 
-GAME_RESOURCE_TRANSLATIONS = _load_mod_resource_translations()
+# Installed-game metadata can be expensive to walk when a player has many
+# mods.  Keep module import side-effect free; the first connected/local-data
+# action calls _ensure_local_resource_metadata() instead.
+GAME_RESOURCE_TRANSLATIONS = {}
 
 
 def _load_resource_id_whitelist():
@@ -397,7 +410,7 @@ def _load_resource_id_whitelist():
     return ids
 
 
-GAME_RESOURCE_IDS = _load_resource_id_whitelist()
+GAME_RESOURCE_IDS = set()
 
 
 def _is_known_runtime_item_id(name_en):
@@ -455,7 +468,29 @@ def _load_creature_definition_health():
     return result
 
 
-CREATURE_DEFINITION_HEALTH = _load_creature_definition_health()
+CREATURE_DEFINITION_HEALTH = {}
+_LOCAL_RESOURCE_METADATA_LOCK = threading.RLock()
+_LOCAL_RESOURCE_METADATA_ROOT = ""
+
+
+def _ensure_local_resource_metadata(force=False):
+    """Load installed resource metadata only when a feature needs it.
+
+    This is read-only local file work.  It deliberately happens after the UI
+    starts, or after the user changes the selected game directory, so a large
+    mod collection cannot delay the first window paint.
+    """
+    global GAME_RESOURCE_TRANSLATIONS, GAME_RESOURCE_IDS
+    global CREATURE_DEFINITION_HEALTH, _LOCAL_RESOURCE_METADATA_ROOT
+    root = os.path.normcase(os.path.abspath(GAME_ROOT))
+    with _LOCAL_RESOURCE_METADATA_LOCK:
+        if not force and _LOCAL_RESOURCE_METADATA_ROOT == root:
+            return
+        translations = _load_mod_resource_translations()
+        GAME_RESOURCE_TRANSLATIONS = translations
+        GAME_RESOURCE_IDS = _load_resource_id_whitelist()
+        CREATURE_DEFINITION_HEALTH = _load_creature_definition_health()
+        _LOCAL_RESOURCE_METADATA_ROOT = root
 
 
 ### 2. 游戏内存偏移常量
@@ -924,261 +959,9 @@ def get_base(pm_obj=None):
             return int(pm_obj.process_base)
     try:
         base_addr = pm.process_base.lpBaseOfDll
-    except:
+    except Exception:
         base_addr = int(pm.process_base)
     return base_addr
-
-
-_recipe_array_cache_base = None
-
-_recipe_array_ttl = 300
-
-_recipe_array_last_scan = 0
-
-_recipe_array_cache_count = 0
-
-def find_recipe_array_by_string_search(pm):
-    """Fast recipe array search using combined regex pattern."""
-    try:
-        import re
-        # Known recipe names for pattern matching
-        known_names = ["table_wooden", "stone_sword", "wooden_sword", "iron_sword", "workbench",
-                       "ladder", "Log Bridge", "Wooden Hatch", "pot", "lock", "nails",
-                       "stone_axe", "furnace", "chest", "door_wooden"]
-        # Build combined regex pattern (escape each name for safety)
-        escaped = [re.escape(n) for n in known_names]
-        pattern = b"(" + b"|".join(n.encode("ascii") for n in escaped) + b")"
-        # Single scan for all names
-        results = pm.pattern_scan_all(pattern, return_multiple=True)
-        if not results:
-            return None, 0
-        candidates = set()
-        for addr in results:
-            if not addr or addr < 0x10000:
-                continue
-            # addr points to the start of the name string (at +0x18 in the slot)
-            base_slot = addr - 0x18  # name is at +0x18
-            base_slot = base_slot - (base_slot % 0xD8)
-            # Check if this is a valid recipe slot
-            for delta in range(-5, 6):
-                ta = base_slot + delta * 0xD8
-                if ta < 0x10000: continue
-                try:
-                    rid = pm.read_int(ta + 0x10)
-                    if 0 <= rid <= 2000:
-                        raw = pm.read_bytes(ta + RECIPE_OFF_NAME, 16)
-                        if raw:
-                            ni = raw.find(b"\x00")
-                            if ni >= 0: raw = raw[:ni]
-                            if raw and len(raw) >= 2:
-                                candidates.add(ta)
-                                break
-                except:
-                    pass
-        if len(candidates) >= 2:
-            ba = min(candidates)
-            for bk in range(0, 0x20000, 0xD8):
-                ta = ba - bk
-                if ta < 0x10000: break
-                try:
-                    tn = pm.read_bytes(ta + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b"\x00")
-                        if ni >= 0: tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            ba = ta
-                        else: break
-                except: break
-            cnt = 0
-            for fw in range(0, 2000):
-                ta = ba + fw * 0xD8
-                try:
-                    tn = pm.read_bytes(ta + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b"\x00")
-                        if ni >= 0: tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            cnt += 1
-                        else:
-                            if cnt > 10: break
-                    else: break
-                except: break
-            if cnt >= 2:
-                return ba, cnt
-        return None, 0
-    except:
-        return None, 0
-
-def find_recipe_array_robust(pm):
-    """Robustly scan ALL process memory regions for recipe array using VirtualQueryEx"""
-    try:
-        import pymem
-        handle = pm.process_handle
-        if not handle:
-            return None, 0
-        candidates = set()
-        addr = 0
-        max_addr = 0x7FFFFFFF
-        try:
-            if hasattr(pm, "is_64_bit") and pm.is_64_bit():
-                max_addr = 0x7FFFFFFF0000
-        except:
-            pass
-        checked_regions = 0
-        while addr < max_addr and checked_regions < 10000:
-            try:
-                mbi = pymem.memory.virtual_query(handle, addr)
-                if not mbi:
-                    break
-                region_size = mbi.RegionSize
-                if region_size <= 0:
-                    addr += 0x10000
-                    continue
-                if mbi.State == 0x1000 and mbi.Protect not in (0x00, 0x01):
-                    checked_regions += 1
-                    if checked_regions > 5000:
-                        break
-                    start = mbi.BaseAddress
-                    end = start + region_size
-                    aligned = start
-                    if aligned % RECIPE_SLOT_SIZE != 0:
-                        aligned += RECIPE_SLOT_SIZE - (aligned % RECIPE_SLOT_SIZE)
-                    scan_addr = aligned
-                    scans_in_region = 0
-                    while scan_addr < end - 0xD8 and scans_in_region < 50000:
-                        try:
-                            rid = pm.read_int(scan_addr + RECIPE_OFF_ID)
-                            if 0 <= rid <= 2000:
-                                raw = pm.read_bytes(scan_addr + RECIPE_OFF_NAME, 16)
-                                if raw:
-                                    null_idx = raw.find(b"\x00")
-                                    if null_idx >= 0:
-                                        raw = raw[:null_idx]
-                                    if raw and len(raw) >= 3:
-                                        try:
-                                            raw.decode("ascii")
-                                            mat_ptr = pm.read_int(scan_addr + RECIPE_OFF_MATERIAL_PTR)
-                                            if mat_ptr and mat_ptr > 0x100000:
-                                                candidates.add(scan_addr)
-                                                if len(candidates) >= 20:
-                                                    break
-                                        except:
-                                            pass
-                        except:
-                            pass
-                        scan_addr += RECIPE_SLOT_SIZE
-                        scans_in_region += 1
-                    if len(candidates) >= 20:
-                        break
-                addr += region_size
-                if addr <= mbi.BaseAddress:
-                    addr = mbi.BaseAddress + region_size
-            except Exception:
-                addr += 0x10000
-                continue
-        if candidates and len(candidates) >= 3:
-            base_addr = min(candidates)
-            for back in range(0, 0x20000, RECIPE_SLOT_SIZE):
-                test_addr = base_addr - back
-                if test_addr < 0x10000:
-                    break
-                try:
-                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b"\x00")
-                        if ni >= 0:
-                            tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            base_addr = test_addr
-                        else:
-                            break
-                except:
-                    break
-            count = 0
-            for fwd in range(0, 2000):
-                test_addr = base_addr + fwd * RECIPE_SLOT_SIZE
-                try:
-                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b"\x00")
-                        if ni >= 0:
-                            tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            count += 1
-                        else:
-                            if count > 10:
-                                break
-                    else:
-                        break
-                except:
-                    break
-            if count >= 3:
-                return base_addr, count
-        return None, 0
-    except Exception:
-        return None, 0
-
-def find_recipe_array_by_simple_scan(pm):
-    """Find recipe array: search known names, calculate base, verify slot0=ladder."""
-    try:
-        import struct as _struct
-        import time as _time
-        known_names = [b"table_wooden", b"axe_stone", b"workbench", b"furnace", b"door_wooden", b"chest", b"ladder"]
-        bases = {}
-        for name in known_names:
-            try:
-                results = pm.pattern_scan_all(name, return_multiple=True)
-            except:
-                continue
-            if not results:
-                continue
-            for r in results[:30]:
-                if r < 0x10000: continue
-                slot_addr = r - 0x18
-                if slot_addr < 0x10000: continue
-                try:
-                    raw = pm.read_bytes(slot_addr + 0x18, 16)
-                    if not raw: continue
-                    null = raw.find(b"\x00")
-                    if null >= 0: raw = raw[:null]
-                    if raw != name: continue
-                    rid = _struct.unpack("<I", pm.read_bytes(slot_addr + 0x10, 4))[0]
-                    if rid < 0 or rid > 2000: continue
-                    array_base = slot_addr - rid * 0xD8
-                    if array_base < 0x10000: continue
-                    slot0_raw = pm.read_bytes(array_base + 0x18, 16)
-                    if not slot0_raw: continue
-                    null2 = slot0_raw.find(b"\x00")
-                    if null2 >= 0: slot0_raw = slot0_raw[:null2]
-                    slot0_name = slot0_raw.decode("ascii", errors="replace")
-                    if slot0_name == "ladder":
-                        bases[array_base] = bases.get(array_base, 0) + 1
-                except:
-                    continue
-        if bases:
-            best = max(bases, key=bases.get)
-            return best, bases[best] * 100
-        return None, 0
-    except Exception:
-        return None, 0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _read_ascii_string(pm, addr, max_len=16):
@@ -1575,7 +1358,7 @@ def _get_item_array(pm, is_v2=False):
 
                     return arr_start, arr_end
 
-        except:
+        except Exception:
 
             pass
 
@@ -1606,7 +1389,7 @@ def scan_all_items(pm, is_v2=False):
                 arr_end = pm.read_int(mgr + V2_RES_ARR_END)
                 if arr_start and arr_end and arr_start < arr_end:
                     is_v2 = True
-        except:
+        except Exception:
             pass
 
     """扫描所有物品槽，返回物品列表 (V1/V2)"""
@@ -1667,7 +1450,7 @@ def scan_all_items(pm, is_v2=False):
 
                     try:
                         idx = pm.read_int(slot_addr + V2_ELEM_IDX)
-                    except:
+                    except Exception:
                         continue
 
                     if idx != i:
@@ -1683,7 +1466,7 @@ def scan_all_items(pm, is_v2=False):
                     try:
                         key1 = pm.read_int(slot_addr + V2_ELEM_KEY1)
                         enc1 = pm.read_int(slot_addr + V2_ELEM_ENC1)
-                    except:
+                    except Exception:
                         pass
                     qty = (key1 ^ enc1) & 0xFFFFFFFF
                     if qty > 0x7FFFFFFF:
@@ -1717,7 +1500,7 @@ def scan_all_items(pm, is_v2=False):
 
                     })
 
-                except:
+                except Exception:
 
                     continue
             return items
@@ -1771,7 +1554,7 @@ def scan_all_items(pm, is_v2=False):
 
 
 
-        except:
+        except Exception:
 
             return []
 
@@ -1990,13 +1773,13 @@ def scan_shop_data(pm, is_v2=False):
 
                                 sd[ne] = {"price": pr, "qty": qt, "addr": addr, "is_v2": True, "slot_idx": i}
 
-                        except:
+                        except Exception:
 
                             continue
 
                     return sd  # V2模式下不降级到V1
 
-        except:
+        except Exception:
 
             pass
 
@@ -2033,7 +1816,7 @@ def scan_shop_data(pm, is_v2=False):
             if qt > 0 or pr > 0:
                 sd[ne] = {'price': pr, 'qty': qt, 'addr': sa, 'is_v2': False, 'slot_idx': i}
 
-        except:
+        except Exception:
 
             continue
 
@@ -2064,381 +1847,10 @@ def modify_shop_entry(pm, entry_addr, new_price=None, new_qty=None, is_v2=False)
 
         return False, str(e)
 
-def find_recipe_array(pm):
-    """查找配方数组(V1)
-    +0x18是16字节ASCII直存，不是指针。
-    返回: (array_base, count) 或 (None, 0)
-    """
-    try:
-        base = get_base(pm)
-        item_base = pm.read_int(base + ITEM_BASE_OFFSET)
-        if not item_base:
-            return None, 0
-        for off in range(0x00, 0x100, 4):
-            try:
-                arr = pm.read_int(item_base + off)
-                if arr and arr > 0x10000:
-                    raw_name = pm.read_bytes(arr + RECIPE_OFF_NAME, 16)
-                    if raw_name:
-                        null_idx = raw_name.find(b'\x00')
-                        if null_idx >= 0:
-                            raw_name = raw_name[:null_idx]
-                        if raw_name and len(raw_name) >= 2:
-                            try:
-                                test_name = raw_name.decode("ascii", errors="replace").strip()
-                            except:
-                                continue
-                            if test_name and len(test_name) >= 2:
-                                arr2 = pm.read_int(item_base + off + 4)
-                                if arr2 and arr2 > arr:
-                                    total = (arr2 - arr) // RECIPE_SLOT_SIZE
-                                    if 10 <= total <= 2000:
-                                        return arr, total
-            except:
-                continue
-        return None, 0
-    except:
-        return None, 0
-
-def find_recipe_array_v2(pm):
-    """查找配方数组 - V2扩展搜索 (+0x18为ASCII直存)"""
-    try:
-        base = get_base(pm)
-        item_base = pm.read_int(base + ITEM_BASE_OFFSET)
-        if item_base:
-            for off in range(0x0, 0x200, 4):
-                try:
-                    ptr = pm.read_int(item_base + off)
-                    if ptr and ptr > 0x10000:
-                        id_val = pm.read_int(ptr + RECIPE_OFF_ID)
-                        raw_name = pm.read_bytes(ptr + RECIPE_OFF_NAME, 16)
-                        if raw_name:
-                            null_idx = raw_name.find(b'\x00')
-                            if null_idx >= 0:
-                                raw_name = raw_name[:null_idx]
-                            if raw_name and len(raw_name) >= 3:
-                                try:
-                                    name = raw_name.decode("ascii", errors="replace").strip()
-                                except:
-                                    continue
-                                if name and len(name) >= 3:
-                                    mat_ptr = pm.read_int(ptr + RECIPE_OFF_MATERIAL_PTR)
-                                    if mat_ptr and mat_ptr > 0x10000:
-                                        try:
-                                            mat_type = pm.read_int(mat_ptr + MATERIAL_OFF_TYPE)
-                                            if mat_type >= 0:
-                                                arr_base = None
-                                                for j in range(0, 500):
-                                                    test_addr = ptr - j * RECIPE_SLOT_SIZE
-                                                    try:
-                                                        test_raw = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                                                        if test_raw:
-                                                            nidx = test_raw.find(b'\x00')
-                                                            if nidx >= 0:
-                                                                test_raw = test_raw[:nidx]
-                                                            if test_raw and len(test_raw) >= 2:
-                                                                try:
-                                                                    test_raw.decode("ascii")
-                                                                except:
-                                                                    break
-                                                                arr_base = test_addr
-                                                            else:
-                                                                break
-                                                        else:
-                                                            break
-                                                    except:
-                                                        break
-                                                if arr_base is None:
-                                                    return ptr, 1
-                                                arr_end = ptr + RECIPE_SLOT_SIZE
-                                                total = (arr_end - arr_base) // RECIPE_SLOT_SIZE
-                                                if total < 1: total = 1
-                                                return arr_base, total
-                                        except:
-                                            pass
-                except:
-                    continue
-        return None, 0
-    except:
-        return None, 0
-
-def find_recipe_array_scan(pm):
-    """查找配方: 在物品数组附近搜索(+0x18为ASCII直存)"""
-    try:
-        base = get_base(pm)
-        arr_start, arr_end = _get_item_array(pm)
-        if arr_start and arr_end:
-            search_start = arr_start - 0x20000
-            search_end = arr_end + 0x20000
-            if search_start < base: search_start = base
-            addr = search_start
-            found_recipes = []
-            while addr < search_end:
-                try:
-                    val = pm.read_int(addr)
-                    if val and val > 0x10000:
-                        raw_name = pm.read_bytes(val + RECIPE_OFF_NAME, 16)
-                        if raw_name:
-                            null_idx = raw_name.find(b"\x00")
-                            if null_idx >= 0: raw_name = raw_name[:null_idx]
-                            if raw_name and len(raw_name) >= 2:
-                                try:
-                                    test_name = raw_name.decode("ascii", errors="replace").strip()
-                                except:
-                                    pass
-                                else:
-                                    if test_name and len(test_name) >= 2:
-                                        mat_ptr = pm.read_int(val + RECIPE_OFF_MATERIAL_PTR)
-                                        if mat_ptr and mat_ptr > 0x10000:
-                                            found_recipes.append(addr)
-                                            addr += RECIPE_SLOT_SIZE
-                                            continue
-                except:
-                    pass
-                addr += 4
-            if found_recipes:
-                base_addr = min(found_recipes)
-                base_addr = base_addr - (base_addr % RECIPE_SLOT_SIZE)
-                best_base = base_addr
-                for back in range(0, 0x10000, RECIPE_SLOT_SIZE):
-                    test_addr = base_addr - back
-                    if test_addr < base: break
-                    try:
-                        tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                        if tn:
-                            ni = tn.find(b"\x00")
-                            if ni >= 0: tn = tn[:ni]
-                            if tn and len(tn) >= 2:
-                                best_base = test_addr
-                            else:
-                                break
-                    except:
-                        break
-                return best_base, len(found_recipes)
-        return None, 0
-    except:
-        return None, 0
-
-
-    arr, cnt = find_recipe_array_by_string_search(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, cnt
-    # def find_recipe_array_by_pattern_scan(pm):
-    """备用配方搜索 - 模式扫描查找"""
-    try:
-        base = get_base(pm)
-        found_addrs = set()
-        # 方法1: 用pattern_scan_module搜索已知配方名
-        known_names = [b"table_wooden", b"stone_sword", b"wooden_sword", b"iron_sword", b"workbench"]
-        for kn in known_names:
-            try:
-                result = pm.pattern_scan_module(kn, MODULE_NAME)
-                if result:
-                    for delta in [0, 0xD8, -0xD8]:
-                        test_addr = result - delta - RECIPE_OFF_NAME
-                        if test_addr % RECIPE_SLOT_SIZE == 0:
-                            rid = pm.read_int(test_addr + RECIPE_OFF_ID)
-                            if rid >= 0 and rid <= 2000:
-                                mat_ptr = pm.read_int(test_addr + RECIPE_OFF_MATERIAL_PTR)
-                                if mat_ptr and mat_ptr > 0x100000:
-                                    found_addrs.add(test_addr)
-            except:
-                pass
-        if found_addrs:
-            base_addr = min(found_addrs)
-            base_addr = base_addr - (base_addr % RECIPE_SLOT_SIZE)
-            for back in range(0, 0x20000, RECIPE_SLOT_SIZE):
-                test_addr = base_addr - back
-                if test_addr < base: break
-                try:
-                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b'\x00')
-                        if ni >= 0: tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            base_addr = test_addr
-                        else:
-                            break
-                except:
-                    break
-            count = 0
-            for fwd in range(0, 2000):
-                test_addr = base_addr + fwd * RECIPE_SLOT_SIZE
-                try:
-                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b'\x00')
-                        if ni >= 0: tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            count += 1
-                        else:
-                            if count > 10:
-                                break
-                    else:
-                        break
-                except:
-                    break
-            if count >= 3:
-                return base_addr, count
-        # 方法2: 全模块内存扫描
-        arr_start, arr_end = _get_item_array(pm)
-        search_start = max(base, base)
-        search_end = base + 0x2000000
-        aligned_start = search_start - (search_start % RECIPE_SLOT_SIZE)
-        if aligned_start < search_start:
-            aligned_start += RECIPE_SLOT_SIZE
-        addr = aligned_start
-        candidates = set()
-        checked = 0
-        while addr < search_end and checked < 200000:
-            checked += 1
-            try:
-                rid = pm.read_int(addr + RECIPE_OFF_ID)
-                if rid >= 0 and rid <= 2000:
-                    raw = pm.read_bytes(addr + RECIPE_OFF_NAME, 16)
-                    if raw:
-                        null_idx = raw.find(b'\x00')
-                        if null_idx >= 0: raw = raw[:null_idx]
-                        if raw and len(raw) >= 3:
-                            try:
-                                raw.decode("ascii")
-                                mat_ptr = pm.read_int(addr + RECIPE_OFF_MATERIAL_PTR)
-                                if mat_ptr and mat_ptr > 0x100000:
-                                    candidates.add(addr)
-                            except:
-                                pass
-            except:
-                pass
-            addr += RECIPE_SLOT_SIZE
-            if len(candidates) > 10:
-                break
-        if candidates and len(candidates) >= 3:
-            base_addr = min(candidates)
-            base_addr = base_addr - (base_addr % RECIPE_SLOT_SIZE)
-            for back in range(0, 0x20000, RECIPE_SLOT_SIZE):
-                test_addr = base_addr - back
-                if test_addr < base: break
-                try:
-                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b'\x00')
-                        if ni >= 0: tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            base_addr = test_addr
-                        else:
-                            break
-                except:
-                    break
-            count = 0
-            for fwd in range(0, 2000):
-                test_addr = base_addr + fwd * RECIPE_SLOT_SIZE
-                try:
-                    tn = pm.read_bytes(test_addr + RECIPE_OFF_NAME, 16)
-                    if tn:
-                        ni = tn.find(b'\x00')
-                        if ni >= 0: tn = tn[:ni]
-                        if tn and len(tn) >= 2:
-                            count += 1
-                        else:
-                            if count > 10:
-                                break
-                    else:
-                        break
-                except:
-                    break
-            if count >= 3:
-                return base_addr, count
-        return None, 0
-    except:
-        return None, 0
-
-def get_recipe_array(pm):
-    """Get recipe array (cached). Returns (base_addr, max_slots=2000)."""
-    global _recipe_array_cache_base, _recipe_array_cache_count
-    import time as _tmod
-    global _recipe_array_cache_base, _recipe_array_cache_count, _recipe_array_last_scan
-    if _recipe_array_last_scan > 0 and (time.time() - _recipe_array_last_scan) < _recipe_array_ttl:
-        if _recipe_array_cache_base and _recipe_array_cache_count > 0:
-            return _recipe_array_cache_base, _recipe_array_cache_count
-    # \u4f18\u5148\u4f7f\u7528\u6a21\u5f0f\u6269\u5c55\u626b\u63cf
-    # Try string search first
-    arr, cnt = find_recipe_array_by_simple_scan(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, 2000
-    arr, cnt = find_recipe_array_by_string_search(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, 2000
-    arr, cnt = find_recipe_array(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, 2000
-    arr, cnt = find_recipe_array_v2(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, 2000
-    arr, cnt = find_recipe_array_scan(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, 2000
-    arr, cnt = find_recipe_array_robust(pm)
-    if arr and cnt > 0:
-        _recipe_array_cache_base = arr
-        _recipe_array_cache_count = cnt
-        _recipe_array_last_scan = time.time()
-        return arr, 2000
-
-def read_recipe_name(pm, recipe_addr):
-    """获取配方名称(从偏移+0x00读取16字节ASCII直存)"""
-    try:
-        raw = pm.read_bytes(recipe_addr + RECIPE_OFF_NAME, 16)
-        if raw:
-            null_idx = raw.find(b"\x00")
-            if null_idx >= 0:
-                raw = raw[:null_idx]
-            if raw:
-                name = raw.decode("ascii", errors="replace").strip()
-                if name and len(name) >= 2:
-                    return name
-    except:
-        pass
-    return None
-
-def get_recipe_unlock_state(pm, recipe_addr):
-    """获取配方解锁状态"""
-    try:
-        unlocked = pm.read_int(recipe_addr + 0x30)
-        return unlocked != 0
-    except:
-        return False
-
-def set_recipe_unlock_state(pm, recipe_addr, unlocked=True):
-    """设置配方解锁状态"""
-    try:
-        pm.write_int(recipe_addr + 0x30, 1 if unlocked else 0)
-        return True
-    except:
-        return False
-
-# V1 recipe layout override -------------------------------------------------
-# The early prototype below searched around the ResourceSlot array.  It can
-# find item names, but those are not Recipe objects.  Keep the old code in
-# the file for historical context, then replace its public helpers with the
-# verified World recipe vector implementation before any API can call them.
+# V1 recipe layout ----------------------------------------------------------
+# Recipes are read from the verified World::m_recipes vector.  Earlier
+# ResourceSlot-based prototype scanners were removed because their candidates
+# were item records rather than Recipe objects.
 def find_recipe_array(pm):
     """Return World::m_recipes (std::vector<Recipe>) for the active V1 map."""
     try:
@@ -2458,16 +1870,10 @@ def find_recipe_array(pm):
 
 
 def get_recipe_array(pm):
-    """Read the authoritative live recipe vector; cache only for this map."""
-    global _recipe_array_cache_base, _recipe_array_cache_count, _recipe_array_last_scan
+    """Read the authoritative live recipe vector for the current map."""
     begin, count = find_recipe_array(pm)
     if begin and count:
-        _recipe_array_cache_base = begin
-        _recipe_array_cache_count = count
-        _recipe_array_last_scan = time.time()
         return begin, count
-    _recipe_array_cache_base = None
-    _recipe_array_cache_count = 0
     return None, 0
 
 
@@ -2514,17 +1920,14 @@ def scan_all_recipe_names(pm):
                 item_name = read_recipe_name(pm, recipe_addr)
                 if item_name and len(item_name) >= 2:
                     result[item_name.lower().strip()] = recipe_addr
-            except:
+            except Exception:
                 continue
         return result
-    except:
+    except Exception:
         return {}
 
 def scan_all_recipes(pm, item_cache=None):
     """Fast scan: read only recipe names/addresses (NOT grid data)."""
-    # Check if caller (class method) already has cached data
-    # When called from ModifierApp, self.recipe_data may already exist
-    global _recipe_array_cache_base, _recipe_array_cache_count
     try:
         arr_base, count = get_recipe_array(pm)
         if not arr_base or count < 1:
@@ -2547,7 +1950,7 @@ def scan_all_recipes(pm, item_cache=None):
                     'unlocked': unlocked,
                     'id': recipe_id,
                 }
-            except:
+            except Exception:
                 continue
         return recipes
     except Exception as e:
@@ -2583,7 +1986,7 @@ def scan_v2_recipes(pm):
                                 tr = pm.read_int(t + 0x10)
                                 if tr > 5000: break
                                 arr_b = t
-                            except:
+                            except Exception:
                                 break
                         cc = 0
                         while True:
@@ -2596,12 +1999,12 @@ def scan_v2_recipes(pm):
                                 if nn >= 0: rn = rn[:nn]
                                 nm = rn.decode("ascii", errors="replace").strip()
                                 if len(nm) >= 2: v2r[nm.lower()] = t
-                            except:
+                            except Exception:
                                 break
                             cc += 1
                             if cc > 3000: break
                         if cc > 100: return v2r
-            except:
+            except Exception:
                 pass
         av = mbi.BaseAddress + mbi.RegionSize
     return {}
@@ -2955,9 +2358,15 @@ def _scan_magic_items(pm_obj, cancelled=None):
                             try:
                                 light_block = pm_obj.read_bytes(name_address, 0x40)
                                 radius = struct.unpack_from("<i", light_block, 0x34)[0] if light_block and len(light_block) >= 0x38 else 0
+                                # Require two coherent reads from the same
+                                # runtime item.  XML buffers and recycled
+                                # heap records can briefly expose 0 or a very
+                                # large integer at +0x34; those are ignored.
+                                verify_block = pm_obj.read_bytes(name_address, 0x40)
+                                verify_radius = struct.unpack_from("<i", verify_block, 0x34)[0] if verify_block and len(verify_block) >= 0x38 else 0
                                 # XML text and unrelated strings do not have a
                                 # plausible small integer at this runtime offset.
-                                if 1 <= radius <= 64:
+                                if 1 <= radius <= 64 and radius == verify_radius:
                                     light_candidates.append((name_address, name_address + 0x34, radius))
                             except Exception:
                                 pass
@@ -2985,9 +2394,12 @@ def _scan_magic_items(pm_obj, cancelled=None):
             "fields": {field["id"]: field for field in fields}, "score": score,
         }
     if "magic_light" in resolved and light_candidates:
-        # There should be one validated runtime item record.  Prefer the
-        # lowest address on the rare occasion several equivalent copies exist.
-        name_address, value_address, radius = min(light_candidates, key=lambda item: item[0])
+        # Prefer the modal stable radius, then the lowest address.  This keeps
+        # duplicate XML/preview records from making the UI alternate between
+        # 0 and a nonsensical large value during a background refresh.
+        counts = {}
+        for item in light_candidates: counts[item[2]] = counts.get(item[2], 0) + 1
+        name_address, value_address, radius = min(light_candidates, key=lambda item: (-counts.get(item[2], 0), item[0]))
         resolved["magic_light"]["light_record"] = name_address
         resolved["magic_light"]["fields"]["light_radius"] = {
             "id": "light_radius", "title": "实际照明半径（新放置生效）",
@@ -3336,6 +2748,114 @@ class Api:
     # writer.  The replacement corrupts the caller stack when the game saves.
     LEGACY_SAVE_PATCH_RVA = 0x003FC311
     LEGACY_SAVE_PATCH_BYTES = bytes((0x83, 0xC4, 0x0C))
+
+    def __init__(self):
+        """Create an isolated runtime session for one modifier window.
+
+        Address tables and feature definitions remain class-level constants.
+        Every value below changes while a game is connected, so it must belong
+        to this API instance rather than leak into a later window or test.
+        """
+        self._v1_native_layout = dict(type(self)._v1_native_layout)
+        self._shop_dialog_probe_cache = {"pid": 0, "address": 0, "at": 0.0}
+        self._shop_dialog_probe_lock = threading.RLock()
+        self.locks = {"gold": False, "mana": False, "xp": False}
+        self._gold_economy_guard = threading.RLock()
+        self._gold_economy_state = {"enabled": False, "mode": "floor", "floor": None,
+                                    "ceiling": None, "fixed": None, "generation": 0}
+        self._gold_economy_last_before = None
+        self._gold_economy_last_after = None
+        self._gold_economy_events = []
+        self._mana_reserve_guard = threading.RLock()
+        self._mana_reserve_state = {"enabled": False, "low_percent": 30.0,
+                                    "restore_percent": 80.0, "generation": 0}
+        self._pa1 = self._pa2 = False
+        self._recipe_scanned = False
+        self._recipe_cache = {}
+        self._shop_data = {}
+        self._skill_base_cache = self._skill_base_ver = None
+        self._pet_house_original = None
+        self._pet_infinite_original = {}
+        self._portal_locks = {}
+        self._portal_lock_guard = threading.RLock()
+        self._portal_samples = {}
+        self._portal_stability = {}
+        self._v2_portal_objects = []
+        self._v2_portal_scan_at = self._v2_portal_scan_pid = 0
+        self._v2_portal_scan_lock = threading.RLock()
+        self._magic_cache = {}
+        self._magic_scan_ms = self._magic_process_id = 0
+        self._magic_scan_running = self._magic_scan_completed = False
+        self._magic_scan_error = ""
+        self._magic_stable_values = {}
+        self._native_magic_resources = {}
+        self._task_runtime_candidates = {}
+        self._task_runtime_candidates_generation = 0
+        self._task_runtime_probe_baselines = {}
+        self._pandora_cache = None
+        self._pandora_cache_pid = self._pandora_scan_ms = 0
+        self._pandora_forced_key = ""
+        self._pandora_runtime_cache = {}
+        self._pandora_runtime_scan_lock = threading.RLock()
+        self._pandora_chest_seen_for_override = False
+        self._pandora_empty_confirmations = 0
+        self._time_controls_cache = None
+        self._time_controls_scan_lock = threading.RLock()
+        self._time_controls_last_failed_scan = 0.0
+        self._time_controls_scan_error = ""
+        self._time_controls_scan_token = 0
+        self._time_controls_scan_running = False
+        self._wave_portal_controller = None
+        self._wave_portal_lock = threading.RLock()
+        self._map_cache_signature = None
+        self._map_cache_key = ""
+        self._mana_max_lock_guard = threading.RLock()
+        self._mana_max_lock_enabled = False
+        self._mana_max_lock_target = None
+        self._mana_max_lock_generation = 0
+        self._timer_lock_guard = threading.RLock()
+        self._timer_locks = {
+            "countdown": {"enabled": False, "target": None, "generation": 0},
+            "game_time": {"enabled": False, "target": None, "generation": 0},
+            "game_speed": {"enabled": False, "target": None, "generation": 0},
+            "pandora": {"enabled": False, "target": None, "generation": 0},
+        }
+        self._memory_write_lock = threading.RLock()
+        self._process_pause_lock = threading.RLock()
+        self._runtime_session_lock = threading.RLock()
+        self._runtime_session_generation = 0
+        self._runtime_shutdown = False
+        self._runtime_workers_lock = threading.RLock()
+        self._runtime_workers = set()
+        self._magic_scan_token = 0
+        self._operation_history_lock = threading.RLock()
+        self._operation_history = []
+        self._operation_history_next_id = 1
+        self._stable_baseline_save_readback = None
+        self._compatibility_doctor = {"ok": False, "write_ready": False,
+                                      "checked_pid": 0, "checks": [], "summary": "尚未检查"}
+        self._compatibility_doctor_lock = threading.RLock()
+        self._config_lock = threading.RLock()
+        self._pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0,
+                                         "houses": [], "pets": []}
+        self._pet_limit_override_original = None
+        self._pet_limit_override_value = None
+        self._other_feature_profile_cache = {"pid": 0, "exe_path": "", "profile": None}
+        self._locked_items = {}
+        self._lock_restore_active = False
+        self._proof = {}
+        self._dwarf_names = {}
+        self._translations = {}
+        self._categories = []
+        self._category_overrides = {}
+        self._item_config_loaded = False
+        self._save_manager_lock = threading.RLock()
+        self._save_restore_tokens = {}
+        self._offline_save_edit_tokens = {}
+        self._offline_save_edit_history_context = {}
+        self._modifier_window = None
+        self._window_is_maximized = False
+        self._window_close_requested = False
 
     def _begin_runtime_session(self):
         """Invalidate old workers and allow requests for a new connection."""
@@ -3719,7 +3239,7 @@ class Api:
                                      if worker.is_alive()}
             alive = len(self._runtime_workers)
         if alive:
-            print("runtime workers still stopping:", alive)
+            _diagnostic("runtime workers still stopping:", alive)
         return alive
 
     def _runtime_session_current(self, generation, pm_obj=None):
@@ -3771,7 +3291,7 @@ class Api:
                 except Exception as exc:
                     # Closing must not be cancelled just because the target has
                     # already exited; all background loops were invalidated above.
-                    print("modifier shutdown cleanup:", exc)
+                    _diagnostic("modifier shutdown cleanup:", exc)
             else:
                 self._set_mana_max_lock_runtime(False, None)
                 self._clear_timer_locks()
@@ -3810,7 +3330,7 @@ class Api:
                     try:
                         window_ref.destroy()
                     except Exception as exc:
-                        print("modifier window close:", exc)
+                        _diagnostic("modifier window close:", exc)
 
                 threading.Timer(0.08, close_window).start()
                 return {"ok": True, "state": "closing"}
@@ -3861,7 +3381,7 @@ class Api:
             os.replace(tmp_path, cfg_path)
             return True
         except Exception as exc:
-            print("user_data.json atomic save error:", exc)
+            _diagnostic("user_data.json atomic save error:", exc)
             return False
         finally:
             for stale in (tmp_path, backup_tmp):
@@ -3880,7 +3400,7 @@ class Api:
         if user is None:
             user = _read_json_object(user_path + ".bak")
             if user is not None:
-                print("user_data.json 无效，已使用 user_data.json.bak")
+                _diagnostic("user_data.json 无效，已使用 user_data.json.bak")
         if user is None:
             for legacy_path in self._legacy_user_config_paths():
                 user = _read_json_object(legacy_path)
@@ -3900,7 +3420,7 @@ class Api:
                     migrated = True
             if migrated:
                 self._write_user_config_unlocked(user)
-                print("已将旧版用户配置迁移到 %LOCALAPPDATA%\\CraftWorldModifier\\config\\user_data.json")
+                _diagnostic("已将旧版用户配置迁移到 %LOCALAPPDATA%\\CraftWorldModifier\\config\\user_data.json")
         # 功能预设已从正式版移除。清理旧用户配置中的预设和默认预设，
         # 防止历史预设在连接游戏时继续恢复并触发旧的物品写入。
         if isinstance(user, dict):
@@ -4322,15 +3842,14 @@ class Api:
 
     def _activate_local_game_root(self, root, source):
         """Reload every local-data cache without touching game memory."""
-        global GAME_ROOT, GAME_DATA_DIR, GAME_RESOURCE_TRANSLATIONS, GAME_RESOURCE_IDS, ITEM_NAME_MAP
+        global GAME_ROOT, GAME_DATA_DIR, ITEM_NAME_MAP
         root = self._valid_game_root(root)
         if not root:
             return {"ok": False, "needs_path": True,
                     "error": "未找到有效的 CraftTheWorld 游戏目录，请选择包含 CraftWorld.exe 与 data 文件夹的位置"}
         GAME_ROOT = root
         GAME_DATA_DIR = os.path.join(root, "data")
-        GAME_RESOURCE_TRANSLATIONS = _load_mod_resource_translations()
-        GAME_RESOURCE_IDS = _load_resource_id_whitelist()
+        _ensure_local_resource_metadata(force=True)
         ITEM_NAME_MAP = load_item_name_map()
         self._item_config_loaded = False
         self._translations = {}
@@ -5027,12 +4546,12 @@ class Api:
             for p in psutil.process_iter(['pid', 'name']):
                 try:
                     nm = p.info.get('name', '')
-                except:
+                except Exception:
                     continue
                 if nm and nm.lower() == MODULE_NAME.lower():
                     try:
                         exe_path = p.exe()
-                    except:
+                    except Exception:
                         exe_path = ""
                     ver = "v1 \u539f\u7248"
                     exe_lower = exe_path.lower()
@@ -5042,7 +4561,7 @@ class Api:
                     if len(matches) >= 2:
                         break
             return matches
-        except:
+        except Exception:
             return []
 
     def connect(self, pid=0):
@@ -5076,6 +4595,7 @@ class Api:
         self._magic_scan_running = False
         self._magic_scan_completed = False
         self._magic_scan_error = ""
+        self._magic_stable_values = {}
         self._native_magic_resources = {}
         self._pandora_cache = None
         self._pandora_cache_pid = 0
@@ -5096,10 +4616,10 @@ class Api:
         global pm, connected, dwarf_cache, item_cache
         try:
             if pid and pid > 0:
-                print("Connecting to PID:", pid)
+                _diagnostic("Connecting to PID:", pid)
                 pm = pymem.Pymem(); pm.open_process_from_id(pid); connected = True; get_base()
             else:
-                print("Connecting by name:", MODULE_NAME)
+                _diagnostic("Connecting by name:", MODULE_NAME)
                 pm = pymem.Pymem(MODULE_NAME); connected = True; get_base()
             if self._has_legacy_save_patch():
                 # Never try to repair executable bytes in a running process.
@@ -5172,7 +4692,7 @@ class Api:
                     pm.write_bytes(b + off, self._pet_house_original, len(self._pet_house_original))
                 for off, raw in self._pet_infinite_original.items():
                     pm.write_bytes(b + off, raw, len(raw))
-        except:
+        except Exception:
             pass
         self._pa1 = False
         self._pa2 = False
@@ -5190,6 +4710,7 @@ class Api:
         self._magic_scan_running = False
         self._magic_scan_completed = False
         self._magic_scan_error = ""
+        self._magic_stable_values = {}
         self._native_magic_resources = {}
         self._clear_pandora_runtime_cache()
         self._clear_time_controls_cache()
@@ -5721,7 +5242,7 @@ class Api:
                 cfg["map_pins"] = all_pins
             return self._update_config(update)
         except Exception as e:
-            print("save_map_pins error:", e)
+            _diagnostic("save_map_pins error:", e)
             return False
 
     def map_replace(self, row, col, bg, word, water=0):
@@ -6494,7 +6015,7 @@ class Api:
                 if ab and ae and ab < ae:
                     self._v2_cache = True
                     return True
-        except:
+        except Exception:
             pass
         self._v2_cache = False
         return False
@@ -6507,7 +6028,7 @@ class Api:
                 ab = pm.read_int(mgr + V2_RES_ARR_BASE)
                 if ab:
                     return ab + V2_GOLD_INDEX * V2_RES_ELEM_SIZE
-        except:
+        except Exception:
             pass
         return None
 
@@ -6515,7 +6036,7 @@ class Api:
         """_v2_mana_ptr"""
         try:
             return get_base() + V2_MANAGER_ARRAY + V2_MANA_OBJ_INDEX * 4
-        except:
+        except Exception:
             return None
 
     def gp(self):
@@ -6846,7 +6367,7 @@ class Api:
                                 mv = struct.unpack("f", struct.pack("I", (me ^ mk) & 0xFFFFFFFF))[0]
                             if math.isfinite(cv) and math.isfinite(mv):
                                 return "%.1f|%.1f" % (cv, mv)
-                except:
+                except Exception:
                     pass
             ui=pm.read_int(get_base()+0xDC3628)
             if not ui:
@@ -6876,7 +6397,7 @@ class Api:
                         pm.write_int(ca+0, fi ^ k1); pm.write_int(ca+4, fi ^ k2)
                         pm.write_float(get_base() + 0xC96560, float(val))
                         return True
-                except:
+                except Exception:
                     pass
             ui=pm.read_int(get_base()+0xDC3628)
             if not ui: return False
@@ -6904,10 +6425,10 @@ class Api:
                         # 同步显示地址
                         try:
                             pm.write_float(get_base() + V2_MANA_DISPLAY, amount)
-                        except:
+                        except Exception:
                             pass
                         return True
-                except:
+                except Exception:
                     pass
             # V1 路径
             ui = pm.read_int(get_base() + V1_MANA_BASE)
@@ -8287,9 +7808,9 @@ class Api:
         0xBB1794: {"name": "幽灵", "id": "ghost", "category": "monster"},
         0xBCD1A4: {"name": "蛞蝓", "id": "slug", "category": "monster"},
         0xBAB338: {"name": "树人", "id": "ent", "category": "other"},
-        0xBDF9D8: {"name": "牦牛", "id": "yak", "category": "other"},
+        0xBDF9D8: {"name": "野猪", "id": "yak", "category": "other"},
         0xBCBE08: {"name": "绵羊", "id": "sheep", "category": "other"},
-        0xBB8A78: {"name": "小龙", "id": "little_dragon", "category": "other"},
+        0xBB8A78: {"name": "小龙", "id": "little_dragon", "category": "monster"},
         0xB9E71C: {"name": "眼魔", "id": "beholder", "category": "monster"},
         0xBC9C1C: {"name": "老鼠", "id": "rat", "category": "monster"},
         0xBBD338: {"name": "主仓库（内部对象）", "category": "skip"},
@@ -8312,7 +7833,7 @@ class Api:
         # 0x27DA7388 -> 0x27DA6F34, where +0x1C/+0x20 is 9870/2677.5
         # (the player-confirmed map cell: column 164, row 44).
         0xBDF9D8: {"base_delta": -0x454, "x_off": 0x1C, "y_off": 0x20,
-                    "label": "牦牛完整对象（EnemyManager 子对象-0x454，+0x1C/+0x20）"},
+                    "label": "野猪完整对象（EnemyManager 子对象-0x454，+0x1C/+0x20）"},
         # The following classes likewise expose their live Transform at the
         # complete Creature object's +0x1C/+0x20.  Each pair was range-checked
         # against the current 13800x6000 world before being enabled.
@@ -8335,8 +7856,8 @@ class Api:
     # current SecureFloat +0x7C changed 7.8 -> 6.6 after one hit, while
     # +0xAC remained 9.0.  This is read-only until more species are mapped.
     V1_CREATURE_HEALTH_OVERRIDES = {
-        0xBDF9D8: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
-                    "label": "牦牛 SecureFloat 生命值（+0x7C / +0xAC，已受伤读回验证）"},
+                    0xBDF9D8: {"base_delta": -0x454, "hp_off": 0x7C, "max_hp_off": 0xAC,
+                    "label": "野猪 SecureFloat 生命值（+0x7C / +0xAC，已受伤读回验证）"},
         # These Creature derivatives were sampled from the same live save.
         # Their complete object lives at EnemyManager entry -0x454 and has a
         # valid duplicated SecureFloat pair at +0x7C/+0xAC.  Values are only
@@ -9477,7 +8998,7 @@ class Api:
                     self.PET_LIMIT_QUERY_REQUEST_OFF,
                     self.PET_AVAILABLE_QUERY_REQUEST_OFF,
                 )):
-                    print("wave portal controller retained: active game-thread request/event")
+                    _diagnostic("wave portal controller retained: active game-thread request/event")
                     return
                 h = self._suspend(int(pm.process_id))
                 if not h:
@@ -9488,11 +9009,11 @@ class Api:
                     ):
                         self._wave_portal_controller = None
                     else:
-                        print("wave portal controller cleanup deferred: hook set changed or restore failed")
+                        _diagnostic("wave portal controller cleanup deferred: hook set changed or restore failed")
                 finally:
                     self._resume(h)
             except Exception as e:
-                print("wave portal controller cleanup:", e)
+                _diagnostic("wave portal controller cleanup:", e)
 
     def _wave_portal_status(self, module_base):
         """Read only the manager fields needed to safely queue a portal."""
@@ -9779,7 +9300,7 @@ class Api:
                             "patches": candidate.get("patches") or {},
                         }
                         self._wave_portal_controller = controller
-                        print("wave portal controller adopted from active prior modifier session")
+                        _diagnostic("wave portal controller adopted from active prior modifier session")
                         return controller, ""
                     if not self._recover_stale_wave_controller(module_base, process_id):
                         return None, "游戏代码与当前版本不一致（%s），请重启游戏后再试" % name
@@ -9808,7 +9329,7 @@ class Api:
                 self._wave_portal_controller = controller
                 return controller, ""
             except Exception as e:
-                print("wave portal controller install:", e)
+                _diagnostic("wave portal controller install:", e)
                 return None, "安装传送门控制器失败：%s" % e
 
     def spawn_monster_portal(self, points, duration=60):
@@ -11295,21 +10816,21 @@ class Api:
             try:
                 sz = min(0x200000, end - pos)
                 chunk = pm.read_bytes(pos, sz)
-            except:
+            except Exception:
                 pass
             # Tier 2: try 64KB
             if chunk is None:
                 try:
                     sz = min(0x10000, end - pos)
                     chunk = pm.read_bytes(pos, sz)
-                except:
+                except Exception:
                     pass
             # Tier 3: try 4KB (single page)
             if chunk is None:
                 try:
                     sz = min(0x1000, end - pos)
                     chunk = pm.read_bytes(pos, sz)
-                except:
+                except Exception:
                     pass
             if chunk is not None and len(chunk) > 0:
                 yield (pos, chunk)
@@ -11358,7 +10879,7 @@ class Api:
                         if y is None or y < 1000 or y > 13000: continue
                         g = pm.read_int(edi + V2_DWARF_GENDER)
                         if g is None or (g != 0 and g != 1): continue
-                    except:
+                    except Exception:
                         continue
                     seen_edis.add(edi)
                     try:
@@ -11807,6 +11328,7 @@ class Api:
             pets = (pet_result.get("pets") if isinstance(pet_result, dict) else None)
             if not isinstance(pets, list):
                 pets = []
+            pets = [row for row in pets if not (row.get("hp_state") == self.STATUS_VERIFIED and row.get("hp") is not None and float(row.get("hp")) <= 0.0)]
             monster_rows, monster_error = self._read_active_monster_records(int(get_base()))
             if monster_rows is None:
                 monster_rows = []
@@ -11829,10 +11351,9 @@ class Api:
                 entry["hp_reason"] = "矮人最大生命值尚未读取"
                 try:
                     edi = int(entry.get("edi") or 0)
-                    # The game updates the two encrypted copies on its update
-                    # thread. Take two very short coherent samples so a single
-                    # copy-refresh frame does not make the UI alternate between
-                    # verified and pending.
+                    # Both builds expose a duplicated current/max pair.  Read
+                    # them together so a Worker being rebuilt between UI ticks
+                    # cannot make a valid value look like an empty field.
                     hp_value = hp_max = None
                     for _health_sample in range(2):
                         sample_hp = self._read_live_dwarf_hp(edi, is_v2)
@@ -11842,12 +11363,15 @@ class Api:
                                 0.0 <= float(sample_hp) <= float(sample_max) and float(sample_max) > 0.0):
                             hp_value, hp_max = sample_hp, sample_max
                             break
-                        time.sleep(0.008)
+                        if is_v2:
+                            time.sleep(0.008)
                     if hp_value is not None and hp_max is not None:
                         entry["hp_value"] = round(float(hp_value), 2)
                         entry["hp_max"] = round(float(hp_max), 2)
                         entry["hp_state"] = self.STATUS_VERIFIED
-                        entry["hp_reason"] = "矮人 SecureFloat 当前生命 / 最大生命"
+                        entry["hp_reason"] = "矮人当前生命 / 最大生命已读取"
+                    else:
+                        entry["hp_reason"] = "矮人当前生命 / 最大生命读取失败；未显示猜测值"
                 except Exception as hp_exc:
                     entry["hp_reason"] = "矮人生命读取失败：%s" % hp_exc
                 if (entry.get("hp_state") == self.STATUS_VERIFIED and
@@ -13075,7 +12599,7 @@ class Api:
                 if worker_type not in ('worker', 'worker_female'):
                     return False
             return True
-        except:
+        except Exception:
             return False
 
     def _v1_dwarf_set(self):
@@ -13201,11 +12725,11 @@ class Api:
                             self._skill_base_cache = addr
                             self._skill_base_ver = is_v2
                             return addr
-                    except:
+                    except Exception:
                         continue
             self._skill_base_cache = None
             self._skill_base_ver = None
-        except:
+        except Exception:
             return None
         return self._skill_base_cache
 
@@ -13334,7 +12858,7 @@ class Api:
                 if vals[1] != old_harden:
                     self._sync_skill_hp_effect(vals[1], old_harden)
             return True
-        except:
+        except Exception:
             return False
 
     def apply_skill_targets(self, prod, harden, mana, educ):
@@ -13552,13 +13076,15 @@ class Api:
             pm.write_int(es + 4, fi ^ k2)
 
     def _read_live_dwarf_hp(self, edi, is_v2):
-        """Read authoritative HP without exposing a transient NaN cache.
+        """Read the current runtime HP used by the live character panel.
 
-        Steam V1 keeps two independently encrypted copies at ``+0x190``.
-        The UI cache at ``+0xBD0`` is not authoritative and is occasionally
-        NaN for a frame, even when both secure copies are valid.  Requiring
-        the two copies to agree also avoids displaying data from a dwarf that
-        is being removed or rebuilt by the game.
+        V1 stores the current value as two encrypted float copies at
+        ``Worker + 0x190/+0x194`` with keys at ``+0x198/+0x19C``.  ``+0xBD0``
+        is only a renderer/update cache and is frequently an unrelated large
+        float, so reading it made the list alternate between a number and a
+        dash.  V2 keeps its existing display-field layout.  This is a
+        read-only presentation field: writes remain on their separately
+        verified transaction path.
         """
         try:
             if is_v2:
@@ -13576,8 +13102,8 @@ class Api:
             first = struct.unpack("<f", struct.pack("<I", (int(a) ^ int(k1)) & 0xFFFFFFFF))[0]
             second = struct.unpack("<f", struct.pack("<I", (int(b) ^ int(k2)) & 0xFFFFFFFF))[0]
             if (not math.isfinite(first) or not math.isfinite(second) or
-                    first < 0.0 or second < 0.0 or first > 100000.0 or second > 100000.0 or
-                    abs(first - second) > 0.10):
+                    first < 0.0 or first > 100.0 or second < 0.0 or second > 100.0 or
+                    abs(first - second) > 0.05):
                 return None
             return float((first + second) * 0.5)
         except Exception:
@@ -13705,7 +13231,7 @@ class Api:
             return {"ok": False, "error": "请先连接游戏"}
         guard = self._require_safe_write("全体回血")
         if guard:
-            print(guard)
+            _diagnostic(guard)
             return {"ok": False, "error": guard}
         is_v2 = self._detect_v2()
 
@@ -13730,7 +13256,7 @@ class Api:
 
         ok, count, error = self._paused_memory_transaction(write_and_verify)
         if not ok:
-            print("heal_all:", error)
+            _diagnostic("heal_all:", error)
             return {"ok": False, "error": error or "全员回血未通过写后读回校验"}
         # WebView write endpoints use an explicit result envelope.  Returning
         # only the affected count made a successful ``12`` look like a failed
@@ -13743,7 +13269,7 @@ class Api:
             return {"ok": False, "error": "请先连接游戏"}
         guard = self._require_safe_write("全体饱食")
         if guard:
-            print(guard)
+            _diagnostic(guard)
             return {"ok": False, "error": guard}
         is_v2 = self._detect_v2()
 
@@ -13768,7 +13294,7 @@ class Api:
 
         ok, count, error = self._paused_memory_transaction(write_and_verify)
         if not ok:
-            print("full_sat:", error)
+            _diagnostic("full_sat:", error)
             return {"ok": False, "error": error or "全员补饱食度未通过写后读回校验"}
         return {"ok": True, "count": int(count or 0)}
 
@@ -13851,7 +13377,7 @@ class Api:
                    for skill_id in before):
                 rollback_ok = self._save_dwarf_personal_skills_write(
                     idx, before, _expected_current=requested)
-                print('save_dwarf_personal_skills: post-write readback failed; rollback=%s' % rollback_ok)
+                _diagnostic('save_dwarf_personal_skills: post-write readback failed; rollback=%s' % rollback_ok)
                 return False
             # The write has already been verified against the live record.
             # Mirror that verified record into the UI cache so the next
@@ -13867,7 +13393,7 @@ class Api:
                         break
                 _replace_dwarf_cache(cache_rows)
             except Exception as exc:
-                print('save_dwarf_personal_skills: cache refresh failed:', exc)
+                _diagnostic('save_dwarf_personal_skills: cache refresh failed:', exc)
             operation_id = None
             if _record_history:
                 history = self._record_operation(
@@ -13907,7 +13433,7 @@ class Api:
             return False
         guard = self._require_safe_write("个人技能数值写入")
         if guard:
-            print(guard)
+            _diagnostic(guard)
             return False
         requested = {}
         try:
@@ -13952,7 +13478,7 @@ class Api:
 
         ok, _result, error = self._paused_memory_transaction(write_and_verify)
         if not ok:
-            print("save_dwarf_personal_skills:", error)
+            _diagnostic("save_dwarf_personal_skills:", error)
         return bool(ok)
 
     def _queue_v1_personal_skill_mutation(self, worker, operation, node=0, index=0, value=10.0):
@@ -14236,7 +13762,7 @@ class Api:
             except Exception as exc:
                 # The memory write itself is already verified.  Keep the
                 # result successful but make the missing audit entry visible.
-                print("save_dwarf_fields history:", exc)
+                _diagnostic("save_dwarf_fields history:", exc)
         return {"ok": True, "changed": changed, "before": before,
                 "after": after, "readback_ok": True,
                 "operation_id": operation_id}
@@ -14330,7 +13856,7 @@ class Api:
         try:
             self._shop_data = scan_shop_data(pm, self._detect_v2())
             return len(self._shop_data)
-        except:
+        except Exception:
             self._shop_data = {}
             return 0
 
@@ -14349,51 +13875,66 @@ class Api:
             if not name or name != expected_name:
                 return False
             return True
-        except:
+        except Exception:
             return False
 
     def refresh_items(self):
-        """只重读缓存中物品的数量，不做全量扫描"""
+        """Fast, read-only quantity refresh for the existing inventory cache.
+
+        The old implementation validated every cached slot through several
+        individual process reads.  A full modded catalogue can contain more
+        than two thousand entries, turning a harmless periodic refresh into
+        thousands of cross-process calls and visibly stalling WebView/Windows.
+        The resource vector is contiguous, so read it once, validate each
+        cached slot's index locally and decode the two quantity words locally.
+        A changed/rebuilt vector is rejected as stale and requires a normal
+        explicit rescan; it is never mistaken for an empty inventory.
+        """
         global item_cache
         if not pm or not connected:
             _set_cached_read_state("items", self.STATUS_DISCONNECTED, "尚未连接游戏")
             return 0
         if not item_cache:
             return 0
-        is_v2 = self._detect_v2()
-        refreshed = []
-        failed = 0
-        for original in item_cache:
-            try:
-                # Work on a fresh row and only publish the complete batch.
-                # A failed slot read must not silently leave an old quantity
-                # on screen and pretend that it came from this refresh.
+        try:
+            is_v2 = self._detect_v2()
+            arr_start, arr_end = _get_item_array(pm, is_v2=is_v2)
+            stride = V2_RES_ELEM_SIZE if is_v2 else SLOT_SIZE
+            if (not self._valid_runtime_pointer(arr_start) or not self._valid_runtime_pointer(arr_end)
+                    or int(arr_end) < int(arr_start) or (int(arr_end)-int(arr_start)) % int(stride) != 0):
+                raise RuntimeError("物品数组边界已变化")
+            total = (int(arr_end)-int(arr_start)) // int(stride)
+            if total <= 0 or total > 65536:
+                raise RuntimeError("物品数组长度异常")
+            raw = pm.read_bytes(int(arr_start), int(total)*int(stride))
+            if not raw or len(raw) != int(total)*int(stride):
+                raise RuntimeError("物品数组批量读取不完整")
+            index_off = V2_ELEM_IDX if is_v2 else OFF_SLOT_IDX
+            key_off = V2_ELEM_KEY1 if is_v2 else OFF_DEC1
+            enc_off = V2_ELEM_ENC1 if is_v2 else OFF_ENC1
+            refreshed = []
+            for original in item_cache:
                 it = dict(original)
-                sa = it.get("slot_addr")
-                name_en = str(it.get("name_en") or "")
-                if not sa or not name_en or not self._validate_item_slot(sa, name_en, is_v2):
-                    raise RuntimeError("物品槽已变化")
-                if is_v2:
-                    key1 = pm.read_int(sa + V2_ELEM_KEY1)
-                    enc1 = pm.read_int(sa + V2_ELEM_ENC1)
-                    qty = (key1 ^ enc1) & 0xFFFFFFFF
-                else:
-                    dec1 = pm.read_int(sa + OFF_DEC1)
-                    enc1 = pm.read_int(sa + OFF_ENC1)
-                    qty = (enc1 ^ dec1) & 0xFFFFFFFF
-                if qty > 0x7FFFFFFF:
-                    qty -= 0x100000000
-                if qty < 0:
-                    qty = 0
-                it["qty"] = qty
+                slot_addr = int(it.get("slot_addr") or 0)
+                local = slot_addr-int(arr_start)
+                if (local < 0 or local % int(stride) != 0 or local + int(stride) > len(raw)
+                        or not str(it.get("name_en") or "")):
+                    raise RuntimeError("物品槽地址已变化")
+                slot_index = local // int(stride)
+                cached_index = it.get("slot_key")
+                runtime_index = struct.unpack_from("<I", raw, local + int(index_off))[0]
+                if (cached_index is not None and int(runtime_index) != int(cached_index)):
+                    raise RuntimeError("物品槽索引已变化")
+                first = struct.unpack_from("<I", raw, local + int(key_off))[0]
+                second = struct.unpack_from("<I", raw, local + int(enc_off))[0]
+                qty = (first ^ second) & 0xFFFFFFFF
+                if qty > 0x7FFFFFFF: qty -= 0x100000000
+                it["qty"] = max(0, int(qty))
                 refreshed.append(it)
-            except Exception:
-                failed += 1
-        if failed or len(refreshed) != len(item_cache):
+        except Exception as exc:
             _set_cached_read_state(
                 "items", self.STATUS_STALE,
-                "物品数量刷新不完整：已验证 %s/%s 个物品槽；保留上次完整缓存，但未将其当作当前结果" %
-                (len(refreshed), len(item_cache)))
+                "物品数量刷新未完成：%s；保留上次完整缓存，但未将其当作当前结果" % exc)
             return len(item_cache)
         item_cache = refreshed
         _set_cached_read_state("items", self.STATUS_VERIFIED)
@@ -14633,6 +14174,13 @@ class Api:
     PET_HOUSE_Y_OFF = 0x130
     V1_PET_COMPONENT_VTABLE_RVA = 0xBC5440
     PET_COMPONENT_OFF = 0x568
+    # The active EnemyManager entry is Pet's embedded component.  The complete
+    # Pet object owns a Transform pointer at +0x74; its world X/Y are +0x1C and
+    # +0x20.  These offsets were already validated against the live Steam V1
+    # object and are read-only here.
+    PET_TRANSFORM_OFF = 0x74
+    PET_TRANSFORM_X_OFF = 0x1C
+    PET_TRANSFORM_Y_OFF = 0x20
     _pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0, "houses": [], "pets": []}
     _pet_limit_override_original = None
     _pet_limit_override_value = None
@@ -14743,7 +14291,7 @@ class Api:
                                 if pointer_off is not None:
                                     coord_base = int(pm.read_int(obj + int(pointer_off)) or 0)
                                     if not self._pandora_pointer_ok(coord_base):
-                                        raise ValueError("牦牛位置组件指针无效")
+                                        raise ValueError("野猪位置组件指针无效")
                             candidate_x = float(pm.read_float(coord_base + coord_x_off))
                             candidate_y = float(pm.read_float(coord_base + coord_y_off))
                             # A real world object is never represented by the
@@ -14797,7 +14345,7 @@ class Api:
                             hp_state = self.STATUS_VERIFIED
                             hp_reason = str(health_override["label"])
                         except Exception as health_exc:
-                            hp_reason = "牦牛血量读取失败：%s" % health_exc
+                            hp_reason = "野猪血量读取失败：%s" % health_exc
                     # A verified 0 HP object is a dead/pending-cleanup entry
                     # that EnemyManager has not removed yet.  It is not an
                     # active creature for the player's list, so hide it here
@@ -14886,7 +14434,62 @@ class Api:
             component = int(obj + self.PET_COMPONENT_OFF)
             if int(pm.read_int(component) or 0) != int(component_vtable):
                 return None
-            return {"address": obj, "pet_type": pet_type, "component": component}
+            definition_max = CREATURE_DEFINITION_HEALTH.get(pet_type)
+            record = {"address": obj, "pet_type": pet_type, "component": component,
+                      "hp_max": round(float(definition_max), 2) if definition_max is not None else None}
+            # Pet objects share the EnemyBase transform/health storage in the
+            # current Steam build, but their exact derived layout is not
+            # guaranteed.  Probe only bounded, read-only candidates and mark
+            # values verified after two coherent reads; otherwise leave the
+            # fields explicitly unverified instead of displaying fabricated
+            # coordinates or a zero health value.
+            try:
+                map_data = self._map_resolve()
+                world_w = float(map_data[3]) if map_data else 0.0
+                world_h = float(map_data[4]) if map_data else 0.0
+                map_w = int(map_data[1]) if map_data else 0
+                map_h = int(map_data[2]) if map_data else 0
+                transform = int(pm.read_int(obj + self.PET_TRANSFORM_OFF) or 0) & 0xFFFFFFFF
+                if world_w > 0 and world_h > 0 and self._pandora_pointer_ok(transform):
+                    x1 = float(pm.read_float(transform + self.PET_TRANSFORM_X_OFF))
+                    y1 = float(pm.read_float(transform + self.PET_TRANSFORM_Y_OFF))
+                    x2 = float(pm.read_float(transform + self.PET_TRANSFORM_X_OFF))
+                    y2 = float(pm.read_float(transform + self.PET_TRANSFORM_Y_OFF))
+                    if (math.isfinite(x1) and math.isfinite(y1) and math.isfinite(x2) and math.isfinite(y2)
+                            and abs(x1-x2) < 0.01 and abs(y1-y2) < 0.01
+                            and 1.0 < x1 < world_w and 1.0 < y1 < world_h):
+                        record.update({"x": round(x1, 2), "y": round(y1, 2),
+                                       "col": max(0, min(map_w-1, int(x1*map_w/world_w))),
+                                       "row": max(0, min(map_h-1, int(y1*map_h/world_h))),
+                                       "coords_state": self.STATUS_VERIFIED,
+                                       "coords_reason": "Pet Transform +0x1C/+0x20 已读取"})
+                if "coords_state" not in record:
+                    record.update({"x": None, "y": None, "col": None, "row": None,
+                                   "coords_state": self.STATUS_UNVERIFIED,
+                                   "coords_reason": "宠物坐标结构尚未通过稳定读数校验"})
+                hp_candidates = ((0x7C, 0xAC), (0x424+0x7C, 0x424+0xAC))
+                for hp_off, max_off in hp_candidates:
+                    h1, m1 = self._read_secure_float(obj + hp_off, minimum=0.0, maximum=10000.0), self._read_secure_float(obj + max_off, minimum=0.01, maximum=10000.0)
+                    h2, m2 = self._read_secure_float(obj + hp_off, minimum=0.0, maximum=10000.0), self._read_secure_float(obj + max_off, minimum=0.01, maximum=10000.0)
+                    if (h1 is not None and m1 is not None and h2 is not None and m2 is not None
+                            and abs(float(h1)-float(h2)) <= 0.05 and abs(float(m1)-float(m2)) <= 0.05
+                            and 0.0 <= float(h1) <= float(m1) + 0.05):
+                        record.update({"hp": round(float(h1), 2), "hp_max": round(float(m1), 2),
+                                       "hp_state": self.STATUS_VERIFIED,
+                                       "hp_reason": "宠物 SecureFloat 当前生命 / 最大生命"})
+                        break
+                if "hp_state" not in record:
+                    record.update({"hp": None, "hp_state": self.STATUS_UNVERIFIED,
+                                   "hp_reason": "宠物当前血量字段尚未通过稳定读数校验；仅显示本地定义上限"})
+            except Exception:
+                record.setdefault("coords_state", self.STATUS_UNVERIFIED)
+                record.setdefault("coords_reason", "宠物坐标读取失败")
+                record.setdefault("hp_state", self.STATUS_UNVERIFIED)
+                record.setdefault("hp_reason", "宠物血量读取失败")
+                record.setdefault("x", None); record.setdefault("y", None)
+                record.setdefault("col", None); record.setdefault("row", None)
+                record.setdefault("hp", None); record.setdefault("hp_max", round(float(definition_max), 2) if definition_max is not None else None)
+            return record
         except Exception:
             return None
 
@@ -15891,7 +15494,7 @@ class Api:
                 cfg["proof_text"] = dict(self._proof)
             return self._update_config(update)
         except Exception as e:
-            print("_save_item_states error:", e)
+            _diagnostic("_save_item_states error:", e)
             return False
 
     def set_dwarf_name(self, idx, name):
@@ -15918,7 +15521,7 @@ class Api:
         """_load_dwarf_names"""
         try:
             self._dwarf_names = dict(self._read_config().get("dwarf_names", {}) or {})
-        except:
+        except Exception:
             self._dwarf_names = {}
 
     def _save_dwarf_names(self):
@@ -15926,13 +15529,14 @@ class Api:
         try:
             return self._update_config(lambda cfg: cfg.update({"dwarf_names": dict(self._dwarf_names)}))
         except Exception as e:
-            print("_save_dwarf_names error:", e)
+            _diagnostic("_save_dwarf_names error:", e)
             return False
 
     def _load_item_config(self):
         """_load_item_config"""
         if self._item_config_loaded: return
         self._item_config_loaded = True
+        _ensure_local_resource_metadata()
         # The mod CSV is only a fallback.  Entries in the trainer's own
         # translation file below deliberately override it.
         self._translations.update(GAME_RESOURCE_TRANSLATIONS)
@@ -15944,7 +15548,8 @@ class Api:
                     if "=" in line and not line.startswith("#"):
                         k, v = line.split("=", 1)
                         self._translations[k.strip().lower()] = v.strip()
-        except: pass
+        except (OSError, UnicodeError) as exc:
+            _diagnostic("item translation file load:", exc)
         try:
             cfg = self._read_config()
             self._categories = cfg.get("categories", [])
@@ -15954,7 +15559,7 @@ class Api:
                 self._translations.update({str(key).lower().strip(): str(value)
                                            for key, value in custom_translations.items()
                                            if str(key).strip() and str(value).strip()})
-        except:
+        except Exception:
             self._categories = []
 
     def get_translation(self, name_en):
@@ -16019,10 +15624,10 @@ class Api:
             if not self._update_config(lambda cfg: cfg.update({"categories": clean})):
                 return False
             self._categories = clean
-            print("save_categories OK:", cats)
+            _diagnostic("save_categories OK:", cats)
             return True
         except Exception as e:
-            print("save_categories error:", e)
+            _diagnostic("save_categories error:", e)
             return False
 
     def add_category(self, name):
@@ -16519,7 +16124,7 @@ class Api:
                     sd["qty"] = new_qty
                 self._shop_data[name_en] = sd
             return ok
-        except:
+        except Exception:
             return False
 
     def _scan_recipes(self):
@@ -16586,7 +16191,7 @@ class Api:
                 set_recipe_unlock_state(pm, addr, True)
                 return True
             return False
-        except:
+        except Exception:
             return False
 
     def _live_recipe_vector(self):
@@ -16974,6 +16579,7 @@ class Api:
         return attrs
 
     def _browser_load_resources(self):
+        _ensure_local_resource_metadata()
         resources = {}
         errors = []
 
@@ -17811,12 +17417,14 @@ class Api:
             return False, "请先连接游戏"
         if force:
             self._magic_cache = {}
+            self._magic_stable_values = {}
             self._magic_scan_error = ""
             self._magic_scan_completed = False
         if self._magic_scan_running:
             return False, "正在定位魔法数据，请稍候"
         if self._magic_process_id != pm.process_id:
             self._magic_cache = {}
+            self._magic_stable_values = {}
             self._magic_scan_completed = False
         if not self._magic_cache and self._magic_scan_completed:
             return False, self._magic_scan_error or "当前版本未定位到可用的魔法参数结构"
@@ -17850,6 +17458,16 @@ class Api:
                 original = field["original"]
                 try:
                     value = _read_magic_value(pm, field["address"], value_type)
+                    # The effective magic-light item radius is a small native
+                    # integer.  Heap scans can momentarily hit an XML/preview
+                    # record (0 or a huge value); retain the last coherent
+                    # value instead of repainting that transient garbage.
+                    if definition["id"] == "magic_light" and field_name in ("radius", "light_radius"):
+                        if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or not (1 <= int(value) <= 64):
+                            stable_key = definition["id"] + ":" + field_name
+                            value = self._magic_stable_values.get(stable_key, field.get("original", 1))
+                        else:
+                            self._magic_stable_values[definition["id"] + ":" + field_name] = int(value)
                     field["value"] = value
                 except Exception:
                     valid = False
@@ -17887,6 +17505,8 @@ class Api:
                 numeric = int(float(value))
                 if abs(numeric) > 100000:
                     raise ValueError("数值超出范围")
+                if magic_id == "magic_light" and field_name in ("radius", "light_radius") and not (1 <= numeric <= 64):
+                    raise ValueError("魔法之光半径应在 1 ～ 64 之间")
                 pm.write_int(field["address"], numeric)
             current = _read_magic_value(pm, field["address"], field["type"])
             field["value"] = current
@@ -18533,7 +18153,7 @@ class Api:
             pause_acquired = True
             h=ctypes.windll.kernel32.OpenProcess(0x1F0FFF,0,pid)
             if h:ctypes.windll.ntdll.NtSuspendProcess(h);return h
-        except:
+        except Exception:
             pass
         if pause_acquired:
             self._process_pause_lock.release()
@@ -18546,7 +18166,7 @@ class Api:
         if h:
             try:
                 ctypes.windll.ntdll.NtResumeProcess(h)
-            except:
+            except Exception:
                 pass
             finally:
                 ctypes.windll.kernel32.CloseHandle(h)
@@ -19862,7 +19482,7 @@ if __name__ == "__main__":
     api = Api()
     # A frameless window needs an explicit drag region.  easy_drag is kept off
     # so existing map, list and button interactions never turn into a drag.
-    window=webview.create_window("打造世界修改器 v1.0",html,width=1880,height=1060,min_size=(1280,760),frameless=True,easy_drag=False,js_api=api)
+    window=webview.create_window("打造世界修改器 v1.0.1",html,width=1880,height=1060,min_size=(1280,760),frameless=True,easy_drag=False,js_api=api)
     api._modifier_window = window
     api._window_is_maximized = False
     api._window_close_requested = False
