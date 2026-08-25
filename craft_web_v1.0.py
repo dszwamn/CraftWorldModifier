@@ -112,6 +112,11 @@ def _application_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _update_staging_root():
+    """Return a disposable update staging directory outside the release folder."""
+    return os.path.join(tempfile.gettempdir(), "CraftWorldModifier-update")
+
+
 def _resource_path(name):
     """Resolve release resources, with a root-level development fallback."""
     filename = str(name or "").strip()
@@ -3707,12 +3712,18 @@ class Api:
                 "package_ready": package_ready, "message": "发现新版本" if available else "当前已是最新版本"}
 
     def _read_staged_update(self):
-        ready_path = os.path.join(_application_dir(), "updates", "ready.json")
+        updates_root = os.path.abspath(_update_staging_root())
+        ready_path = os.path.join(updates_root, "ready.json")
         ready = _read_json_object(ready_path)
         if not isinstance(ready, dict):
+            # Migrate away from the old visible app\updates staging folder.
+            # It only contained an abandoned package from the pre-fix updater.
+            try:
+                shutil.rmtree(os.path.join(_application_dir(), "updates"), ignore_errors=True)
+            except Exception:
+                pass
             return None
         stage_dir = os.path.abspath(str(ready.get("stage_dir") or ""))
-        updates_root = os.path.abspath(os.path.join(_application_dir(), "updates"))
         try:
             if os.path.commonpath([stage_dir, updates_root]) != updates_root:
                 return None
@@ -3743,7 +3754,7 @@ class Api:
             expected_hash = str(package.get("sha256") or "").lower()
             if expected_hash and digest != expected_hash:
                 return {"ok": False, "error": "更新包 SHA-256 校验失败"}
-            updates_root = os.path.join(_application_dir(), "updates")
+            updates_root = _update_staging_root()
             os.makedirs(updates_root, exist_ok=True)
             stage_dir = tempfile.mkdtemp(prefix="stage-", dir=updates_root)
             package_format = str(package.get("format") or "").lower()
@@ -3836,10 +3847,11 @@ class Api:
             return "'" + str(value).replace("'", "''") + "'"
 
         script_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_update_%s.ps1" % uuid.uuid4().hex)
-        ready_path = os.path.join(app_dir, "updates", "ready.json")
+        updates_root = _update_staging_root()
+        ready_path = os.path.join(updates_root, "ready.json")
         # Keep the diagnostic beside ready.json so a user can find it even
         # after the temporary PowerShell helper has finished.
-        log_path = os.path.join(app_dir, "updates", "update.log")
+        log_path = os.path.join(updates_root, "update.log")
         stage_root = os.path.dirname(stage_dir)
         expected_hash = str(ready.get("package_sha256") or "").strip().lower()
         script_lines = [
