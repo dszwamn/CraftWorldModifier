@@ -3731,7 +3731,17 @@ class Api:
             return {"ok": False, "error": "下载或暂存更新失败：%s" % exc}
 
     def apply_staged_update(self):
-        """Schedule a safe copy after this process exits; never touches game data."""
+        """Schedule a verified replacement after this process exits.
+
+        Windows keeps the running executable locked.  The previous updater
+        launched a short ``cmd.exe`` script and assumed that destroying the
+        WebView had already terminated the Python process.  In practice that
+        assumption is false on some WebView2/runtime combinations, so the
+        copy silently failed and only the ``updates`` directory remained.
+        The helper below waits for this exact PID to disappear, retries the
+        copy, verifies every destination, and leaves a diagnostic log when a
+        replacement cannot be completed.
+        """
         ready = self._read_staged_update()
         if not ready:
             return {"ok": False, "error": "没有已校验的暂存更新"}
@@ -3757,23 +3767,89 @@ class Api:
                 mappings.append((source, target))
         if not mappings:
             return {"ok": False, "error": "没有可应用的更新文件"}
-        command_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_update_%s.cmd" % uuid.uuid4().hex)
-        lines = ["@echo off", "setlocal", "timeout /t 2 /nobreak >nul"]
+        def ps_literal(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        script_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_update_%s.ps1" % uuid.uuid4().hex)
+        ready_path = os.path.join(app_dir, "updates", "ready.json")
+        # Keep the diagnostic beside ready.json so a user can find it even
+        # after the temporary PowerShell helper has finished.
+        log_path = os.path.join(app_dir, "updates", "update.log")
+        stage_root = os.path.dirname(stage_dir)
+        expected_hash = str(ready.get("package_sha256") or "").strip().lower()
+        script_lines = [
+            "$ErrorActionPreference = 'Stop'",
+            "$ownerPid = %d" % os.getpid(),
+            "$logPath = %s" % ps_literal(log_path),
+            "$stageRoot = %s" % ps_literal(stage_root),
+            "$readyPath = %s" % ps_literal(ready_path),
+            "$launchPath = %s" % ps_literal(os.path.abspath(sys.executable) if os.path.isfile(str(sys.executable)) else str(sys.executable)),
+            "$launchArgs = @(%s)" % (ps_literal(os.path.abspath(__file__)) if not getattr(sys, "frozen", False) else ""),
+            "$items = @(",
+        ]
         for source, target in mappings:
-            lines.append('copy /Y "%s" "%s" >nul' % (source.replace('"', '""'), target.replace('"', '""')))
-            lines.append("if errorlevel 1 exit /b 1")
-        if getattr(sys, "frozen", False):
-            lines.append('start "" "%s"' % os.path.abspath(sys.executable).replace('"', '""'))
-        else:
-            lines.append('start "" "%s" "%s"' % (sys.executable.replace('"', '""'), os.path.abspath(__file__).replace('"', '""')))
-        lines.extend(["endlocal", "del \"%~f0\""])
+            script_lines.append("  @{ Source = %s; Target = %s }" % (ps_literal(source), ps_literal(target)))
+        script_lines.extend([
+            ")",
+            "function Write-UpdateLog([string]$Message) {",
+            "  try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format o) + ' ' + $Message) -Encoding UTF8 } catch {}",
+            "}",
+            "function Get-FileSha256([string]$Path) {",
+            "  $sha = [System.Security.Cryptography.SHA256]::Create()",
+            "  try { return ([BitConverter]::ToString($sha.ComputeHash([System.IO.File]::ReadAllBytes($Path))).Replace('-', '').ToLowerInvariant()) } finally { $sha.Dispose() }",
+            "}",
+            "try {",
+            "  Write-UpdateLog '更新助手已启动'",
+            "  $exited = $false",
+            "  for ($i = 0; $i -lt 150; $i++) {",
+            "    if (-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)) { $exited = $true; break }",
+            "    Start-Sleep -Milliseconds 200",
+            "  }",
+            "  if (-not $exited) { throw '修改器进程未在 30 秒内退出，已取消替换' }",
+            "  foreach ($item in $items) {",
+            "    if (-not (Test-Path -LiteralPath $item.Source -PathType Leaf)) { throw ('更新文件不存在：' + $item.Source) }",
+            "    $parent = [System.IO.Path]::GetDirectoryName([string]$item.Target)",
+            "    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }",
+            "    $copied = $false",
+            "    for ($attempt = 1; $attempt -le 30; $attempt++) {",
+            "      try {",
+            "        Copy-Item -LiteralPath $item.Source -Destination $item.Target -Force",
+            "        if (-not (Test-Path -LiteralPath $item.Target -PathType Leaf)) { throw '目标文件未生成' }",
+            "        $copied = $true; break",
+            "      } catch { Write-UpdateLog ('第 ' + $attempt + ' 次复制失败：' + $_.Exception.Message); Start-Sleep -Milliseconds 300 }",
+            "    }",
+            "    if (-not $copied) { throw ('无法替换文件：' + $item.Target) }",
+        ])
+        if expected_hash:
+            script_lines.extend([
+                "    if ((Get-FileSha256 ([string]$item.Target)) -ne %s) { throw ('目标文件校验失败：' + $item.Target) }" % ps_literal(expected_hash),
+            ])
+        script_lines.extend([
+            "    Write-UpdateLog ('已替换：' + $item.Target)",
+            "  }",
+            "  if ($launchArgs.Count -gt 0) { Start-Process -FilePath $launchPath -ArgumentList $launchArgs } else { Start-Process -FilePath $launchPath }",
+            "  Write-UpdateLog '更新完成，已重新启动修改器'",
+            "  try { Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}",
+            "  try { Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue } catch {}",
+            "} catch {",
+            "  Write-UpdateLog ('更新失败：' + $_.Exception.Message)",
+            "  exit 1",
+            "}",
+        ])
         try:
-            with open(command_path, "w", encoding="utf-8", newline="\r\n") as handle:
-                handle.write("\r\n".join(lines) + "\r\n")
+            # Windows PowerShell 5.1 needs the UTF-8 BOM; without it a path or
+            # Chinese diagnostic text is decoded as the legacy code page and
+            # the helper can fail to parse before it ever reaches Copy-Item.
+            with open(script_path, "w", encoding="utf-8-sig", newline="\r\n") as handle:
+                handle.write("\r\n".join(script_lines) + "\r\n")
             flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
-            subprocess.Popen(["cmd.exe", "/d", "/c", command_path], close_fds=True, creationflags=flags)
+            subprocess.Popen([
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden", "-File", script_path,
+            ], close_fds=True, creationflags=flags)
             threading.Thread(target=self._close_after_update, name="ctw-update-exit", daemon=True).start()
-            return {"ok": True, "restarting": True, "version": ready.get("version"), "message": "更新已排队，关闭修改器后将替换并重新启动"}
+            return {"ok": True, "restarting": True, "version": ready.get("version"),
+                    "message": "更新已排队；修改器退出后将自动替换并重新启动。若失败，可查看 updates\\update.log。"}
         except Exception as exc:
             return {"ok": False, "error": "无法启动更新程序：%s" % exc}
 
@@ -3787,6 +3863,11 @@ class Api:
                 windows[0].destroy()
         except Exception:
             pass
+        # ``destroy()`` does not terminate the Python host on every WebView2
+        # backend.  Force the host to exit after the close callback has had
+        # time to run, otherwise Windows keeps the EXE locked for the helper.
+        time.sleep(2.0)
+        os._exit(0)
 
     @staticmethod
     def _valid_game_root(value):
