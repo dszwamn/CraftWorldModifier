@@ -2,7 +2,7 @@
 <html lang="zh-CN"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>打造世界修改器 v1.0.1</title>
+<title>打造世界修改器 v1.1</title>
 <style>
 .wave-portal-close{background:#F6E9DF;color:#765847;border:1px solid #E7CFC0;box-shadow:none}
 .wave-portal-close:hover{background:#F0DCCD;border-color:#DDB5A2}
@@ -147,10 +147,21 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .map-protection .map-protection-state{flex:0 0 auto;font-weight:700;padding:2px 8px;border-radius:999px;background:#f5e1b5;color:#9a641d;white-space:nowrap}
 .map-protection .map-protection-copy{min-width:0}.map-protection .map-protection-copy b{display:block;color:#6b5131;margin-bottom:1px}
 .map-protection.writable{border-color:#b9dbb4;background:#f3fbf1;color:#507447}.map-protection.writable .map-protection-state{background:#d9eed5;color:#3e7a35}
-.map-toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:9px 0}
-.map-tool-group{display:flex;align-items:center;gap:5px;padding:5px 7px;border:1px solid #eadfd6;border-radius:9px;background:rgba(255,255,255,.48)}
+.map-command-header{justify-content:space-between;gap:12px;flex-wrap:nowrap!important;min-width:0}
+.map-command-header h1{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.map-top-actions{display:flex;align-items:center;gap:8px;flex:0 1 auto;min-width:0;overflow-x:auto;white-space:nowrap;padding-bottom:2px}
+.map-top-actions::-webkit-scrollbar,.map-toolbar-row::-webkit-scrollbar{height:5px}.map-top-actions::-webkit-scrollbar-thumb,.map-toolbar-row::-webkit-scrollbar-thumb{background:rgba(125,103,81,.28);border-radius:999px}
+.map-edit-bar{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;margin:12px 0 8px;padding:9px 10px 11px;border:1px solid #eadfd6;border-radius:10px;background:rgba(255,255,255,.35)}
+.map-edit-bar::-webkit-scrollbar{height:5px}.map-edit-bar::-webkit-scrollbar-thumb{background:rgba(125,103,81,.28);border-radius:999px}
+.map-edit-group{display:flex;align-items:center;gap:7px;flex:0 0 auto;min-width:0}.map-edit-group+.map-edit-group{padding-left:10px;border-left:1px solid #eadfd6}
+.map-edit-label{color:#6b5b4f;font-size:13px;font-weight:700;white-space:nowrap}.map-edit-bar input,.map-edit-bar select{height:36px;box-sizing:border-box;border:1px solid #decfc3;border-radius:7px;background:#fffdfa;color:#514238;font:13px inherit;outline:none;transition:border-color .16s ease,box-shadow .16s ease,background-color .16s ease}.map-edit-bar input{padding:0 9px}.map-edit-bar select{padding:0 28px 0 9px}.map-edit-bar input:hover,.map-edit-bar select:hover{border-color:#cdb9aa;background:#fff}.map-edit-bar input:focus,.map-edit-bar select:focus{border-color:#e6a45f;box-shadow:0 0 0 3px rgba(230,164,95,.16);background:#fff}.map-edit-search{width:176px}.map-edit-select{width:min(330px,23vw);min-width:210px}.map-edit-number{width:58px}.map-edit-star{width:36px;min-width:36px;padding:0!important;font-size:16px!important}.map-edit-action{height:36px!important;padding:0 14px!important}
+.map-info-card{display:block;box-sizing:border-box;width:100%;min-height:40px;margin:0 0 10px;padding:8px 11px;border:1px solid #e2d6cc;border-radius:8px;background:#fffcf8;color:#5c4e40;font-size:14px;font-weight:600;line-height:1.5;white-space:normal;overflow-wrap:anywhere}
+.map-toolbar{display:grid;gap:8px;margin:9px 0;min-width:0}
+.map-toolbar-row{display:flex;align-items:center;gap:8px;min-width:0;overflow-x:auto;overflow-y:hidden;padding:1px 1px 5px;scrollbar-width:thin;white-space:nowrap}
+.map-tool-group{display:flex;align-items:center;gap:5px;flex:0 0 auto;padding:5px 7px;border:1px solid #eadfd6;border-radius:9px;background:rgba(255,255,255,.48)}
 .map-tool-group .map-tool-label{padding:0 4px;color:#8c7c6e;font-size:13px;font-weight:700;white-space:nowrap}
 .map-tool-group .btn{height:33px;padding:0 11px;font-size:13px;border-radius:7px;white-space:nowrap}
+.map-toolbar button:focus-visible,.map-edit-bar button:focus-visible,.map-top-actions button:focus-visible{outline:2px solid #ffb44a;outline-offset:2px}
 .map-explore-menu{position:relative}.map-explore-menu summary{list-style:none}.map-explore-menu summary::-webkit-details-marker{display:none}
 .map-explore-menu[open]{z-index:3}.map-explore-menu .map-explore-popover{position:absolute;right:0;top:36px;display:flex;gap:6px;min-width:240px;padding:9px;border:1px solid #e5d8ca;border-radius:9px;background:#fffdfb;box-shadow:0 8px 22px rgba(75,51,35,.16)}
 .map-explore-menu .map-explore-popover .btn{flex:1}.map-modal-box{width:min(560px,calc(100vw - 32px))!important;padding:22px 24px}
@@ -161,7 +172,8 @@ button.write-policy-blocked{font-weight:600!important}.write-safety-lock{display
 .map-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.map-modal-grid .modal-field{margin:0}.map-modal-grid .map-water-field{grid-column:1/-1}
 .map-explore-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.map-explore-actions .map-explore-copy{flex:1;min-width:170px;color:#8c7c6e;font-size:12px;line-height:1.45}
 .map-modal-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:14px}.map-modal-actions .map-modal-spacer{flex:1}
-@media (max-width:760px){.map-tool-group{gap:3px}.map-tool-group .map-tool-label{display:none}.map-modal-grid{grid-template-columns:1fr}.map-modal-grid .map-water-field{grid-column:auto}.map-explore-menu .map-explore-popover{right:auto;left:0}}
+@media (max-width:1100px){.map-edit-select{width:250px}}
+@media (max-width:760px){.map-command-header h1{display:none}.map-tool-group{gap:3px}.map-tool-group .map-tool-label{display:none}.map-edit-search{width:145px}.map-edit-select{width:210px}.map-modal-grid{grid-template-columns:1fr}.map-modal-grid .map-water-field{grid-column:auto}.map-explore-menu .map-explore-popover{right:auto;left:0}}
 .tech-tree-overlay{z-index:1200;background:rgba(18,11,5,.66);padding:28px}
 .tech-window{width:min(1420px,96vw);height:min(860px,92vh);display:flex;flex-direction:column;overflow:hidden;border:7px solid #9a681e;border-radius:28px;background:linear-gradient(145deg,#4a260f,#7c4218 18%,#351907 92%);box-shadow:0 16px 70px rgba(0,0,0,.62),inset 0 0 0 3px #e2bd58;color:#fff}
 .tech-top{min-height:96px;display:flex;align-items:center;gap:16px;padding:18px 28px;border-bottom:2px solid rgba(245,203,98,.42);background:linear-gradient(180deg,rgba(32,14,4,.28),rgba(123,69,28,.28))}
@@ -284,6 +296,11 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 .creature-category{min-width:80px}
 .creature-selection-panel:empty{display:none}
 
+/* Compact, readable helper text and status copy. */
+.item-quick-note,.recipe-browser-note,.recipe-editor-help,.dwarf-readonly-note,.dwarf-spawn-note,.dwarf-preset-note,.update-center-note,.update-center-action-help,.portal-director-note,.mana-control-note,.xp-control-note{color:#b7c9da!important;font-size:13px!important;font-weight:600;line-height:1.55!important}
+.map-protection{font-weight:600;line-height:1.5}.map-protection .map-protection-copy b{font-size:14px;margin-bottom:2px}.map-info-card,.map-info-card span,.map-info-card b{color:#5c4e40!important;font-weight:700}
+#mapShortcutHint{color:#b7c9da!important;font-size:13px!important;font-weight:600}
+
 /* Inline legacy surfaces used by pet, Pandora and map cards. */
 #petCard>div[style*="background"],#petCard>section[style*="background"],
 #pandoraCard>div[style*="background"],#pandoraCard>section[style*="background"],
@@ -347,12 +364,23 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <style id="dwarfTrainingMergedEquipmentStyle">
 .dwarf-training-equipment-card{grid-column:1/-1;min-width:0;padding:10px 11px;border:1px solid #E7D7C6;border-radius:10px;background:#FFFCF8}.dwarf-training-equipment-card>label{display:flex;align-items:baseline;gap:8px;margin-bottom:8px!important}.dwarf-training-equipment-card>label small{color:#A98C6A;font-size:11px;font-weight:500}.dwarf-training-equipment-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.dwarf-training-equipment-slot{min-width:0;padding:7px;border:1px solid #E9DED2;border-radius:8px;background:#FFF}.dwarf-training-equipment-slot.experimental{border-color:#E7C98F;background:#FFFBEF}.dwarf-training-equipment-slot-title{display:flex;justify-content:space-between;gap:5px;align-items:center;margin:0 0 5px;color:#886443;font-size:11px;font-weight:800}.dwarf-training-equipment-slot-title em{padding:2px 5px;border-radius:6px;background:#EAF5E9;color:#4F8B50;font-size:10px;font-style:normal;white-space:nowrap}.dwarf-training-equipment-slot.experimental .dwarf-training-equipment-slot-title em{background:#FFF0D5;color:#B77322}.dwarf-training-equipment-slot select{width:100%;min-width:0;font-size:12px}@media(max-width:850px){.dwarf-training-equipment-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.dwarf-training-controls{grid-template-columns:1fr!important}.dwarf-training-equipment-grid{grid-template-columns:1fr}}
 </style>
+<style id="readableHelperOverrides">
+/* Readable, concise helper copy for the dark desktop surface. */
+.item-quick-note,.recipe-browser-note,.recipe-editor-help,.dwarf-readonly-note,.dwarf-spawn-note,.dwarf-preset-note,.update-center-note,.update-center-action-help,.portal-director-note,.mana-control-note,.xp-control-note{color:#c3d2e3!important;font-size:13px!important;font-weight:600;line-height:1.55!important}
+.map-protection{font-weight:600;line-height:1.5}.map-protection .map-protection-copy b{font-size:14px;margin-bottom:2px}.map-info-card,.map-info-card span,.map-info-card b{color:#5c4e40!important;font-weight:700}
+#mapShortcutHint{color:#c3d2e3!important;font-size:13px!important;font-weight:600}
+</style>
+<style id="overviewPageStyle">
+/* Startup overview: a compact, read-only world snapshot using the existing warm desktop surface. */
+#top-command-dock.overview-mounted{display:none}
+.overview-page{gap:18px;padding-bottom:22px}.overview-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}.overview-eyebrow{margin-bottom:4px;color:#A96A22;font-size:12px;font-weight:800;letter-spacing:.08em}.overview-head h1{margin:0;color:#5C4E40;font-size:26px;line-height:1.15}.overview-head-copy{margin-top:7px;color:#8C7C6E;font-size:13px}.overview-read-button{min-height:38px;padding:0 14px}.overview-toolbar-host{min-height:52px;padding:12px 14px;border:1px solid #E7D8CB;border-radius:12px;background:rgba(255,252,249,.9);box-shadow:0 3px 12px rgba(123,86,53,.06)}.overview-toolbar-host #top-bar{margin:0!important}.overview-toolbar-host #top-bar .log-msg{max-width:360px}.overview-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(330px,.85fr);gap:14px}.overview-surface{min-width:0;border:1px solid #E8D8CB;border-radius:12px;background:rgba(255,255,255,.86);box-shadow:0 3px 13px rgba(128,92,59,.06)}.overview-world{padding:22px}.overview-section-title{display:flex;align-items:center;gap:9px;color:#72533C;font-size:13px;font-weight:800;letter-spacing:.05em}.overview-section-title svg{width:18px;height:18px;color:#C8752A;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.overview-day{margin:18px 0 6px;color:#5C4E40;font-size:36px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}.overview-day span{margin-left:6px;color:#8F7561;font-size:14px;font-weight:600}.overview-world-name{color:#5C4E40;font-size:19px;font-weight:800}.overview-world-subtitle{margin-top:5px;color:#957C69;font-size:13px}.overview-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin-top:19px;border-top:1px solid #F0E5DB}.overview-fact{min-width:0;padding:13px 12px 0 0}.overview-fact:nth-child(n+4){padding-top:16px}.overview-fact-label{display:block;margin-bottom:4px;color:#9A806F;font-size:11px;font-weight:700}.overview-fact-value{display:block;overflow:hidden;color:#614C3D;font-size:14px;font-weight:800;text-overflow:ellipsis;white-space:nowrap}.overview-runtime{display:flex;flex-direction:column;padding:20px}.overview-runtime-state{margin:16px 0 6px;color:#5C4E40;font-size:21px;font-weight:800;line-height:1.25}.overview-runtime-detail{color:#927863;font-size:13px;line-height:1.55}.overview-runtime-meta{margin-top:auto;padding-top:16px;border-top:1px solid #F0E5DB}.overview-meta-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;color:#927863;font-size:12px}.overview-meta-row b{max-width:68%;overflow:hidden;color:#614C3D;font-weight:800;text-align:right;text-overflow:ellipsis;white-space:nowrap}.overview-shortcuts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.overview-shortcut{min-width:0;min-height:110px;padding:15px;border:1px solid #E8D8CB;border-radius:11px;background:rgba(255,255,255,.8);color:#5C4E40;text-align:left;transition:border-color .18s ease,background-color .18s ease,box-shadow .18s ease}.overview-shortcut:hover{border-color:#D69A63;background:#FFF9F4;box-shadow:0 5px 14px rgba(151,92,39,.10)}.overview-shortcut svg{width:21px;height:21px;margin-bottom:12px;color:#C8752A;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.overview-shortcut strong,.overview-shortcut span{display:block}.overview-shortcut strong{font-size:14px}.overview-shortcut span{margin-top:4px;overflow:hidden;color:#967D69;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.overview-note{padding:12px 14px;border-left:3px solid #E2A05E;border-radius:8px;background:#FFF8F1;color:#816650;font-size:12px;line-height:1.55}.overview-page[data-state="offline"] .overview-day{color:#A69080}.overview-page[data-state="offline"] .overview-world-name,.overview-page[data-state="offline"] .overview-runtime-state{color:#806C5C}@media(max-width:1120px){.overview-grid{grid-template-columns:1fr}.overview-runtime{min-height:205px}.overview-shortcuts{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:720px){.overview-head{align-items:flex-start;flex-direction:column}.overview-toolbar-host #top-bar{align-items:stretch}.overview-toolbar-host #top-bar button{flex:1 1 auto}.overview-toolbar-host .local-sync-help,.overview-toolbar-host .log-msg{display:none}.overview-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-fact:nth-child(n+4){padding-top:13px}.overview-shortcuts{grid-template-columns:1fr}.overview-shortcut{min-height:76px}.overview-shortcut svg{float:left;margin:1px 10px 0 0}.overview-day{font-size:31px}}@media(prefers-reduced-motion:reduce){.overview-shortcut{transition:none}}
+</style>
 </head>
 <body>
 <div class="app-titlebar pywebview-drag-region" ondblclick="titlebarToggleMaximize(event)" aria-label="打造世界修改器窗口标题栏">
-    <div class="app-titlebar-brand" aria-label="打造世界修改器 v1.0.1">
+    <div class="app-titlebar-brand" aria-label="打造世界修改器 v1.1">
         <svg class="app-titlebar-icon" aria-hidden="true" viewBox="0 0 32 32"><defs><linearGradient id="appIconBg" x1="4" y1="3" x2="28" y2="30" gradientUnits="userSpaceOnUse"><stop stop-color="#F49A3D"/><stop offset="1" stop-color="#C45F25"/></linearGradient><linearGradient id="appIconGem" x1="12" y1="10" x2="21" y2="22" gradientUnits="userSpaceOnUse"><stop stop-color="#FFF2AF"/><stop offset="1" stop-color="#FFD258"/></linearGradient></defs><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8" fill="url(#appIconBg)"/><path d="M7 24.5 21.4 10.1M9 8.5c4.2-2.1 8.9-1.5 12.5.6M19.6 9.2c2.1 3.6 2.7 8.3.6 12.5" stroke="#4B3024" stroke-width="3.15" stroke-linecap="round"/><path d="m16.4 9.6 2.2-2.2a2.05 2.05 0 0 1 2.9 0l2.1 2.1a2.05 2.05 0 0 1 0 2.9l-2.2 2.2" fill="none" stroke="#4B3024" stroke-width="2.35" stroke-linecap="round"/><path d="m16 14.1 4.7 4.7-4.7 6.4-4.7-6.4L16 14.1Z" fill="url(#appIconGem)" stroke="#75442A" stroke-width="1.35" stroke-linejoin="round"/><path d="m16 14.1 0 11.1m-4.7-6.4h9.4" stroke="#A35B2E" stroke-width="1.05" stroke-linejoin="round"/></svg>
-        <span>打造世界修改器</span><span class="app-titlebar-version">v1.0.1</span>
+        <span>打造世界修改器</span><span class="app-titlebar-version">v1.1</span>
     </div>
     <span class="app-titlebar-drag-copy" aria-hidden="true">Craft The World Modifier</span>
     <div class="app-titlebar-spacer" aria-hidden="true"></div>
@@ -364,13 +392,14 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 </div>
 <div class="sidebar">
     <div class="logo">CraftWorld</div>
-    <div class="nav-item active" onclick="switchTab('basic')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg></span> 基础功能</div>
+    <div class="nav-item active" onclick="switchTab('overview')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></span> 总览</div>
+    <div class="nav-item" onclick="switchTab('basic')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg></span> 基础功能</div>
     <div class="nav-item" onclick="switchTab('dwarf')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="7" r="3"/><path d="M5 21c.7-4.2 3-6.3 7-6.3s6.3 2.1 7 6.3M4 11h4M16 11h4"/></svg></span> 生物</div>
     <div class="nav-item" onclick="switchTab('item')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m4 7 8-4 8 4-8 4-8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></svg></span> 物品</div>
     <div class="nav-item" onclick="switchTab('magic')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m14 4 6 6M5 19l7.5-7.5M3 21l3-1 12-12-2-2L4 18l-1 3Z"/><path d="M18 15v6M15 18h6"/></svg></span> 魔法</div>
     <div class="nav-item" onclick="switchTab('other')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3Z"/><path d="m19 15 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7L19 15Z"/></svg></span> 其它功能</div>
     <div class="nav-item" onclick="switchTab('map')"><span aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg></span> 地图</div>
-    <div class="sidebar-footer" aria-label="项目与作者信息"><a class="sidebar-footer-link" href="https://github.com/dszwamn/CraftWorldModifier" onclick="openProjectGithub(event)" title="打开 GitHub 开源项目页面">开源项目</a><span class="sidebar-footer-contact" aria-label="QQ：2941791497"><span aria-hidden="true">🐧</span>：2941791497</span><span class="sidebar-footer-version">v1.0.1 · 正式版</span></div>
+    <div class="sidebar-footer" aria-label="项目与作者信息"><a class="sidebar-footer-link" href="https://github.com/dszwamn/CraftWorldModifier" onclick="openProjectGithub(event)" title="打开 GitHub 开源项目页面">开源项目</a><span class="sidebar-footer-contact" aria-label="QQ：2941791497"><span aria-hidden="true">🐧</span>：2941791497</span><span class="sidebar-footer-version">v1.1 · 正式版</span></div>
 </div>
 <div class="main">
     <div id="top-command-dock">
@@ -378,18 +407,51 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
         <button id="connBtn" class="btn-conn" onclick="toggleConnect()"><svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-3px;margin-right:5px"><path d="M8 3v6M16 3v6M5 8h14v2a7 7 0 0 1-14 0V8ZM12 17v4"/></svg>连接游戏</button>
         <span class="conn-info"><span class="dot off" id="connDot"></span><span id="connText">JS已加载!</span></span>
         <span id="statusExtra" class="conn-info"></span>
-        <span id="gameVersionChip" class="game-version-chip" role="status" aria-atomic="true" data-state="disconnected" title="连接 CraftWorld.exe 后读取游戏版本信息">游戏：<b id="gameVersionText">未连接</b></span>
-        <button id="localSyncBtn" class="local-sync-button" onclick="syncLocalData()" title="重新读取游戏本体与已安装模组的本地数据"><span aria-hidden="true">↻</span> 本地同步</button>
-        <span class="local-sync-help">如有新加模组，请先同步</span>
+        <button id="localSyncBtn" class="local-sync-button" onclick="readEmbeddedData()" title="读取修改器内嵌的结构、潘多拉与科技树数据"><span aria-hidden="true">↻</span> 读取</button>
         <span id="localSyncStatus" class="local-sync-status"></span>
         <button id="saveManagerBtn" class="save-manager-button" onclick="openSaveManager()" title="只能在 CraftWorld.exe 关闭后备份、校验和恢复"><span aria-hidden="true">▣</span> 离线存档</button>
         <button id="worldDiagnosticsBtn" class="save-manager-button" onclick="openWorldDiagnostics()" title="查看任务与世界运行时状态" style="display:none"><span aria-hidden="true">◎</span> 世界诊断</button>
         <button class="operation-log-button" onclick="openOperationLog()" title="查看本次修改器会话的操作记录"><span aria-hidden="true">≡</span> 操作记录<span class="operation-log-count" id="operationLogCount">0</span></button>
-        <button id="updateVersionChip" class="update-version-chip" type="button" onclick="openUpdateCenter()" title="当前版本与启动时检查到的 GitHub 最新版本" aria-label="打开更新中心"><span>当前 <b id="updateCurrentVersion">v1.0.1</b> · 最新 <b id="updateLatestVersion">未检查</b></span></button>
+        <button id="updateVersionChip" class="update-version-chip" type="button" onclick="openUpdateCenter()" title="当前版本与启动时检查到的 GitHub 最新版本" aria-label="打开更新中心"><span>当前 <b id="updateCurrentVersion">v1.1</b> · 最新 <b id="updateLatestVersion">未检查</b></span></button>
         <span id="logText" class="log-msg"></span>
     </div>
     </div>
-    <div class="panel active" id="panel-basic">
+    <div class="panel active overview-page" id="panel-overview" data-state="offline">
+        <div class="overview-head">
+            <div><div class="overview-eyebrow">CRAFTWORLD MODIFIER</div><h1>游戏总览</h1><p class="overview-head-copy">连接游戏后自动同步当前世界与存档状态。</p></div>
+        </div>
+        <div id="overviewToolbarHost" class="overview-toolbar-host" aria-label="游戏连接与修改器操作"></div>
+        <div class="overview-grid">
+            <section class="overview-surface overview-world" aria-labelledby="overviewWorldTitle">
+                <div class="overview-section-title" id="overviewWorldTitle"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6.5 9 3l6 3.5L21 3v14.5L15 21l-6-3.5L3 21V6.5Z"/><path d="M9 3v14.5M15 6.5V21"/></svg>当前世界</div>
+                <div class="overview-day" id="overviewDay">--<span>天</span></div>
+                <div class="overview-world-name" id="overviewWorldName">等待连接游戏</div>
+                <div class="overview-world-subtitle" id="overviewWorldSubtitle">连接后将读取模式、世界类型与存档参数</div>
+                <div class="overview-facts">
+                    <div class="overview-fact"><span class="overview-fact-label">模式</span><strong class="overview-fact-value" id="overviewMode">未读取</strong></div>
+                    <div class="overview-fact"><span class="overview-fact-label">规格</span><strong class="overview-fact-value" id="overviewSize">未读取</strong></div>
+                    <div class="overview-fact"><span class="overview-fact-label">湿度设定</span><strong class="overview-fact-value" id="overviewWeather">未读取</strong></div>
+                    <div class="overview-fact"><span class="overview-fact-label">地形</span><strong class="overview-fact-value" id="overviewTerrain">未读取</strong></div>
+                    <div class="overview-fact"><span class="overview-fact-label">难度</span><strong class="overview-fact-value" id="overviewDifficulty">未读取</strong></div>
+                    <div class="overview-fact"><span class="overview-fact-label">科技模式</span><strong class="overview-fact-value" id="overviewTechMode">未读取</strong></div>
+                </div>
+            </section>
+            <section class="overview-surface overview-runtime" aria-labelledby="overviewRuntimeTitle">
+                <div class="overview-section-title" id="overviewRuntimeTitle"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="6"/></svg>运行状态</div>
+                <div class="overview-runtime-state" id="overviewRuntimeState">等待连接</div>
+                <div class="overview-runtime-detail" id="overviewRuntimeDetail">连接游戏后会显示当前进程与世界数据的读取状态。</div>
+                <div class="overview-runtime-meta"><div class="overview-meta-row"><span>游戏版本</span><b id="overviewGameVersion">未连接</b></div><div class="overview-meta-row"><span>昼夜状态</span><b id="overviewTimeState">未读取</b></div></div>
+            </section>
+        </div>
+        <section aria-label="快捷入口"><div class="overview-section-title" style="margin:2px 0 10px"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 12h16M12 4v16"/></svg>快捷入口</div><div class="overview-shortcuts">
+            <button class="overview-shortcut" type="button" onclick="switchTab('basic')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg><strong>基础功能</strong><span>资源、时间与速度</span></button>
+            <button class="overview-shortcut" type="button" onclick="switchTab('dwarf')"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="7" r="3"/><path d="M5 21c.7-4.2 3-6.3 7-6.3s6.3 2.1 7 6.3"/></svg><strong>生物管理</strong><span>矮人、宠物与怪物</span></button>
+            <button class="overview-shortcut" type="button" onclick="switchTab('item')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 7 8-4 8 4-8 4-8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></svg><strong>物品与配方</strong><span>库存、分类与配方</span></button>
+            <button class="overview-shortcut" type="button" onclick="switchTab('map')"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg><strong>地图编辑</strong><span>地图、结构与实体</span></button>
+        </div></section>
+        <div class="overview-note" id="overviewNotice">首页只读取数据，不修改游戏或存档。</div>
+    </div>
+    <div class="panel" id="panel-basic">
         <div class="header" style="display:flex;align-items:center;gap:12px"><h1 style="flex:1">基础功能</h1><span id="basicReadStatus" style="font-size:12px;color:#A98C6A">等待读取</span><button class="btn btn-light" onclick="refreshBasicState(true)">↻ 重新读取</button></div>
         <div class="cards">
             <div class="card">
@@ -398,8 +460,8 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
                     <input id="goldVal" value="" placeholder="未读取" style="width:120px">
                     <button class="btn btn-light" onclick="refreshBasicState(true)">读取</button>
                     <button class="btn btn-peach" onclick="writeBasicValue('金币','goldVal','write_gold',true)">修改</button>
-                    <button class="btn btn-light" onclick="writeBasicFixed('金币','goldVal','write_gold',1000)">+1K</button>
-                    <button class="btn btn-light" onclick="writeBasicFixed('金币','goldVal','write_gold',10000)">+10K</button>
+                    <button class="btn btn-light" onclick="writeBasicFixed('金币','goldVal','write_gold',100)">+100</button>
+                    <button class="btn btn-light" onclick="writeBasicFixed('金币','goldVal','write_gold',500)">+500</button>
                     <button class="btn btn-light lock-btn" id="goldLock" onclick="toggleLock('gold')">🔓</button>
                 </div>
             </div>
@@ -428,8 +490,8 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <div class="card">
                 <div class="card-title">倒计时 <span id="timerReadHint" style="font-weight:400;color:#B8A89A;font-size:11px">未读取</span></div>
                 <div class="row">
-                    <input id="timerMin" class="ti" value="" placeholder="未读取"><span class="ts">:</span>
-                    <input id="timerSec" class="ti" value="" placeholder="未读取">
+                    <input id="timerMin" class="ti" value="" inputmode="numeric" title="分钟" placeholder="分"><span class="ts">:</span>
+                    <input id="timerSec" class="ti" value="" inputmode="numeric" title="秒（0-59）" placeholder="秒">
                     <button class="btn btn-light" onclick="refreshBasicState(true)">读取</button>
                     <button class="btn btn-peach" onclick="modifyTimer()">修改</button>
                     <button class="btn btn-light lock-btn" id="countdownTimerLock" onclick="toggleTimerLock('countdown')" title="锁定当前倒计时">🔓</button>
@@ -492,6 +554,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             </div>
             <div class="card wide" id="petCard">
                 <div class="card-title" style="display:flex;align-items:center;gap:8px">🐶 宠物 <span id="petManagerStatus" style="font-size:12px;font-weight:400;color:#8C7C6E">连接后自动读取</span><button class="btn btn-light" onclick="refreshPetManager(true)" style="margin-left:auto;padding:6px 10px">↻ 刷新</button><button class="btn btn-light" onclick="openPetLegacy()" style="padding:6px 10px">旧版功能</button></div>
+                <div style="margin-top:4px;color:#9A806F;font-size:12px;line-height:1.5">无“矮人姐妹花”DLC时，宠物功能无法使用。</div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap;padding:10px;border:1px solid #E9DED4;border-radius:9px;background:#FFFCF9"><span id="petHouseSummary" style="font-size:14px;font-weight:700;color:#5C4E40">宠物屋：未读取</span><span id="petGeneratedSummary" style="font-size:13px;color:#8C7C6E">宠物屋状态：未读取</span><span id="petLiveSummary" style="font-size:13px;color:#4E7D58">实际宠物：未读取</span><span id="petLimitSummary" style="font-size:13px;color:#765A40">宠物上限：未读取</span></div>
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;padding:9px 10px;border:1px solid #E8D8C9;border-radius:9px;background:#FFF9F4"><b style="font-size:13px;color:#765A40">宠物上限</b><span id="petLimitState" style="font-size:12px;color:#8C7C6E">自动规则读取中</span><input id="petLimitInput" type="number" min="1" max="999" step="1" placeholder="本局上限" style="width:92px;height:30px;border:1px solid #DCCBBE;border-radius:7px;padding:0 7px;font:inherit"><button class="btn btn-peach" onclick="setPetLimitOverride()" style="padding:6px 11px">应用本局</button><button class="btn btn-light" onclick="clearPetLimitOverride()" style="padding:6px 11px">恢复自动</button><span style="font-size:11px;color:#9A806F">只改变本局原生上限，不会自动删除超出上限的宠物</span></div>
                 <div id="petHouseList" style="min-height:120px;max-height:310px;overflow:auto;margin-top:9px;border:1px solid #E9DED4;border-radius:9px;background:#fff"></div>
@@ -629,7 +692,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
                 <button class="btn btn-peach" onclick="addItemQuickSetting()" style="height:36px;padding:0 15px">＋ 加入常用</button>
             </div>
             <div id="itemQuickList" style="display:grid;gap:7px;max-height:310px;overflow:auto;padding-right:3px"></div>
-            <div class="item-quick-note">目标数量留空时不修改数量；勾选“锁定”会在写入数量后锁定该数值。每项设置都会保存到 marks.json。</div>
+            <div class="item-quick-note">留空不修改；锁定后保持目标数量。</div>
         </div>
 
     <div class="item-list" id="itemList">
@@ -638,40 +701,54 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
    </div>
 
    <div class="panel" id="panel-map">
-        <div class="header" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="header map-command-header" style="display:flex;align-items:center">
             <h1 style="flex:1;font-size:22px;font-weight:700;color:#5C4E40;margin:0;white-space:nowrap">🗺️ 地图</h1>
-            <button class="btn btn-light" data-map-write onclick="mapUndo()" title="撤销地图写入" aria-label="撤销" style="display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;padding:0;font-size:22px;border:none;border-radius:8px;cursor:pointer">↶</button>
-            <button class="btn btn-light" data-map-write onclick="mapRedo()" title="重做地图写入" aria-label="重做" style="display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;padding:0;font-size:22px;border:none;border-radius:8px;cursor:pointer">↷</button>
-            <button class="btn btn-light" onclick="mapScan()" title="重新读取当前视口附近的地图格" style="display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 20px;font-size:15px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;margin:0;vertical-align:middle">🔄 刷新视口</button>            <button id="mapEditToggle" class="btn btn-light" onclick="mapToggleWriteMode()" title="开启当前连接会话的地图编辑" style="display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 18px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;margin:0;vertical-align:middle">✏️ 开启地图编辑</button>
+            <div class="map-top-actions" aria-label="地图读取与编辑">
+                <button class="btn btn-light" data-map-write onclick="mapUndo()" title="撤销地图写入" aria-label="撤销" style="display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;padding:0;font-size:22px;border:none;border-radius:8px;cursor:pointer">↶</button>
+                <button class="btn btn-light" data-map-write onclick="mapRedo()" title="重做地图写入" aria-label="重做" style="display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;padding:0;font-size:22px;border:none;border-radius:8px;cursor:pointer">↷</button>
+                <button class="btn btn-light" onclick="mapScan()" title="重新读取当前视口附近的地图格" style="display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 18px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box">刷新视口</button>
+                <button class="btn btn-light" onclick="mapLoadStructures()" title="读取当前存档中由游戏原生结构容器确认的结构" style="display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 14px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box">读取结构</button>
+                <button class="btn btn-light" onclick="mapLoadWorldObjects(false)" title="读取龙蛋、门等不属于地图方块的独立游戏对象" style="display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 14px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box">读取对象</button>
+                <button id="mapEditToggle" class="btn btn-light" onclick="mapToggleWriteMode()" title="开启当前连接会话的地图编辑" style="display:inline-flex;align-items:center;justify-content:center;height:42px;padding:0 16px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box">开启地图编辑</button>
+            </div>
         </div>
         <div class="map-protection" id="mapProtectionNotice" role="status">
             <span class="map-protection-state" id="mapProtectionState">🛡️ 安全只读</span>
-            <div class="map-protection-copy"><b id="mapProtectionTitle">地图方块写入已暂停</b><span id="mapProtectionDetail">可继续读取、刷新、定位、标记、框选和查看图层；替换、清空、填充、撤销/重做暂不写入游戏，避免寻路和碰撞数据损坏导致延迟崩溃。</span></div>
+            <div class="map-protection-copy"><b id="mapProtectionTitle">地图方块写入已暂停</b><span id="mapProtectionDetail">可读取、定位、标记和框选；修改地图前请先开启编辑。</span></div>
         </div>
-        <div class="row" style="margin:12px 0;align-items:center;gap:8px;flex-wrap:wrap">
-            <span style="color:#6B5B4F;font-size:14px">方块</span>
-            <input id="mapBlockSearch" placeholder="搜索 ID/中文/英文" style="height:34px;padding:0 10px;border:1px solid #E0D6CC;border-radius:6px;font-size:13px;font-family:inherit;color:#333;outline:none;width:180px">
-            <select id="mapBlock" style="height:36px;padding:0 10px;border:1px solid #DDD;border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:#333;outline:none;min-width:260px"></select>
-            <span style="color:#6B5B4F;font-size:14px">行</span>
-            <input id="mapRow" value="50" style="width:58px;height:34px;padding:0 8px;border:1px solid #E0D6CC;border-radius:6px;font-size:14px;font-family:inherit;color:#333;outline:none">
-            <span style="color:#6B5B4F;font-size:14px">列</span>
-            <input id="mapCol" value="115" style="width:58px;height:34px;padding:0 8px;border:1px solid #E0D6CC;border-radius:6px;font-size:14px;font-family:inherit;color:#333;outline:none">
-            <button class="btn btn-peach" data-map-write onclick="mapReplaceInput()" title="选择修改内层、外层或两个图层" style="display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 18px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;vertical-align:middle">替换</button>
-            <button class="btn btn-light" data-map-write onclick="mapClearInput()" style="display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 14px;font-size:14px;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600;box-sizing:border-box;vertical-align:middle">清空此格</button>
-            <span id="mapInfo" style="display:block;margin-top:6px;padding:8px 10px;border:1px solid #E2D6CC;border-radius:7px;background:#FFFCF8;color:#5C4E40;font-size:14px;font-weight:600;line-height:1.5;white-space:normal"></span>
+        <div class="map-edit-bar" aria-label="地图方块操作">
+            <div class="map-edit-group">
+                <span class="map-edit-label">方块</span>
+                <input id="mapBlockSearch" class="map-edit-search" placeholder="搜索 ID/中文/英文">
+                <select id="mapBlock" class="map-edit-select" onchange="mapUpdateFavoriteButton()"></select>
+                <button id="mapFavoriteToggle" class="btn btn-light map-edit-star" onclick="mapToggleFavoriteCurrent()" title="收藏或取消收藏当前方块" aria-label="收藏当前方块">☆</button>
+            </div>
+            <div class="map-edit-group">
+                <label class="map-edit-label" for="mapRow">行</label><input id="mapRow" class="map-edit-number" value="50">
+                <label class="map-edit-label" for="mapCol">列</label><input id="mapCol" class="map-edit-number" value="115">
+            </div>
+            <div class="map-edit-group">
+                <button class="btn btn-peach map-edit-action" data-map-write onclick="mapReplaceInput()" title="选择修改内层、外层或两个图层">替换</button>
+                <button class="btn btn-light map-edit-action" data-map-write onclick="mapClearInput()" title="有框选时清空整个选区，否则清空当前行列">清空选区</button>
+                <button class="btn btn-light map-edit-action" onclick="mapClearSpecialEntitiesInSelection()" title="只删除框选内已识别的特殊实体；不清空方块、水或地图结构">清除结构</button>
+            </div>
         </div>
+        <div id="mapInfo" class="map-info-card" role="status" aria-live="polite"></div>
         <div class="map-toolbar" aria-label="地图工具栏">
+            <div class="map-toolbar-row" aria-label="地图显示设置">
             <div class="map-tool-group"><span class="map-tool-label">视图</span>
-                <button id="mapViewTerrain" class="btn btn-light" onclick="mapSetView('terrain')">地形</button><button id="mapViewEntities" class="btn btn-light" onclick="mapSetView('entities')">实体</button><button id="mapViewComposite" class="btn btn-light" onclick="mapSetView('composite')">组合</button><button id="mapViewWater" class="btn btn-light" onclick="mapSetView('water')">水量</button><button id="mapViewExplored" class="btn btn-light" onclick="mapSetView('explored')">探索</button>
+                <button id="mapViewTerrain" class="btn btn-light" onclick="mapSetView('terrain')">地形</button><button id="mapViewEntities" class="btn btn-light" onclick="mapSetView('entities')" title="仅显示地图外层方块 ID">外层</button><button id="mapViewComposite" class="btn btn-light" onclick="mapSetView('composite')">组合</button><button id="mapViewWater" class="btn btn-light" onclick="mapSetView('water')">水量</button><button id="mapViewExplored" class="btn btn-light" onclick="mapSetView('explored')">探索</button>
             </div>
             <div class="map-tool-group"><span class="map-tool-label">标注</span>
                 <button id="mapLabelNone" class="btn btn-light" onclick="mapSetLabels('none')">隐藏</button><button id="mapLabelNames" class="btn btn-light" onclick="mapSetLabels('names')">名称</button><button id="mapLabelIds" class="btn btn-light" onclick="mapSetLabels('ids')">ID</button>
             </div>
             <div class="map-tool-group"><span class="map-tool-label">图层</span>
-                <button id="mapLayerGround" class="btn btn-peach" onclick="mapToggleLayer('ground')" title="显示 w2 方块层">地表</button><button id="mapLayerUnderground" class="btn btn-peach" onclick="mapToggleLayer('underground')" title="显示 bg 材质层">地下</button><button id="mapLayerWater" class="btn btn-peach" onclick="mapToggleLayer('water')">水</button><button id="mapLayerEntities" class="btn btn-peach" onclick="mapToggleLayer('entities')" title="显示 front 外层实体 ID">实体</button><button id="mapLayerMarkers" class="btn btn-peach" onclick="mapToggleLayer('markers')">标记</button>
+                <button id="mapLayerGround" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('ground')" title="显示 w2 方块层">地表</button><button id="mapLayerUnderground" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('underground')" title="显示 bg 材质层">地下</button><button id="mapLayerWater" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('water')">水</button><button id="mapLayerEntities" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('entities')" title="显示 front 外层方块 ID">外层</button><button id="mapLayerObjects" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('objects')" title="显示龙蛋、门等独立游戏对象">对象</button><button id="mapLayerStructures" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('structures')" title="按已生成结构的实际方块轮廓高亮">结构</button><button id="mapLayerMarkers" class="btn btn-peach" aria-pressed="true" onclick="mapToggleLayer('markers')">标记</button>
             </div>
+            </div>
+            <div class="map-toolbar-row" aria-label="地图编辑与选区">
             <div class="map-tool-group"><span class="map-tool-label">操作</span>
-                <button id="mapPanTool" class="btn btn-light" onclick="mapSetTool('pan')">平移</button><button id="mapSelectTool" class="btn btn-light" onclick="mapSetTool('select')">框选</button><button class="btn btn-light" onclick="mapClearSelection()">清除</button><button class="btn btn-peach" data-map-write onclick="mapFillSelection()">填充</button>
+                <button id="mapPanTool" class="btn btn-light" onclick="mapSetTool('pan')">平移</button><button id="mapSelectTool" class="btn btn-light" onclick="mapSetTool('select')">框选</button><button class="btn btn-light" onclick="mapClearSelection()">清除</button><button class="btn btn-peach" data-map-write onclick="mapFillSelection()">填充</button><button id="mapCopyCancel" class="btn btn-light" onclick="mapCancelClipboard()" style="display:none" title="取消当前方块复制预览">取消复制</button>
             </div>
             <div class="map-tool-group"><span class="map-tool-label">选区快捷</span>
                 <button class="btn btn-light" data-map-write onclick="mapClearWaterSelection()" title="仅把选区水量设为 0，保留所有方块">抽干水</button><button class="btn btn-peach" data-map-write onclick="mapFillWaterSelection()" title="仅把选区水量设为 31，保留所有方块">设满水</button><button class="btn btn-peach" data-map-write onclick="mapSetExploredSelection(true)">已探索</button><button class="btn btn-light" data-map-write onclick="mapSetExploredSelection(false)">未探索</button>
@@ -679,21 +756,42 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <div class="map-tool-group"><span class="map-tool-label">探索</span>
                 <button class="btn btn-peach" data-map-write onclick="mapExploreAll()" title="仅清除整张地图的未探索标记，不修改方块、地形或水">全图已探索</button>
             </div>
+            </div>
+            <div class="map-toolbar-row" aria-label="地图导航与标记">
             <div class="map-tool-group"><span class="map-tool-label">导航</span>
-                <button class="btn btn-light" onclick="mapZoomIn()">＋</button><button class="btn btn-light" onclick="mapZoomOut()">－</button><button class="btn btn-light" onclick="mapFit()">适应</button><button class="btn btn-light" onclick="mapLocateInput()">定位</button><button class="btn btn-light" onclick="mapFindSelectedResource()" title="只在点击后扫描一次当前地图，查找上方选中的方块">找资源</button><select id="mapDwarves" onchange="mapJumpDwarf(this.value)" title="&#x5FEB;&#x901F;&#x5B9A;&#x4F4D;&#x77EE;&#x4EBA;" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">&#x77EE;&#x4EBA;</option></select><button class="btn btn-light" onclick="mapOpenPinDialog()">标记</button><select id="mapPins" onchange="mapJumpPin(this.value)" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">标记点</option></select>
+                <button class="btn btn-light" onclick="mapZoomIn()">＋</button><button class="btn btn-light" onclick="mapZoomOut()">－</button><button class="btn btn-light" onclick="mapFit()">适应</button><button class="btn btn-light" onclick="mapLocateInput()">定位</button><select id="mapDwarves" onchange="mapJumpDwarf(this.value)" title="&#x5FEB;&#x901F;&#x5B9A;&#x4F4D;&#x77EE;&#x4EBA;" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">&#x77EE;&#x4EBA;</option></select><button class="btn btn-light" onclick="mapOpenPinDialog()">标记</button><select id="mapPins" onchange="mapJumpPin(this.value)" style="height:29px;max-width:150px;padding:0 7px;border:1px solid #DDD;border-radius:6px;font-size:12px;font-family:inherit;background:#fff;color:#333"><option value="">标记点</option></select>
+            </div>
             </div>
         </div>
         <div style="position:relative;border:1px solid #E0D6CC;border-radius:8px;overflow:hidden;background:#0b0e14">
             <canvas id="mapCanvas" style="display:block;width:100%;height:auto;cursor:crosshair"></canvas>
             <canvas id="mapMiniCanvas" title="点击小地图定位" style="position:absolute;right:12px;bottom:12px;width:210px;height:92px;border:1px solid rgba(255,255,255,.45);border-radius:4px;background:#0b0e14;cursor:crosshair;box-shadow:0 2px 8px rgba(0,0,0,.38)"></canvas>
         </div>
+        <details id="specialEntityPanel" style="margin:10px 0;padding:11px 12px;border:1px solid #e8d8c9;border-radius:9px;background:#fff9f4">
+            <summary style="cursor:pointer;color:#765a40;font-weight:700">特殊实体生成（测试）</summary>
+            <div style="font-size:12px;color:#8c7c6e;margin-top:6px">坐标跟随地图点击；批量按方阵生成。“清除结构”只清除对象。</div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px"><label style="font-size:13px;color:#6e5e4d">实体 <select id="specialEntityType" onchange="specialEntitySelectedInfo()" style="height:32px;min-width:176px;padding:0 7px;border:1px solid #dccbbe;border-radius:7px;font:inherit"><option value="dragon_egg">龙蛋 · dragon_egg</option></select></label><label style="font-size:13px;color:#6e5e4d">列 <input id="specialEntityCol" type="number" min="0" value="115" style="width:70px;height:32px;border:1px solid #dccbbe;border-radius:7px;padding:0 7px;font:inherit"></label><label style="font-size:13px;color:#6e5e4d">行 <input id="specialEntityRow" type="number" min="0" value="50" style="width:70px;height:32px;border:1px solid #dccbbe;border-radius:7px;padding:0 7px;font:inherit"></label><label style="font-size:13px;color:#6e5e4d">数量 <input id="specialEntityCount" type="number" min="1" max="16" value="1" style="width:54px;height:32px;border:1px solid #dccbbe;border-radius:7px;padding:0 7px;font:inherit"></label><label style="font-size:13px;color:#6e5e4d">间距 <input id="specialEntitySpacing" type="number" min="1" max="12" value="3" style="width:54px;height:32px;border:1px solid #dccbbe;border-radius:7px;padding:0 7px;font:inherit"></label><button class="btn btn-orange" onclick="spawnSpecialEntity()" style="padding:7px 13px">生成实体</button><button id="specialEntityBatchButton" class="btn btn-peach" onclick="spawnSpecialEntityBatch()" style="padding:7px 13px">批量生成</button><button class="btn btn-light" onclick="loadSpecialEntityCatalog()" style="padding:7px 10px">读取状态</button><span id="specialEntityStatus" style="font-size:12px;color:#8c7c6e">等待操作</span></div>
+        </details>
         <div class="row" style="margin-top:8px;gap:14px;flex-wrap:wrap;color:#B8A89A;font-size:12px">
-            <span>框选：普通替换，Shift 添加，Ctrl 移除；右键拖拽平移</span>
+            <span id="mapShortcutHint" title="普通框选；Shift 添加；Ctrl 移除">复制：Ctrl+C · 双击放置 · Esc 取消</span>
             <span id="mapSelectionInfo">未选择区域</span>
+            <span id="mapClipboardStatus"></span>
             <span id="mapWriteStatus">读取地图后显示编辑状态</span>
             <span id="mapCacheStatus">地图数据：尚未读取</span>
-            <span>w2 为方块 ID，bg 为材质</span>
         </div>
+        <details id="nativeStructurePanel" style="margin:10px 0;padding:11px 12px;border:1px solid #e8d8c9;border-radius:9px;background:#fff9f4">
+            <summary style="cursor:pointer;color:#765a40;font-weight:700">添加结构（测试）</summary>
+            <div style="font-size:12px;color:#8c7c6e;margin-top:6px">使用游戏原生调用生成；请先备份存档。</div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px"><label style="font-size:13px;color:#6e5e4d">分类 <select id="structureCategory" onchange="filterStructureFiles()" style="height:32px;min-width:150px;padding:0 7px;border:1px solid #dccbbe;border-radius:7px;font:inherit"><option value="">点击“读取目录”</option></select></label><label style="font-size:13px;color:#6e5e4d">关键词 <input id="structureSearch" type="search" placeholder="中文名 / 文件名" oninput="filterStructureFiles()" style="width:150px;height:32px;padding:0 8px;border:1px solid #dccbbe;border-radius:7px;font:inherit"></label><label style="font-size:13px;color:#6e5e4d">结构 <select id="structureFile" onchange="updateStructurePreview()" style="height:32px;min-width:260px;padding:0 7px;border:1px solid #dccbbe;border-radius:7px;font:inherit"><option value="">点击“读取目录”</option></select></label><label style="font-size:13px;color:#6e5e4d">列 <input id="structureCol" type="number" min="0" value="115" oninput="updateStructurePreview()" style="width:70px;height:32px;border:1px solid #dccbbe;border-radius:7px;padding:0 7px;font:inherit"></label><label style="font-size:13px;color:#6e5e4d">行 <input id="structureRow" type="number" min="0" value="50" oninput="updateStructurePreview()" style="width:70px;height:32px;border:1px solid #dccbbe;border-radius:7px;padding:0 7px;font:inherit"></label><label style="font-size:13px;color:#6e5e4d"><input id="structureForce" type="checkbox" style="width:auto;height:auto;margin-right:4px">覆盖</label><button class="btn btn-orange" onclick="placeNativeStructure()" style="padding:7px 13px">生成结构</button><button class="btn btn-light" onclick="cancelStructurePreview()" style="padding:7px 10px">取消预览</button><button class="btn btn-light" onclick="loadStructureCatalog()" style="padding:7px 10px">读取目录</button><span id="structureStatus" style="font-size:12px;color:#8c7c6e">等待读取目录</span></div><div id="structurePreview" style="margin-top:8px;padding:7px 9px;border-radius:6px;background:#fff;color:#8c7c6e;font-size:12px">预览：请选择结构</div>
+        </details>
+        <details id="mapStructurePanel" style="margin-top:8px;border-top:1px solid #E0D6CC;padding-top:8px;font-size:12px;color:#6e5e4d">
+            <summary style="cursor:pointer;color:#765a40;font-weight:700">结构标注（点击展开）</summary>
+            <div id="mapStructureList" style="margin-top:7px;display:none"></div>
+        </details>
+        <details id="mapObjectPanel" style="margin-top:8px;border-top:1px solid #E0D6CC;padding-top:8px;font-size:12px;color:#6e5e4d">
+            <summary style="cursor:pointer;color:#765a40;font-weight:700">独立对象（点击展开）</summary>
+            <div id="mapObjectList" style="margin-top:7px;display:none"></div>
+        </details>
     </div>
 
 
@@ -705,7 +803,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
             <button class="tech-close" onclick="closeTechTree()" title="关闭">×</button>
         </div>
         <div class="tech-board-wrap"><div class="tech-board" id="techTreeBoard"><div class="tech-empty">点击物品栏中的“科技树”读取节点</div></div></div>
-        <div class="tech-help">双击节点可选择：锁定 / 可研究 / 直接完成。只有“直接完成”会解锁节点内配方并让物品出现在游戏制造栏。</div>
+        <div class="tech-help">双击节点可设为锁定、可研究或完成；完成会解锁配方。</div>
     </div>
 </div>
 
@@ -975,7 +1073,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <div class="modal-overlay" id="dwarfModal">
     <div class="modal-box dwarf-modal-box">
         <div class="modal-title">🧙 编辑矮人 <span id="modalDwarfIdx" style="font-weight:400;color:#B8A89A">#0</span></div>
-        <div class="dwarf-readonly-note">坐标、血量和饱食度会在游戏暂停事务中写入，并立即读回确认；校验失败会自动回滚。显示名只影响修改器列表，不会篡改游戏原生姓名。</div>
+        <div class="dwarf-readonly-note">保存后会立即读回；失败自动回滚。显示名仅用于修改器列表。</div>
         <div class="modal-field" style="grid-column:1/-1"><label for="modalName">修改器显示名 <span class="dwarf-editable-tag">可编辑</span></label><input id="modalName" type="text" maxlength="48" placeholder="留空则显示游戏原生姓名" title="仅修改修改器内的显示名称；不会写入游戏原生字符串"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
             <div class="modal-field"><label for="modalX">X 坐标 <span class="dwarf-editable-tag">可编辑</span></label><input id="modalX" type="number" step="0.01" min="0" max="20000" inputmode="decimal" title="范围 0 ～ 20000；保存后立即读回确认"></div>
@@ -1001,7 +1099,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <div class="modal-overlay" id="dwarfSpawnModal" onclick="if(event.target===this)closeDwarfSpawnModal()">
     <div class="modal-box dwarf-spawn-box" role="dialog" aria-modal="true" aria-labelledby="dwarfSpawnTitle">
         <div class="modal-title" id="dwarfSpawnTitle">➕ 原生矮人生成 <span style="font-size:12px;font-weight:400;color:#A18E7E">由游戏自身创建</span></div>
-        <div class="dwarf-spawn-note">修改器只提交一次游戏原生的 Worker 创建请求；对象注册、出生动画、默认属性与未填项随机均由游戏处理。指定任意个人技能时，会将新矮人的随机个人技能替换为所选技能。创建新矮人不能安全撤销。</div>
+        <div class="dwarf-spawn-note">没有“矮人姐妹花”DLC时，无法生成女性矮人。</div>
         <div class="dwarf-spawn-grid">
             <div><label for="dwarfSpawnGender">性别</label><select id="dwarfSpawnGender" onchange="dwarfSpawnGenderChanged()"><option value="random">随机</option><option value="male">男</option><option value="female">女</option></select></div>
             <div><label for="dwarfSpawnName">名字（可选）</label><select id="dwarfSpawnName"><option value="">不指定：游戏随机</option></select></div>
@@ -1023,7 +1121,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <div class="modal-overlay" id="dwarfTrainingPresetModal">
     <div class="modal-box dwarf-modal-box dwarf-training-box">
         <div class="modal-title">🧩 矮人培养预设 <span style="font-weight:400;color:#B8A89A;font-size:13px">先预览，再安全应用</span></div>
-        <div class="dwarf-preset-note"><b>使用方式：</b>勾选目标矮人 → 选择技能和装备 → 点击“预览差异” → 确认后应用。没有对应技能的矮人会在预览中跳过；“不修改”保留原装备，“无装备”会卸下对应槽位。应用后可在操作记录中撤销。</div>
+        <div class="dwarf-preset-note"><b>使用：</b>选择矮人 → 设置技能/装备 → 预览 → 应用。可从操作记录撤销。</div>
         <div class="dwarf-preset-actions" style="margin-top:0">
             <span id="dwarfTrainingSelectionStatus" class="dwarf-equip-status">正在读取矮人…</span>
             <button class="btn btn-light" onclick="selectAllDwarfTrainingTargets(true)" style="padding:7px 13px">全选</button>
@@ -1079,7 +1177,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
 <div class="modal-overlay" id="recipeBrowserModal" onclick="if(event.target===this)closeRecipeBrowser()">
     <div class="modal-box recipe-browser-box">
         <div class="modal-title">📚 配方与科技浏览 <span id="recipeBrowserCount" style="font-weight:400;color:#B8A89A;font-size:13px"></span></div>
-        <div class="recipe-browser-note">只读资料浏览：只读取本体、模组和当前地图状态；此窗口不会解锁配方、修改科技或写入游戏内存。</div>
+        <div class="recipe-browser-note">只读浏览，不解锁配方、不修改科技或游戏。</div>
         <div class="recipe-browser-tools"><input id="recipeBrowserSearch" placeholder="搜索中文名、英文 ID、材料或产物" oninput="renderRecipeBrowserList()"><select id="recipeBrowserSource" onchange="renderRecipeBrowserList()"><option value="">全部来源</option></select><select id="recipeBrowserCategory" onchange="renderRecipeBrowserList()"><option value="">全部类别</option></select><button class="btn btn-light" onclick="recipeBrowserRefresh()" style="padding:7px 13px">↻ 刷新本地资源</button></div>
         <div id="recipeBrowserStatus" class="recipe-browser-status" style="margin:0 0 7px"></div>
         <div id="recipeBrowserList" class="recipe-browser-list"><div class="recipe-browser-empty">打开后读取本地配方资源。</div></div>
@@ -1104,7 +1202,7 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
                     <div><label>给选中格放入材料</label><select id="recipeMaterialPicker" onchange="recipeEditorPickMaterial(this.value)"></select></div>
                     <button class="btn btn-light" onclick="recipeEditorClearCell()" style="height:36px;padding:0 15px">清空此格</button>
                 </div>
-                <div class="recipe-editor-help">材料按格位保存：左上为 1，右下为 9。内存配方保存后如制作界面已打开，关闭并重新打开即可刷新材料图标；同步本地会自动保留 .trainer.bak 备份。</div>
+                <div class="recipe-editor-help">格位 1–9：左上到右下。保存后重开制作界面刷新；同步本地会自动备份。</div>
                 <div id="recipeEditorStatus" class="recipe-editor-status"></div>
             </div>
         </div>
@@ -1202,9 +1300,9 @@ input[type=checkbox],input[type=radio]{min-height:0;accent-color:var(--ui-accent
     <div class="modal-box update-center-box" role="dialog" aria-modal="true" aria-labelledby="updateCenterTitle">
         <div class="modal-title" id="updateCenterTitle">修改器更新</div>
         <div class="update-center-status" id="updateCenterStatus">尚未检查更新。</div>
-        <div class="update-center-note">启动时会在后台检查一次，并只更新顶部版本信息；不会自动下载、替换或重启。更新地址已内置在修改器中，更新只会替换修改器自身文件，不会覆盖用户配置、存档、游戏目录或本地模组数据。</div>
+        <div class="update-center-note">启动时后台检查。更新只替换修改器本身，不影响存档、游戏或用户配置。</div>
         <div class="update-center-actions"><button class="btn btn-orange" type="button" onclick="checkModifierUpdate()" title="重新读取 GitHub 最新 Release；不会下载">立即检查</button><button class="btn btn-peach" id="stageUpdateBtn" type="button" onclick="stageModifierUpdate()" title="下载、校验并覆盖当前修改器，然后自动重启" disabled>下载并更新</button><button class="btn btn-orange" id="applyUpdateBtn" type="button" onclick="applyModifierUpdate()" title="使用已校验的更新包覆盖当前修改器，并自动重新启动" disabled>应用并重启</button><button class="btn btn-light" type="button" onclick="closeUpdateCenter()" title="关闭更新中心，不执行任何更新操作">关闭</button></div>
-        <div class="update-center-action-help" role="note"><span><b>立即检查</b>：重新读取 GitHub 最新版本，不下载。</span><span><b>下载并更新</b>：下载并校验后立即覆盖当前修改器，成功后自动重启，不安装第二份程序。</span><span><b>应用并重启</b>：用于已有暂存包的恢复操作，覆盖当前修改器文件后自动重启。</span><span><b>关闭</b>：仅关闭此窗口，不执行更新。</span></div>
+        <div class="update-center-action-help" role="note">“下载并更新”会下载、校验、覆盖当前修改器并自动重启。</div>
         <div class="update-center-detail" id="updateCenterDetail"></div>
     </div>
 </div>
@@ -1300,6 +1398,7 @@ var _writeSafetyUiActions = {
     'undo_operation':['confirmUndoVerifiedOperation'],
     'heal_all':['healAllDwarves'], 'full_sat':['fillAllDwarves'],
     'apply_skill_targets':['applySkillTargets'],
+    'set_dwarf_population_cap':['setDwarfPopulationCap'],
     'modify_item_qty':['saveItemModal'],
     'apply_item_quick_settings':['applyItemQuickSettings'],
     'toggle_lock':['toggleLock'], 'toggle_gold_lock':['toggleGoldLock'],
@@ -1308,6 +1407,9 @@ var _writeSafetyUiActions = {
     , 'restore_save_snapshot':['saveManagerRestore']
 };
 var _dwarfRefreshBusy = false;
+var _dwarfPopulationCapBusy = false;
+var _dwarfPopulationCapDraft = '';
+var _dwarfPopulationCapDraftDirty = false;
 var _itemScanBusy = false;
 var _itemRefreshBusy = false;
 var _currentEditIdx = -1;
@@ -1340,7 +1442,7 @@ var _gameWriteMethods = new Set([
     'write_gold','gold_apply_operation','set_gold_economy_rule','mana_apply_operation','mana_apply_max_operation','set_mana_reserve_rule','xp_apply_progress','write_mana','write_mana_max','write_xp','xp_to_next','write_timer','set_game_time','set_game_speed',
     'save_skills','native_skill_upgrade','apply_skill_targets','heal_all','full_sat','save_dwarf','save_dwarf_fields','save_dwarf_personal_skills','save_dwarf_personal_skill_slots','save_dwarf_equipment','apply_dwarf_equipment_preset','apply_dwarf_training_preset','modify_item_qty','undo_operation','apply_item_quick_settings',
     'pet_house','pet_infinite','pet_spawn','spawn_direct_pet','spawn_direct_pets','remove_pet','set_pet_limit_override','clear_pet_limit_override','toggle_other_feature',
-    'set_dwarf_name','spawn_native_dwarf','modify_shop_entry','native_shop_purchase_one','unlock_recipe','set_tech_node_state','set_magic_value','cast_magic_collect','cast_magic_collect_full_map','save_recipe_grid','sync_recipe_grid_to_local','set_map_write_enabled',
+    'set_dwarf_name','spawn_native_dwarf','set_dwarf_population_cap','delete_structure_complete','modify_shop_entry','native_shop_purchase_one','unlock_recipe','set_tech_node_state','set_magic_value','cast_magic_collect','cast_magic_collect_full_map','save_recipe_grid','sync_recipe_grid_to_local','set_map_write_enabled',
     'toggle_lock','toggle_gold_lock','toggle_mana_lock','toggle_xp_lock','set_mana_max_lock',
     'confirm_offline_save_edit','restore_save_snapshot'
 ]);
@@ -1356,10 +1458,10 @@ var MAX_OPERATION_LOG = 120;
 var _operationNames = {
     connect:'连接游戏', connect_pid:'连接游戏', disconnect:'断开游戏',
     write_gold:'修改金币', gold_apply_operation:'金币即时操作', set_gold_economy_rule:'金币经济规则', mana_apply_operation:'当前法力操作', mana_apply_max_operation:'法力上限操作', set_mana_reserve_rule:'法力保留规则', xp_apply_progress:'等级与经验进度操作', write_mana:'修改法力', write_mana_max:'修改法力上限', write_xp:'修改经验', write_timer:'修改倒计时', set_game_time:'调整游戏时间', set_game_speed:'调整全局速度',
-    heal_all:'全员回血', full_sat:'全员补饱食度', save_dwarf:'保存矮人', save_dwarf_fields:'保存矮人属性', save_dwarf_equipment:'保存矮人装备', apply_dwarf_equipment_preset:'应用全体预设装备', apply_skill_targets:'快捷应用技能等级', set_dwarf_name:'修改矮人名称', spawn_native_dwarf:'原生矮人生成',
+    heal_all:'全员回血', full_sat:'全员补饱食度', save_dwarf:'保存矮人', save_dwarf_fields:'保存矮人属性', save_dwarf_equipment:'保存矮人装备', apply_dwarf_equipment_preset:'应用全体预设装备', apply_skill_targets:'快捷应用技能等级', set_dwarf_name:'修改矮人名称', spawn_native_dwarf:'原生矮人生成', set_dwarf_population_cap:'设置矮人上限',
     modify_item_qty:'修改物品数量', apply_item_quick_settings:'批量修改常用物品', modify_shop_entry:'修改商店物品', unlock_recipe:'解锁配方', save_recipe_grid:'保存配方材料',
     set_tech_node_state:'修改科技树节点', set_magic_value:'修改魔法参数', cast_magic_collect:'原生收集魔法', cast_magic_collect_full_map:'无耗蓝全图收集',
-    native_shop_purchase_one:'哥布林商店原生购买', spawn_direct_pet:'直接生成宠物', spawn_direct_pets:'批量生成宠物', remove_pet:'移除宠物', set_pet_limit_override:'设置宠物上限', clear_pet_limit_override:'恢复自动宠物上限', set_map_write_enabled:'切换地图编辑',
+    native_shop_purchase_one:'哥布林商店原生购买', spawn_direct_pet:'直接生成宠物', spawn_direct_pets:'批量生成宠物', remove_pet:'移除宠物', set_pet_limit_override:'设置宠物上限', clear_pet_limit_override:'恢复自动宠物上限', delete_structure_complete:'删除结构', set_map_write_enabled:'切换地图编辑',
     map_replace:'替换地图方块', map_replace_front:'修改地图外层', map_apply_cells:'填充地图区域', map_set_water:'修改地图水位', map_set_explored:'修改探索状态', map_explore_all:'全图标记已探索', map_fill:'全图填充', map_clear:'清空地图',
     set_portal_timer:'设置传送门时间', add_portal_time:'增加传送门时间', toggle_portal_lock:'切换传送门冻结', close_portal:'关闭魔法传送门', spawn_monster_portal:'生成怪物传送门', force_pandora_event:'指定潘多拉事件', restore_pandora_events:'恢复潘多拉随机',
     pet_house:'切换按屋生成', pet_infinite:'切换无限生成', pet_spawn:'生成宠物', toggle_other_feature:'切换其它功能',
@@ -1369,8 +1471,17 @@ var _operationNames = {
 var _operationToggleMethods = new Set(['toggle_lock','toggle_gold_lock','toggle_mana_lock','toggle_xp_lock','toggle_portal_lock','pet_house','pet_infinite','toggle_other_feature']);
 _gameWriteMethods.add('undo_operation');
 _gameWriteMethods.add('apply_dwarf_training_preset');
+_gameWriteMethods.add('spawn_special_entity');
+_gameWriteMethods.add('spawn_special_entity_batch');
+_gameWriteMethods.add('spawn_special_entities');
+_gameWriteMethods.add('delete_special_entities_in_cells');
+['spawn_special_entity','spawn_special_entity_batch','spawn_special_entities','delete_special_entities_in_cells'].forEach(function(method){_policyControlledWriteMethods.add(method);});
 _operationNames.undo_operation='撤销操作';
 _operationNames.apply_dwarf_training_preset='应用矮人培养预设';
+_operationNames.spawn_special_entity='生成特殊实体';
+_operationNames.spawn_special_entity_batch='批量生成特殊实体';
+_operationNames.spawn_special_entities='复制特殊实体';
+_operationNames.delete_special_entities_in_cells='删除选区特殊实体';
 _operationNames.confirm_runtime_operation_reentry='重进存档复核';
 function operationTime(value){
     var date=new Date(value || Date.now());
@@ -1657,7 +1768,7 @@ function updateCenterSetStatus(text,kind){var el=document.getElementById('update
 function updateCenterSetDetail(text){var el=document.getElementById('updateCenterDetail');if(el)el.textContent=String(text||'');}
 function updateQuickState(current,latest,state){
     var currentEl=document.getElementById('updateCurrentVersion'),latestEl=document.getElementById('updateLatestVersion'),chip=document.getElementById('updateVersionChip');
-    if(currentEl)currentEl.textContent='v'+String(current||'1.0.1').replace(/^v/i,'');
+    if(currentEl)currentEl.textContent='v'+String(current||'1.1').replace(/^v/i,'');
     if(latestEl)latestEl.textContent=String(latest||'未检查');
     if(chip){if(state)chip.setAttribute('data-state',state);else chip.removeAttribute('data-state');}
 }
@@ -1673,7 +1784,7 @@ function updateCenterRender(result){
     if(stage)stage.disabled=!(result&&result.ok&&result.available&&result.package_ready);
     if(apply)apply.disabled=!(result&&result.staged&&result.staged.files&&result.staged.files.length);
     if(!result)return;
-    var current=result.current_version||result.version||'1.0.1',latest=result.latest_version||result.version||'未检查';
+    var current=result.current_version||result.version||'1.1',latest=result.latest_version||result.version||'未检查';
     if(!result.ok){updateQuickState(current,'检查失败','error');updateQuickButtonState(null);updateCenterSetStatus(result.error||'更新检查失败','error');return;}
     if(result.staged){updateQuickState(current,result.staged.version,'available');updateQuickButtonState(result);updateCenterSetStatus('已暂存 '+result.staged.version+'，等待应用。','pending');updateCenterSetDetail('文件：'+(result.staged.files||[]).join('、'));return;}
     if(!result.available){var state=latest===current?'latest':'';updateQuickState(current,latest,state);updateQuickButtonState(result);updateCenterSetStatus(latest==='未发布'?'GitHub 暂未发布可用版本。':'当前版本 '+current+' 已是最新。',latest==='未发布'?'':'ok');updateCenterSetDetail(result.message||'');return;}
@@ -1682,7 +1793,7 @@ function updateCenterRender(result){
 function openUpdateCenter(){
     var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.add('active');
     call('get_update_info',function(info){
-        var current=(info&&info.version)||'1.0.1';
+        var current=(info&&info.version)||'1.1';
         if(info&&info.staged){_updateCheck={ok:true,current_version:current,staged:info.staged};updateCenterRender(_updateCheck);return;}
         if(_updateCheck){updateCenterRender(_updateCheck);return;}
         if(_updateAutoCheckInFlight){updateCenterSetStatus('正在后台检查 GitHub Releases…','pending');updateCenterSetDetail('检查完成后，顶部“最新版本”会自动更新。');return;}
@@ -1692,7 +1803,7 @@ function openUpdateCenter(){
 }
 function closeUpdateCenter(){var modal=document.getElementById('updateCenterModal');if(modal)modal.classList.remove('active');}
 function checkModifierUpdate(){var quick=document.getElementById('updateVersionChip');if(quick){quick.disabled=true;quick.title='正在检查 GitHub Releases…';}updateCenterSetStatus('正在检查 GitHub Releases…','pending');updateCenterSetDetail('');call('check_for_update',function(r){if(quick){quick.disabled=false;quick.title='点击打开更新中心';}_updateCheck=r;updateCenterRender(r);});}
-function stageModifierUpdate(){updateCenterSetStatus('正在下载、校验并准备覆盖当前修改器…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'更新下载失败','error');return;}updateCenterSetStatus('校验通过，正在覆盖当前修改器并重启…','pending');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));updateQuickState(r.current_version||'1.0.1',r.version,'available');updateQuickButtonState({ok:true,staged:{version:r.version}});var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包校验通过，正在覆盖当前文件：'+r.version,'success');scheduleUiTimeout(function(){applyModifierUpdate();},450);});}
+function stageModifierUpdate(){updateCenterSetStatus('正在下载、校验并准备覆盖当前修改器…','pending');call('stage_update',function(r){_updateCheck=r;if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'更新下载失败','error');return;}updateCenterSetStatus('校验通过，正在覆盖当前修改器并重启…','pending');updateCenterSetDetail('版本：'+r.version+'\n大小：'+Number(r.size||0).toLocaleString('zh-CN')+' 字节\nSHA-256：'+r.sha256+'\n文件：'+(r.files||[]).join('、'));updateQuickState(r.current_version||'1.1',r.version,'available');updateQuickButtonState({ok:true,staged:{version:r.version}});var apply=document.getElementById('applyUpdateBtn');if(apply)apply.disabled=false;log('修改器更新包校验通过，正在覆盖当前文件：'+r.version,'success');scheduleUiTimeout(function(){applyModifierUpdate();},450);});}
 function applyModifierUpdate(){updateCenterSetStatus('正在安排重启更新…','pending');call('apply_staged_update',function(r){if(!r||!r.ok){updateCenterSetStatus((r&&r.error)||'应用更新失败','error');return;}updateCenterSetStatus(r.message||'更新已排队；即将重启。','ok');log('修改器更新已排队，准备重启','success');scheduleUiTimeout(function(){beginUiShutdown();},350);});}
 var _updateAutoCheckInFlight=false;
 var _updateAutoCheckSeq=0;
@@ -1703,14 +1814,14 @@ function autoCheckModifierUpdateDisplayOnly(currentVersion){
     var watchdog=scheduleUiTimeout(function(){
         if(settled||seq!==_updateAutoCheckSeq)return;
         settled=true; _updateAutoCheckInFlight=false;
-        updateQuickState(currentVersion||'1.0.1','检查超时','error');
+        updateQuickState(currentVersion||'1.1','检查超时','error');
         updateQuickButtonState(null);
     },8000);
     call('check_for_update',function(result){
         if(settled||seq!==_updateAutoCheckSeq)return;
         settled=true; _updateAutoCheckInFlight=false; if(watchdog)clearTimeout(watchdog);
-        _updateCheck=result||{ok:false,current_version:currentVersion||'1.0.1',error:'更新检查没有返回结果'};
-        var current=(result&&result.current_version)||currentVersion||'1.0.1';
+        _updateCheck=result||{ok:false,current_version:currentVersion||'1.1',error:'更新检查没有返回结果'};
+        var current=(result&&result.current_version)||currentVersion||'1.1';
         if(!result||!result.ok){updateQuickState(current,'检查失败','error');updateQuickButtonState(null);return;}
         var latest=result.latest_version||result.version||'未发布';
         var state=result.available?'available':(latest===current?'latest':'');
@@ -1720,14 +1831,14 @@ function autoCheckModifierUpdateDisplayOnly(currentVersion){
 }
 function initializeUpdateStatus(){
     var initialized=false;
-    updateQuickState('1.0.1','准备检查','checking');
+    updateQuickState('1.1','准备检查','checking');
     call('get_update_info',function(info){
         initialized=true;
         if(!info||!info.ok){
-            scheduleUiTimeout(function(){autoCheckModifierUpdateDisplayOnly((info&&info.version)||'1.0.1');},250);
+            scheduleUiTimeout(function(){autoCheckModifierUpdateDisplayOnly((info&&info.version)||'1.1');},250);
             return;
         }
-        var current=info.version||'1.0.1';
+        var current=info.version||'1.1';
         if(info.staged){_updateCheck={ok:true,current_version:current,staged:info.staged};updateQuickState(current,info.staged.version,'available');updateQuickButtonState(_updateCheck);return;}
         updateQuickState(current,'检查中…','checking');
         // Let the first paint settle before opening the network request.  This
@@ -1735,7 +1846,7 @@ function initializeUpdateStatus(){
         scheduleUiTimeout(function(){autoCheckModifierUpdateDisplayOnly(current);},900);
     });
     scheduleUiTimeout(function(){
-        if(!initialized&&!_updateAutoCheckInFlight)autoCheckModifierUpdateDisplayOnly('1.0.1');
+        if(!initialized&&!_updateAutoCheckInFlight)autoCheckModifierUpdateDisplayOnly('1.1');
     },1200);
 }
 function clearOperationLog(){ _operationLog=[]; setTopLog(null); renderOperationLog(); }
@@ -1879,6 +1990,39 @@ function call(method) {
     }
     invokeApi(method, args, cb, null);
 }
+var _structureCatalog=[], _structurePreviewItem=null;
+function updateStructurePreview(){var file=(document.getElementById('structureFile')||{}).value||'', col=Number((document.getElementById('structureCol')||{}).value), row=Number((document.getElementById('structureRow')||{}).value), host=document.getElementById('structurePreview');_structurePreviewItem=_structureCatalog.find(function(x){return String(x.file)===file;})||null;if(!host)return;if(!_structurePreviewItem){host.textContent='预览：请选择结构';scheduleMapDraw();return;}var item=_structurePreviewItem,w=Number(item.width)||0,h=Number(item.height)||0,place=item.placeable?'可提交':'不可生成（文件格式或名称不支持）',resource=item.game_file_available===true?'游戏资源已确认':item.game_file_available===false?'游戏文件缺失，无法生成':item.game_file_available==='error'?'无法确认游戏资源':'正在确认游戏资源';host.textContent='预览：'+String(item.name||item.category||'未命名结构')+' · '+w+'×'+h+' 格 · 左上角 列 '+(Number.isFinite(col)?Math.trunc(col):0)+' / 行 '+(Number.isFinite(row)?Math.trunc(row):0)+' · 覆盖范围列 '+(Number.isFinite(col)?Math.trunc(col):0)+'~'+(Number.isFinite(col)?Math.trunc(col)+Math.max(0,w-1):0)+'，行 '+(Number.isFinite(row)?Math.trunc(row):0)+'~'+(Number.isFinite(row)?Math.trunc(row)+Math.max(0,h-1):0)+' · '+place+' · '+resource+' · 地图上为虚影预览';if(item.game_file_available===null&&!item._resourceCheckPending){item._resourceCheckPending=true;call('get_structure_resource_status',function(r){item._resourceCheckPending=false;if(r&&r.ok)item.game_file_available=!!r.game_file_available;else item.game_file_available='error';updateStructurePreview();},file);}scheduleMapDraw();}
+function filterStructureFiles(){var cat=(document.getElementById('structureCategory')||{}).value||'',query=String((document.getElementById('structureSearch')||{}).value||'').trim().toLowerCase(),select=document.getElementById('structureFile');if(!select)return;var old=select.value,items=_structureCatalog.filter(function(x){if(cat&&String(x.category_id||'other')!==cat)return false;if(!query)return true;return [x.name,x.file,x.category,x.category_id].map(function(v){return String(v||'').toLowerCase();}).join(' ').indexOf(query)>=0;});select.innerHTML=items.map(function(x){var label=String(x.name||x.category||'未命名结构'),file=String(x.file||'').replace(/[&<>\"']/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch];});return '<option value="'+file+'" title="'+file+'">'+escapeHtml(label)+'</option>';}).join('');if(items.some(function(x){return x.file===old;}))select.value=old;else if(items[0])select.value=items[0].file;updateStructurePreview();}
+function cancelStructurePreview(){_structurePreviewItem=null;var select=document.getElementById('structureFile');if(select)select.value='';var status=document.getElementById('structureStatus');if(status)status.textContent='结构预览已取消';scheduleMapDraw();}
+function loadStructureCatalog(){call('get_structure_catalog',function(r){var s=document.getElementById('structureStatus'),cat=document.getElementById('structureCategory');if(!r||!r.ok){if(s)s.textContent='读取失败：'+((r&&r.error)||'未知错误');return;}_structureCatalog=(r.structures||[]).filter(function(x){return x.available;});var groups={},order=[];_structureCatalog.forEach(function(x){var id=String(x.category_id||'other'),name=String(x.category||'其它结构');if(!groups[id]){groups[id]=name;order.push(id);}});if(cat){var old=cat.value;cat.innerHTML='<option value="">全部分类（'+_structureCatalog.length+'）</option>'+order.map(function(id){return '<option value="'+escapeHtml(id)+'">'+escapeHtml(groups[id])+'</option>';}).join('');if(order.indexOf(old)>=0)cat.value=old;}filterStructureFiles();if(s)s.textContent='已读取 '+_structureCatalog.length+' 个内嵌结构目录；生成时使用游戏 Levels 文件';});}
+function placeNativeStructure(){var file=(document.getElementById('structureFile')||{}).value||'t.map',item=_structureCatalog.find(function(x){return String(x.file)===file;})||null;var col=Number((document.getElementById('structureCol')||{}).value);var row=Number((document.getElementById('structureRow')||{}).value);var force=!!((document.getElementById('structureForce')||{}).checked);if(item&&item.game_file_available===false){var missing='本机游戏缺少该结构文件，已取消生成';var status=document.getElementById('structureStatus');if(status)status.textContent=missing;log(missing,'error');return;}call('place_structure',function(r){var s=document.getElementById('structureStatus');if(r&&r.ok){if(s)s.textContent='已提交原生结构：列'+r.col+' 行'+r.row;log('原生结构已生成：'+r.file+'（列'+r.col+'，行'+r.row+'）','success');mapLoadStructures();}else{if(s)s.textContent='生成失败：'+((r&&r.error)||'游戏未确认');log('原生结构生成失败：'+((r&&r.error)||'未知错误'),'error');}},file,col,row,1,1,force);}
+var _specialEntityCatalogById={};
+function specialEntitySelectedInfo(){
+    var select=document.getElementById('specialEntityType'),status=document.getElementById('specialEntityStatus'),batch=document.getElementById('specialEntityBatchButton');
+    var row=_specialEntityCatalogById[String(select&&select.value||'')];
+    if(!row)return;
+    if(status)status.textContent=String(row.note||'已选择该特殊实体。');
+    if(batch){var blocked=row.batch_allowed===false;batch.disabled=blocked;batch.title=blocked?String(row.note||'该实体不允许批量生成'):'';}
+}
+function loadSpecialEntityCatalog(){
+    call('get_special_entity_catalog',function(r){
+        var status=document.getElementById('specialEntityStatus'),host=document.getElementById('specialEntityList'),select=document.getElementById('specialEntityType');
+        if(!r||!r.ok){if(status)status.textContent='读取失败：'+((r&&r.error)||'未知错误');return;}
+        var rows=(r.entities||[]).filter(function(x){return x&&(x.supported||x.catalog_only);});
+        _specialEntityCatalogById={}; rows.forEach(function(x){_specialEntityCatalogById[String(x.id||'')]=x;});
+        if(select){
+            var previous=select.value;
+            select.innerHTML=rows.map(function(x){var disabled=x.supported?'':' disabled';return '<option value="'+escapeHtml(String(x.id||''))+'"'+disabled+'>'+escapeHtml(String(x.name||x.id))+' · '+escapeHtml(String(x.id||''))+(x.supported?'':'（仅读取/删除）')+'</option>';}).join('');
+            if(rows.some(function(x){return String(x.id)===previous;}))select.value=previous;
+        }
+        if(status)status.textContent='已读取 '+rows.length+' 个可生成特殊实体类型';
+        specialEntitySelectedInfo();
+        if(host)host.innerHTML=rows.map(function(x){var state=x.available?'资源已加载，可生成':'资源未加载';return '<span style="display:inline-flex;align-items:center;gap:5px;margin:3px 8px 0 0;padding:3px 7px;background:#fff;border:1px solid #e0d6cc;border-radius:4px"><b>'+escapeHtml(String(x.name||x.id))+'</b><small>'+escapeHtml(String(x.category||''))+' · 地图现有 '+String(x.live_count||0)+' 个 · '+state+'</small></span>';}).join('');
+    });
+}
+function specialEntityMapCoordinate(col,row){var c=document.getElementById('specialEntityCol'),r=document.getElementById('specialEntityRow');if(c)c.value=String(Math.trunc(Number(col)||0));if(r)r.value=String(Math.trunc(Number(row)||0));}
+function spawnSpecialEntity(){var type=(document.getElementById('specialEntityType')||{}).value||'dragon_egg';var col=Number((document.getElementById('specialEntityCol')||{}).value);var row=Number((document.getElementById('specialEntityRow')||{}).value);var s=document.getElementById('specialEntityStatus');if(s)s.textContent='提交原生生成请求…';call('spawn_special_entity',function(r){if(r&&r.ok){var note=String(r.note||'');if(s)s.textContent='已生成：列'+col+' 行'+row+(note?' · '+note:'');log('特殊实体已生成：'+((r.entity&&r.entity.name)||type)+'（列'+col+'，行'+row+'）','success');mapLoadWorldObjects(true,true);}else{if(s)s.textContent='生成失败：'+((r&&r.error)||'游戏未确认');log('特殊实体生成失败：'+((r&&r.error)||'未知错误'),'error');}},type,col,row);}
+function spawnSpecialEntityBatch(){var type=(document.getElementById('specialEntityType')||{}).value||'dragon_egg',col=Number((document.getElementById('specialEntityCol')||{}).value),row=Number((document.getElementById('specialEntityRow')||{}).value),count=Number((document.getElementById('specialEntityCount')||{}).value),spacing=Number((document.getElementById('specialEntitySpacing')||{}).value),s=document.getElementById('specialEntityStatus');if(!Number.isInteger(count)||count<1||count>16){if(s)s.textContent='数量需在 1–16 之间';return;}if(!Number.isInteger(spacing)||spacing<1||spacing>12){if(s)s.textContent='间距需在 1–12 格之间';return;}if(s)s.textContent='正在提交 '+count+' 个原生生成请求…';call('spawn_special_entity_batch',function(r){if(r&&r.ok){if(s)s.textContent='已批量生成 '+Number(r.created_count||0)+' 个';log('特殊实体批量生成：'+Number(r.created_count||0)+' 个（间距 '+spacing+' 格）','success');mapLoadWorldObjects(true,true);}else{var made=Number((r&&r.created_count)||0);if(s)s.textContent=made?'已生成 '+made+' 个，其余失败':'批量生成失败：'+((r&&r.error)||'游戏未确认');log('特殊实体批量生成失败：'+((r&&r.error)||'未知错误'),'error');mapLoadWorldObjects(true,true);}},type,col,row,count,spacing);}
 function openProjectGithub(event){
     if(event){event.preventDefault();event.stopPropagation();}
     var url='https://github.com/dszwamn/CraftWorldModifier';
@@ -1934,47 +2078,30 @@ function setLocalSyncStatus(text, isError) {
     el.textContent = String(text || '');
     el.style.color = isError ? '#B34F38' : '#6D8C62';
 }
-function localSyncSummary(result) {
-    var files = (result && result.files) || {};
+function embeddedDataSummary(result) {
     var bits = [];
-    bits.push('资源 ' + (files.resources || 0));
-    bits.push('配方 ' + (files.recipes || 0));
-    if (files.mods) bits.push('模组 ' + files.mods);
-    if (files.mod_resources) bits.push('模组资源 ' + files.mod_resources);
+    bits.push('结构 ' + ((result && result.structures) || 0));
+    if (result && result.pandora_events) bits.push('潘多拉事件');
+    bits.push('科技树 ' + ((result && result.tech_trees) || 0));
     return bits.join(' · ');
 }
-function syncLocalData(chooseFolder) {
+function readEmbeddedData() {
     if (_localDataSyncing) return;
     _localDataSyncing = true;
     var button = document.getElementById('localSyncBtn');
-    if (button) { button.disabled = true; button.textContent = chooseFolder ? '📁 选择中…' : '↻ 同步中…'; }
-    setLocalSyncStatus(chooseFolder ? '正在选择游戏目录…' : '正在读取本地游戏与模组数据…');
-    call(chooseFolder ? 'choose_local_game_dir' : 'sync_local_data', function(result) {
+    if (button) { button.disabled = true; button.textContent = '↻ 读取中…'; }
+    setLocalSyncStatus('正在读取修改器内嵌数据…');
+    call('read_embedded_data', function(result) {
         _localDataSyncing = false;
-        if (button) { button.disabled = false; button.textContent = '📂 本地同步'; }
+        if (button) { button.disabled = false; button.textContent = '↻ 读取'; }
         if (result && result.ok) {
-            var summary = localSyncSummary(result);
-            setLocalSyncStatus('已同步：' + summary);
-            log('本地数据已同步（' + summary + '）', 'success');
-            // The browser is deliberately local-data backed.  If it is open,
-            // refresh it immediately so a newly installed mod appears without
-            // closing/reopening the trainer.
-            if (document.getElementById('recipeBrowserModal') && document.getElementById('recipeBrowserModal').classList.contains('active')) {
-                recipeBrowserRefresh();
-            }
+            var summary = embeddedDataSummary(result);
+            setLocalSyncStatus('已读取：' + summary);
+            log('修改器内嵌数据已读取（' + summary + '）', 'success');
+            loadStructureCatalog();
             return;
         }
-        if (result && result.needs_path && !chooseFolder) {
-            setLocalSyncStatus('未自动定位到游戏目录', true);
-            log((result.error || '未自动定位到游戏目录') + '；请选择游戏目录', 'warning');
-            showConfirm('没有自动定位到 Craft The World 游戏目录。\n\n请选择包含 CraftWorld.exe 与 data 文件夹的位置。',function(ok){if(ok)syncLocalData(true);},{title:'选择游戏目录'});
-            return;
-        }
-        if (result && result.cancelled) {
-            setLocalSyncStatus('已取消选择目录', true);
-            return;
-        }
-        var error = (result && result.error) || '本地同步失败';
+        var error = (result && result.error) || '内嵌数据读取失败';
         setLocalSyncStatus(error, true);
         log(error, 'error');
     });
@@ -1991,15 +2118,73 @@ function log(m, level) {
     return recordOperation(text, level || 'info');
 }
 function setGameVersion(version){
-    var chip=document.getElementById('gameVersionChip');
-    var value=document.getElementById('gameVersionText');
-    if(!chip || !value) return;
+    var value=document.getElementById('overviewGameVersion');
+    if(!value) return;
     var info=version || {};
     var state=String(info.state || '未连接');
     var display=String(info.display || (state==='未连接'?'未连接':'未识别'));
     value.textContent=display;
-    chip.dataset.state=state==='未连接'?'disconnected':(info.ok?'connected':'unknown');
-    chip.title=String(info.detail || (state==='未连接'?'连接 CraftWorld.exe 后读取游戏版本信息':'无法确认当前游戏版本'));
+    value.title=String(info.detail || (state==='未连接'?'连接 CraftWorld.exe 后读取游戏版本信息':'无法确认当前游戏版本'));
+}
+function mountOverviewToolbar(showOverview){
+    var dock=document.getElementById('top-command-dock'),bar=document.getElementById('top-bar'),host=document.getElementById('overviewToolbarHost');
+    if(!dock||!bar||!host)return;
+    if(showOverview){
+        if(bar.parentNode!==host)host.appendChild(bar);
+        dock.classList.add('overview-mounted');
+    }else{
+        if(bar.parentNode!==dock) dock.appendChild(bar);
+        dock.classList.remove('overview-mounted');
+    }
+}
+function arrangeMapControlLayout(){
+    var panel=document.getElementById('panel-map');
+    var toolbar=panel&&panel.querySelector('.map-toolbar');
+    var editBar=panel&&panel.querySelector('.map-edit-bar');
+    if(panel&&toolbar&&editBar&&toolbar.nextElementSibling!==editBar)panel.insertBefore(toolbar,editBar);
+}
+function overviewSet(id,value){var el=document.getElementById(id);if(el)el.textContent=String(value===undefined||value===null||value===''?'未读取':value);}
+function renderOverviewState(result){
+    var page=document.getElementById('panel-overview');if(!page)return;
+    var connected=!!(result&&result.ok);page.dataset.state=connected?'ready':'offline';
+    var world=(result&&result.world)||{};
+    if(!result||result.state==='未连接'){
+        overviewSet('overviewDay','--');overviewSet('overviewWorldName','等待连接游戏');overviewSet('overviewWorldSubtitle','连接后将读取模式、世界类型与存档参数');
+        ['overviewMode','overviewSize','overviewWeather','overviewTerrain','overviewDifficulty','overviewTechMode'].forEach(function(id){overviewSet(id,'未读取');});
+        overviewSet('overviewRuntimeState','等待连接');overviewSet('overviewRuntimeDetail','连接游戏后显示进程与世界状态');overviewSet('overviewGameVersion','未连接');overviewSet('overviewTimeState','未读取');overviewSet('overviewNotice','首页只读取数据，不修改游戏或存档。');return;
+    }
+    var day=(result.day_count===undefined||result.day_count===null)?'--':Number(result.day_count);
+    overviewSet('overviewDay',Number.isFinite(day)?String(Math.max(0,Math.trunc(day))):'--');
+    overviewSet('overviewWorldName',world.world||'世界配置未读取');
+    overviewSet('overviewWorldSubtitle',(world.mode||'未读取')+(world.source_display?' · '+world.source_display:''));
+    overviewSet('overviewMode',world.mode);overviewSet('overviewSize',world.size);overviewSet('overviewWeather',world.weather);overviewSet('overviewTerrain',world.terrain);overviewSet('overviewDifficulty',world.difficulty);overviewSet('overviewTechMode',world.tech_mode);
+    var version=result.game_version||{};overviewSet('overviewGameVersion',version.display||'未识别');overviewSet('overviewTimeState',result.time_state||'读取中');
+    overviewSet('overviewRuntimeState',connected?'数据已读取':'部分数据未确认');
+    overviewSet('overviewRuntimeDetail',result.error||'世界配置、游戏版本和昼夜信息均来自当前游戏进程的只读快照。');
+    overviewSet('overviewNotice',connected?'数据读取完成；总览不修改游戏或存档。':(result.error||'部分数据未通过校验，请进入地图后重试。'));
+}
+var _overviewReadPending=false;
+var _overviewPollTimer=0;
+function refreshOverviewState(verbose){
+    if(_overviewReadPending||_uiClosing)return;
+    _overviewReadPending=true;var notice=document.getElementById('overviewNotice');if(verbose&&notice)notice.textContent='正在读取当前世界…';
+    call('get_overview_state',function(result){
+        _overviewReadPending=false;renderOverviewState(result);
+        if(verbose&&result&&result.ok)log('总览数据已读取','success');else if(verbose&&!result)log('总览数据读取失败','warning');
+        // DayTime has a one-time background locator. Retry only while it is
+        // still pending and this page is open; once found, the cached read is
+        // immediate and no periodic overview polling remains.
+        var page=document.getElementById('panel-overview');
+        var pending=result&&result.day_count===null&&String(result.time_state||'').indexOf('读取')>=0;
+        if(pending&&page&&page.classList.contains('active')) scheduleUiTimeout(function(){refreshOverviewState(false);},350);
+    });
+}
+function startOverviewPolling(){
+    if(_overviewPollTimer)return;
+    _overviewPollTimer=setInterval(function(){
+        var page=document.getElementById('panel-overview');
+        if(!_uiClosing&&page&&page.classList.contains('active'))refreshOverviewState(false);
+    },1500);
 }
 function updateGold(v) { var el=document.getElementById('goldVal'); if (v !== undefined && v !== null && v !== '' && document.activeElement!==el) g('goldVal', v); }
 function updateMana(v) {
@@ -2377,7 +2562,38 @@ function toggleManaMaxLock(){
 function modifyTimer() {
     var min=basicInputNumber('倒计时分钟','timerMin',true), sec=basicInputNumber('倒计时秒数','timerSec',true);
     if(min===null || sec===null || min<0 || sec<0 || sec>59){log('请输入有效倒计时（秒数为 0-59）','warning');return;}
-    writeOrUpdateTimerLock('countdown',min*60+sec,'write_timer',function(ok){if(ok){refreshBasicState(false);log('倒计时已修改','success');}else log('倒计时修改失败：当前结构未通过校验','error');});
+    var target=min*60+sec;
+    writeCountdownSafely(target,function(result){
+        if(writeResultOk(result)){
+            refreshBasicState(false);
+            log('红门倒计时已设为 '+Math.floor(target/60)+' 分 '+(target%60)+' 秒','success');
+        }else log('红门倒计时修改失败：'+writeResultError(result,'游戏未保留新数值'),'error');
+    });
+}
+// The wave timer is written by the game thread every frame.  A plain memory
+// write can therefore appear to succeed and immediately jump back.  For an
+// unlocked timer, briefly use the existing native lock path for the write,
+// then release it so the countdown continues normally. An explicitly locked
+// timer remains locked and receives the new target.
+function writeCountdownSafely(target, done){
+    _countdownWriteBusy=true;
+    var finish=function(result){_countdownWriteBusy=false;if(done)done(result);};
+    var state=_timerLocks.countdown||{}, wasLocked=!!state.enabled;
+    if(wasLocked){writeOrUpdateTimerLock('countdown',target, 'write_timer', finish);return;}
+    call('set_timer_lock',function(locked){
+        if(!locked||!locked.ok){finish(locked||{ok:false,error:'写入前暂停失败'});return;}
+        _timerLocks.countdown={enabled:true,target:Number(target)};
+        updateTimerLockButtons();
+        // Let one game tick observe the requested value before releasing the
+        // temporary lock; this prevents the old value from winning the race.
+        scheduleUiTimeout(function(){
+            call('set_timer_lock',function(unlocked){
+                _timerLocks.countdown={enabled:!!(unlocked&&unlocked.enabled),target:(unlocked&&unlocked.enabled)?Number(unlocked.target):null};
+                updateTimerLockButtons();
+                finish(unlocked&&unlocked.ok?locked:{ok:false,error:'倒计时写入成功，但恢复自动倒计时失败，请手动点击恢复'});
+            },'countdown',false,null);
+        },140);
+    },'countdown',true,target);
 }
 function wavePortalIsNight(state){
     if (!state || !state.bounds) return false;
@@ -2884,23 +3100,36 @@ function portalDirectorTime(value){var d=new Date(value||Date.now());return Stri
 function portalDirectorAddHistory(kind,text){_portalDirectorHistory.push({at:Date.now(),kind:String(kind||'事件'),text:String(text||'')});while(_portalDirectorHistory.length>40)_portalDirectorHistory.shift();portalDirectorRenderHistory();}
 function portalDirectorRenderHistory(){var host=document.getElementById('portalDirectorHistory');if(!host)return;host.innerHTML=_portalDirectorHistory.length?_portalDirectorHistory.slice().reverse().map(function(row){return '<div class="portal-director-history-row"><small>'+portalDirectorTime(row.at)+'</small><span>'+escapeHtml(row.kind)+'</span><span>'+escapeHtml(row.text)+'</span></div>';}).join(''):'<div class="portal-director-history-row"><small>—</small><span>尚无记录</span><span>创建、结束和状态恢复会记录在这里。</span></div>';}
 function portalDirectorRenderPoints(){var host=document.getElementById('portalDirectorPoints');if(!host)return;host.innerHTML=_portalDirectorPoints.length?_portalDirectorPoints.map(function(point,index){return '<div class="portal-director-point">#'+(index+1)+' · 列 '+point[0]+'，行 '+point[1]+'</div>';}).join(''):'<div class="portal-director-point">尚未生成场景落点。</div>';}
-function portalDirectorRenderState(result,timer){var host=document.getElementById('portalDirectorState');if(!host)return;_portalDirectorState=result||null;var locked=!!((_timerLocks.countdown||{}).enabled),phase='空闲';if(result&&result.active)phase='红门事件进行中';else if(Number(timer)>0)phase='倒计时中';var source=result&&result.event_source==='modifier'?'修改器创建':result&&result.event_source==='native'?'自然生成':'—';var lines=['状态：'+phase,'来源：'+source,'倒计时：'+(isFinite(Number(timer))?Math.max(0,Number(timer)).toFixed(1)+' 秒':'读取失败')];if(result&&result.active){lines.push('门记录：'+result.portal_count+'；波次实体：'+result.spawn_entities);if(result.remaining!==null&&result.remaining!==undefined)lines.push('预计剩余：'+Number(result.remaining).toFixed(1)+' 秒');}if(locked)lines.push('倒计时已暂停（锁定）');if(result&&result.reason)lines.push(result.reason);host.textContent=lines.join('　');var input=document.getElementById('portalDirectorSeconds');if(input&&document.activeElement!==input&&isFinite(Number(timer)))input.value=Math.max(0,Math.round(Number(timer)));var pause=document.getElementById('portalDirectorPauseBtn');if(pause){pause.textContent=locked?'恢复倒计时':'暂停倒计时';pause.className=locked?'btn btn-light':'btn btn-orange';}}
+function portalDirectorRenderState(result,timer){var host=document.getElementById('portalDirectorState');if(!host)return;_portalDirectorState=result||null;var locked=!!((_timerLocks.countdown||{}).enabled),phase='空闲';if(result&&result.active)phase='红门事件进行中';else if(Number(timer)>0)phase='倒计时中';var source=result&&result.event_source==='modifier'?'修改器创建':result&&result.event_source==='native'?'自然生成':'—';var lines=['状态：'+phase,'来源：'+source,'倒计时：'+(isFinite(Number(timer))?Math.max(0,Number(timer)).toFixed(1)+' 秒':'读取失败')];if(result&&result.active){lines.push('门记录：'+result.portal_count+'；波次实体：'+result.spawn_entities);if(result.remaining!==null&&result.remaining!==undefined)lines.push('预计剩余：'+Number(result.remaining).toFixed(1)+' 秒');}if(locked)lines.push('倒计时已暂停（锁定）');if(result&&result.reason)lines.push(result.reason);host.textContent=lines.join('　');var input=document.getElementById('portalDirectorSeconds');if(input&&!_countdownWriteBusy&&document.activeElement!==input&&isFinite(Number(timer)))input.value=Math.max(0,Math.round(Number(timer)));var pause=document.getElementById('portalDirectorPauseBtn');if(pause){pause.textContent=locked?'恢复倒计时':'暂停倒计时';pause.className=locked?'btn btn-light':'btn btn-orange';}}
 var _portalDirectorReadBusy=false;
+var _waveCountdownReadBusy=false;
+function refreshWaveCountdownLive(){
+    if(_waveCountdownReadBusy || _uiClosing)return;
+    _waveCountdownReadBusy=true;
+    call('get_wave_countdown_state',function(reply){
+        _waveCountdownReadBusy=false;
+        if(!reply || !reply.ok)return;
+        updateTimer(reply.text);
+        if(document.getElementById('portalDirectorModal').classList.contains('active') && _portalDirectorState){
+            portalDirectorRenderState(_portalDirectorState,Number(reply.seconds));
+        }
+    });
+}
 function refreshPortalDirector(){
     if(_portalDirectorReadBusy)return;
     _portalDirectorReadBusy=true; portalDirectorStatus('正在读取事件状态…',false);
     call('get_monster_portal_event_state',function(event){
         if(!event||!event.ok){_portalDirectorReadBusy=false;portalDirectorStatus((event&&event.error)||'红门事件读取失败',true);portalDirectorRenderState(null,NaN);return;}
-        call('read_timer',function(timer){
+        call('get_wave_countdown_state',function(timer){
             _portalDirectorReadBusy=false;
-            var parts=String(timer||'').split(':'),seconds=parts.length===2?Number(parts[0])*60+Number(parts[1]):NaN;
+            var seconds=timer&&timer.ok?Number(timer.seconds):NaN;
             portalDirectorRenderState(event,seconds);portalDirectorStatus(event.active?'已读取活动红门事件':'已读取倒计时状态',false);refreshTimerLocks();
         });
     });
 }
 function portalDirectorRefreshLive(){if(document.getElementById('portalDirectorModal').classList.contains('active'))refreshPortalDirector();}
 function portalDirectorSetCountdownValue(seconds){var input=document.getElementById('portalDirectorSeconds');if(input)input.value=String(seconds);portalDirectorSetCountdown();}
-function portalDirectorSetCountdown(){var seconds=Number(document.getElementById('portalDirectorSeconds').value);if(!isFinite(seconds)||seconds<0){log('请输入 0 或以上的倒计时秒数','warning');return;}call('write_timer',function(result){if(!writeResultOk(result)){portalDirectorStatus('倒计时设置失败：'+writeResultError(result,'未知错误'),true);return;}portalDirectorAddHistory('倒计时','设置为 '+Math.round(seconds)+' 秒');log('红门倒计时已设置','success');refreshBasicState(false);refreshPortalDirector();},seconds);}
+function portalDirectorSetCountdown(){var seconds=Number(document.getElementById('portalDirectorSeconds').value);if(!isFinite(seconds)||seconds<0){log('请输入 0 或以上的倒计时秒数','warning');return;}writeCountdownSafely(seconds,function(result){if(!writeResultOk(result)){portalDirectorStatus('倒计时设置失败：'+writeResultError(result,'未知错误'),true);return;}portalDirectorAddHistory('倒计时','设置为 '+Math.round(seconds)+' 秒');log('红门倒计时已设置','success');refreshBasicState(false);refreshPortalDirector();});}
 function portalDirectorAddCountdown(delta){var input=document.getElementById('portalDirectorSeconds'),current=Number(input&&input.value);if(!isFinite(current)){log('请先读取有效倒计时','warning');return;}portalDirectorSetCountdownValue(Math.max(0,current+Number(delta||0)));}
 function portalDirectorTogglePause(){var state=_timerLocks.countdown||{enabled:false},input=document.getElementById('portalDirectorSeconds'),target=Number(input&&input.value);if(!state.enabled&&(!isFinite(target)||target<0)){log('请先读取有效倒计时','warning');return;}call('set_timer_lock',function(result){if(!result||!result.ok){portalDirectorStatus((result&&result.error)||'倒计时暂停/恢复失败',true);return;}_timerLocks.countdown={enabled:!!result.enabled,target:result.target};updateTimerLockButtons();portalDirectorAddHistory('倒计时',result.enabled?'已暂停于 '+Number(result.target).toFixed(1)+' 秒':'已恢复');refreshPortalDirector();},'countdown',!state.enabled,target);}
 function portalDirectorMapInfo(done){if(_portalDirectorMap&&_portalDirectorMap.width&&_portalDirectorMap.height){done(_portalDirectorMap);return;}if(_mapData&&_mapData.width&&_mapData.height){_portalDirectorMap=_mapData;done(_portalDirectorMap);return;}call('map_metadata',function(meta){if(!meta||!meta.ok){portalDirectorStatus((meta&&meta.error)||'地图读取失败',true);done(null);return;}_portalDirectorMap=meta;done(meta);});}
@@ -3123,11 +3352,15 @@ function setGameSpeedPreset(value){
     setGameSpeed();
 }
 var _portalRefreshTimer = null;
+var _portalLockState = Object.create(null);
+var _portalWriteBusy = Object.create(null);
+var _countdownWriteBusy = false;
 function portalTimeText(seconds){
     seconds = Math.max(0, Math.floor(Number(seconds) || 0));
     return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
 }
 function refreshPortals(){
+    if(_countdownWriteBusy || Object.keys(_portalWriteBusy).some(function(key){return _portalWriteBusy[key];})) return;
     var focused = document.activeElement && document.activeElement.id;
     if (focused && focused.indexOf('portalTime_') === 0) return;
     call('get_portals', function(r){
@@ -3139,6 +3372,8 @@ function refreshPortals(){
             return;
         }
         var portals = r.portals;
+        _portalLockState = Object.create(null);
+        portals.forEach(function(p){ _portalLockState[String(p.object)] = !!p.locked; });
         count.textContent = portals.length ? ('当前 ' + portals.filter(function(p){return p.active;}).length + ' 个有效') : '当前没有可识别的传送门';
         if (!portals.length){ list.textContent = '当前没有可识别的传送门'; return; }
         list.innerHTML = portals.map(function(p, index){
@@ -3148,7 +3383,7 @@ function refreshPortals(){
             var obj = String(p.object);
             return '<div style="display:grid;grid-template-columns:minmax(92px,1fr) 84px auto;align-items:center;gap:8px;padding:8px 10px;background:#F8F6F4;border-radius:6px">'
                 + '<div><span style="font-weight:700;color:#5C4E40">门 '+(index+1)+'</span> <span style="color:#B8A89A;font-size:11px">槽 '+slots+'</span><div style="font-size:11px;color:'+color+';margin-top:2px">'+state+' · '+portalTimeText(p.timer)+'</div></div>'
-                + '<input id="portalTime_'+obj+'" type="number" min="1" max="36000" value="'+Math.max(1,Math.floor(p.timer))+'" style="height:32px;width:100%;padding:0 8px;border:1px solid #E0D6CC;border-radius:6px;font-size:14px;font-family:inherit;color:#333;box-sizing:border-box">'
+                + '<input id="portalTime_'+obj+'" type="number" min="1" value="'+Math.max(1,Math.floor(p.timer))+'" style="height:32px;width:100%;padding:0 8px;border:1px solid #E0D6CC;border-radius:6px;font-size:14px;font-family:inherit;color:#333;box-sizing:border-box">'
                 + '<div style="display:flex;gap:5px;justify-content:flex-end"><button class="btn btn-light" onclick="portalAdd('+obj+',60)" title="延长 60 秒" style="height:32px;padding:0 9px;border:none;border-radius:6px;cursor:pointer">+60</button><button class="btn btn-peach" onclick="portalSet('+obj+')" title="设定秒数" style="height:32px;padding:0 9px;border:none;border-radius:6px;cursor:pointer">设定</button><button class="btn '+(p.locked?'btn-orange':'btn-light')+'" onclick="portalToggleLock('+obj+')" title="冻结或解除冻结" style="height:32px;padding:0 9px;border:none;border-radius:6px;cursor:pointer">'+(p.locked?'解冻':'冻结')+'</button><button class="btn btn-light" onclick="portalClose('+obj+')" title="由游戏下一帧安全清理此传送门" style="height:32px;padding:0 9px;border:none;border-radius:6px;cursor:pointer;color:#B84F43">关闭</button></div>'
                 + '</div>';
         }).join('');
@@ -3161,12 +3396,40 @@ function refreshPortals(){
 function portalSet(objectAddr){
     var blocked=writePolicyMessage('set_portal_timer'); if(blocked){log(blocked,'warning');return;}
     var seconds = parseFloat(document.getElementById('portalTime_'+objectAddr).value);
-    if (!isFinite(seconds) || seconds < 1 || seconds > 36000){ log('传送门时间范围为 1~36000 秒'); return; }
-    call('set_portal_timer', function(r){ log(r && r.ok ? '传送门倒计时已设定' : ('传送门修改失败: '+((r&&r.error)||''))); refreshPortals(); }, objectAddr, seconds);
+    if (!isFinite(seconds) || seconds < 1){ log('传送门时间必须是不小于 1 秒的有效数字'); return; }
+    portalWriteTimer(objectAddr, seconds, '传送门倒计时已设定');
 }
 function portalAdd(objectAddr, seconds){
     var blocked=writePolicyMessage('add_portal_time'); if(blocked){log(blocked,'warning');return;}
-    call('add_portal_time', function(r){ log(r && r.ok ? '传送门已延长 '+seconds+' 秒' : ('传送门修改失败: '+((r&&r.error)||''))); refreshPortals(); }, objectAddr, seconds);
+    call('get_portals', function(list){
+        var row=(list&&list.portals||[]).find(function(p){return String(p.object)===String(objectAddr);});
+        if(!row){log('传送门已消失，请刷新','warning');return;}
+        portalWriteTimer(objectAddr, Number(row.timer)+Number(seconds), '传送门已延长 '+seconds+' 秒');
+    });
+}
+function portalWriteTimer(objectAddr, seconds, successText){
+    var key=String(objectAddr);
+    if(_portalWriteBusy[key])return;
+    _portalWriteBusy[key]=true;
+    var wasLocked=!!_portalLockState[key];
+    function finish(r){
+        var done=function(){_portalWriteBusy[key]=false;log(r&&r.ok?successText:('传送门修改失败: '+((r&&r.error)||'')));refreshPortals();};
+        // Keep an explicitly locked portal locked. For an unlocked portal,
+        // remove the temporary write lock after the game has accepted the
+        // value so normal countdown resumes without reverting the old value.
+        if(!wasLocked){
+            scheduleUiTimeout(function(){call('toggle_portal_lock',function(unlocked){
+                if(unlocked&&unlocked.ok)_portalLockState[key]=false;
+                done(r&&r.ok&&unlocked&&unlocked.ok?r:(r&&r.ok?{ok:false,error:'写入成功，但恢复倒计时失败，请手动解冻'}:r));
+            },objectAddr);},120);
+        }else done();
+    }
+    function write(){call('set_portal_timer',finish,objectAddr,seconds);}
+    if(wasLocked)write();
+    else call('toggle_portal_lock',function(lock){
+        if(!lock||!lock.ok){_portalWriteBusy[key]=false;log('传送门写入前暂停失败：'+((lock&&lock.error)||'未知错误'),'error');return;}
+        _portalLockState[key]=true; write();
+    },objectAddr);
 }
 function portalClose(objectAddr){
     var blocked=writePolicyMessage('close_portal'); if(blocked){log(blocked,'warning');return;}
@@ -3192,6 +3455,7 @@ function refreshPandoraRuntime(force){
     _pandoraRuntimeBusy=true;
     if(force) status.textContent='检测盒子状态…';
     invokeApi('get_pandora_status',[!!force],function(r){
+        _pandoraRuntimeBusy=false;
         if(!r || !r.ok){
             status.textContent='状态读取失败';
             hint.textContent='无法确认潘多拉盒子状态：'+((r&&r.error)||'未知错误');
@@ -3200,8 +3464,9 @@ function refreshPandoraRuntime(force){
             return;
         }
         var exists=!!r.exists;
-        if((!_timerLocks.pandora || !_timerLocks.pandora.enabled) && document.activeElement!==timer && r.timer!==null && r.timer!==undefined){
-            timer.value=(Math.round(Number(r.timer)*10)/10).toString();
+        var runtimeTimer=Number(r.timer);
+        if((!_timerLocks.pandora || !_timerLocks.pandora.enabled) && document.activeElement!==timer && Number.isFinite(runtimeTimer)){
+            timer.value=(Math.round(runtimeTimer*10)/10).toString();
         }
         if(forceBtn) forceBtn.disabled=exists;
         if(restoreBtn) restoreBtn.disabled=false;
@@ -3271,14 +3536,14 @@ function forcePandoraEvent(){
     if(!key || !event){ log('请先点击“读取事件”并选择一个事件'); return; }
     call('force_pandora_event',function(r){
         if(!r || !r.ok){ log('指定潘多拉事件失败：'+((r&&r.error)||'未知错误')); return; }
-        log('下一次新生成的潘多拉盒子已预设为：'+r.title+'。生成后会自动锁定，开箱/消失后会恢复随机。','success');
+        log((r.restart_required?'已写入潘多拉事件：':'下一次新生成的潘多拉盒子已预设为：')+r.title+(r.restart_required?'。请完全重启游戏后再生成盒子。':'。生成后会自动锁定，开箱/消失后会恢复随机。'),'success');
         refreshPandoraEvents(false);
     },key);
 }
 function restorePandoraEvents(){
     call('restore_pandora_events',function(r){
         if(!r || !r.ok){ log('恢复潘多拉随机失败：'+((r&&r.error)||'未知错误')); return; }
-        log('潘多拉盒子已恢复原始随机权重（'+r.count+' 项）。','success');
+        log('潘多拉盒子已恢复原始随机权重（'+r.count+' 项）。'+(r.restart_required?'请重启游戏后生效。':''),'success');
         refreshPandoraEvents(false);
     });
 }
@@ -3323,6 +3588,7 @@ function toggleConnect() {
             _writeSafetyPolicy={};
             applyWriteSafetyToStaticControls();
             mapFreezeCache();
+            refreshOverviewState(false);
             log("");
         });
     } else {
@@ -3362,6 +3628,7 @@ function doConnect(pid) {
             dot.className = "dot on";
             txt.textContent = "\u8fde\u63a5\u6210\u529f (PID: " + r.pid + ")";
             setGameVersion(r.game_version);
+            refreshOverviewState(false);
             function connectionReadLabel(label, count, result){
                 var state=result && result.state;
                 if(state==='已验证' && Number.isInteger(Number(count)) && Number(count)>=0) return label+': '+String(count);
@@ -3372,10 +3639,7 @@ function doConnect(pid) {
                 (r.magic_scanning ? '定位中' : (Number.isInteger(Number(r.magic)) ? String(r.magic) : '读取失败'));
             extra.textContent = "\u2714\uFE0F " + connectionReadLabel('矮人',r.dwarves,r.dwarves_state)
                 + " | " + connectionReadLabel('物品',r.items,r.items_state)
-                + " | 魔法: " + magicConnectionState
-                + (r.native_layout && r.native_layout.recognized
-                    ? " | 原生调用: 可用"
-                    : " | 原生调用: 未匹配（相关生成功能保持保护）");
+                ;
             log("");
             if (r.magic_unloaded) {
                 setTopMagicStatus('待打开');
@@ -3396,6 +3660,7 @@ function doConnect(pid) {
                     refreshCreatureList(false);
                     scanItems();
                     mapScan(false);
+                    loadSpecialEntityCatalog();
                     refreshOtherFeatures();
                     refreshManaMaxLock();
                     refreshTimerLocks();
@@ -3417,6 +3682,7 @@ function doConnect(pid) {
             btn.style.opacity = "1";
             txt.textContent = "\u8fde\u63a5\u5931\u8d25";
             setGameVersion({state:'未连接',display:'未连接',detail:'未连接到游戏进程'});
+            refreshOverviewState(false);
             log("\u8fde\u63a5\u5931\u8d25: " + (r ? r.error : "\u672a\u77e5"));
         }
     }, pid);
@@ -3784,8 +4050,13 @@ function creatureGridCell(row,key){
 }
 function renderCreatureCategoryTools(){
     var host=document.getElementById('creatureCategoryTools'); if(!host)return;
+    var priorCapInput=document.getElementById('dwarfPopulationCapInput');
+    if(priorCapInput&&priorCapInput.dataset.dirty==='true'){
+        _dwarfPopulationCapDraft=priorCapInput.value;
+        _dwarfPopulationCapDraftDirty=true;
+    }
     if(_creatureCategory==='dwarf'){
-        host.innerHTML='<span style="font-size:12px;color:#8C7C6E;margin-right:3px">矮人专属：</span><button class="btn btn-orange" data-dwarf-tool="spawn" onclick="openDwarfSpawnModal()" style="padding:7px 12px">➕ 矮人生成</button><button class="btn btn-peach" data-dwarf-tool="training" onclick="openDwarfTrainingPreset()" style="padding:7px 12px">🧩 培养预设</button><button class="btn btn-peach" data-dwarf-tool="skills" onclick="openSkillModal()" style="padding:7px 12px">💪 技能</button><button class="btn btn-peach" data-dwarf-tool="heal" onclick="healAllDwarves()" style="padding:7px 12px">❤️ 满血</button><button class="btn btn-light" data-dwarf-tool="sat" onclick="fillAllDwarves()" style="padding:7px 12px">🍖 饱食</button><span style="font-size:12px;color:#9A806F">双击矮人行可编辑个人技能与装备。</span>';
+        host.innerHTML='<span style="font-size:12px;color:#8C7C6E;margin-right:3px">矮人专属：</span><button class="btn btn-orange" data-dwarf-tool="spawn" onclick="openDwarfSpawnModal()" style="padding:7px 12px">➕ 矮人生成</button><button class="btn btn-peach" data-dwarf-tool="training" onclick="openDwarfTrainingPreset()" style="padding:7px 12px">🧩 培养预设</button><button class="btn btn-peach" data-dwarf-tool="skills" onclick="openSkillModal()" style="padding:7px 12px">💪 技能</button><button class="btn btn-peach" data-dwarf-tool="heal" onclick="healAllDwarves()" style="padding:7px 12px">❤️ 满血</button><button class="btn btn-light" data-dwarf-tool="sat" onclick="fillAllDwarves()" style="padding:7px 12px">🍖 饱食</button><label for="dwarfPopulationCapInput" style="font-size:12px;font-weight:700;color:#765A40;margin-left:3px">矮人上限</label><input id="dwarfPopulationCapInput" type="number" min="1" max="99" step="1" inputmode="numeric" aria-label="矮人上限" style="width:58px;height:30px;border:1px solid #DCCBBE;border-radius:7px;padding:0 7px;font:inherit"><button class="btn btn-peach" data-dwarf-tool="population-cap" onclick="setDwarfPopulationCap()" style="padding:7px 12px">修改</button><span id="dwarfPopulationCapStatus" style="font-size:12px;color:#9A806F">读取中</span><span style="font-size:12px;color:#9A806F">双击矮人行可编辑个人技能与装备。</span>';
         // These are player-tested dwarf tools.  They are dynamic controls
         // created after the common policy pass, so never leave a stale UI
         // lock on them.  Calls still go through the backend's own connection,
@@ -3799,11 +4070,70 @@ function renderCreatureCategoryTools(){
             button.style.cursor='';
             button.title='';
         });
+        var capInput=document.getElementById('dwarfPopulationCapInput');
+        if(capInput){
+            if(_dwarfPopulationCapDraftDirty){
+                capInput.value=_dwarfPopulationCapDraft;
+                capInput.dataset.dirty='true';
+            }
+            capInput.addEventListener('input',function(){
+                _dwarfPopulationCapDraft=this.value;
+                _dwarfPopulationCapDraftDirty=true;
+                this.dataset.dirty='true';
+            });
+        }
+        refreshDwarfPopulationCap();
     }else if(_creatureCategory==='pet'){
         host.innerHTML='<span style="font-size:12px;color:#8C7C6E;margin-right:3px">宠物专属：</span><button class="btn btn-light" onclick="refreshPetManager(true)" style="padding:7px 12px">🐾 刷新宠物</button><span style="font-size:12px;color:#9A806F">宠物生成与上限控制仍在宠物卡片中；此列表暂只读。</span>';
     }else{
         host.innerHTML='<span style="font-size:12px;color:#8C7C6E">当前分类为只读分析：显示的是地图列 / 行；带 📍 的对象已确认在地图上。“未落地”是待命/回收对象，“待定位”表示该类型坐标结构尚未分析；血量仍待受伤样本验证。</span>';
     }
+}
+function renderDwarfPopulationCap(result){
+    var input=document.getElementById('dwarfPopulationCapInput');
+    var status=document.getElementById('dwarfPopulationCapStatus');
+    if(!input||!status)return;
+    if(result&&result.ok){
+        var limit=Number(result.current_limit);
+        if(Number.isInteger(limit)&&!_dwarfPopulationCapDraftDirty&&document.activeElement!==input)input.value=String(limit);
+        var locked=!!result.override_enabled;
+        status.textContent=(locked?'固定 ':'原生上限 ')+limit;
+        status.style.color=locked?'#A15A2D':'#765A40';
+        return;
+    }
+    status.textContent='读取失败';
+    status.style.color='#B5534E';
+    if(result)status.title=readStateDetail(result);
+}
+function refreshDwarfPopulationCap(){
+    if(_dwarfPopulationCapBusy||_uiClosing||_creatureCategory!=='dwarf')return;
+    _dwarfPopulationCapBusy=true;
+    call('get_dwarf_population_cap_state',function(result){
+        _dwarfPopulationCapBusy=false;
+        renderDwarfPopulationCap(result);
+    });
+}
+function setDwarfPopulationCap(){
+    var input=document.getElementById('dwarfPopulationCapInput');
+    var status=document.getElementById('dwarfPopulationCapStatus');
+    var value=Number(input&&input.value);
+    if(!Number.isInteger(value)||value<1||value>99){
+        if(status){status.textContent='请输入 1-99 的整数';status.style.color='#B5534E';}
+        return;
+    }
+    if(status){status.textContent='正在修改…';status.style.color='#8C7C6E';}
+    call('set_dwarf_population_cap',function(result){
+        if(writeResultOk(result)){
+            _dwarfPopulationCapDraft='';
+            _dwarfPopulationCapDraftDirty=false;
+            renderDwarfPopulationCap(result);
+            log('矮人上限已固定为 '+value+'（本局）','success');
+            refreshCreatureList(true);
+        }else{
+            if(status){status.textContent='修改失败：'+writeResultError(result,'未通过写入校验');status.style.color='#B5534E';}
+            log('矮人上限修改失败：'+writeResultError(result,'未通过写入校验'),'error');
+        }
+    },value);
 }
 function locateCreature(stableId,event){
     if(event){event.preventDefault();event.stopPropagation();}
@@ -3826,14 +4156,7 @@ function refreshDwarfListLegacy(){
 }
 // Keep the connection summary in sync with the asynchronous magic scan.  The
 // scan itself is read-only; this helper only replaces its trailing status text.
-function setTopMagicStatus(label){
-    var extra=document.getElementById('statusExtra');
-    if(!extra) return;
-    var text=String(extra.textContent||'');
-    text=text.replace(/\s*\|\s*魔法(?:定位中)?\s*:\s*[^|]*?(?=\s*\|\s*魔法|$)/,'');
-    text=text.replace(/\s*\|\s*魔法定位中\s*$/,'');
-    extra.textContent=text+' | 魔法: '+String(label||'读取失败');
-}
+function setTopMagicStatus(label){ /* 魔法定位状态显示在魔法页。 */ }
 function renderDwarves(dwarves) {
     _dwarfCache = dwarves || [];
     // Retired table renderer: callers from training/preset flows still use
@@ -5074,6 +5397,7 @@ function globalRefreshTick(){
         var magicPanelForTick=document.getElementById('panel-magic');
         if (!_focusPaused && _magicRefreshRequested && _tick % 8 == 0 && magicPanelForTick && magicPanelForTick.classList.contains('active')) refreshMagicItems(false);
         if (_tick % 8 == 0) refreshBasicState(false);
+        refreshWaveCountdownLive();
         if (!_focusPaused && _tick % 2 == 0) refreshGameTimeControls(false);
         if (_tick % 4 == 0 && document.getElementById('goldEconomyModal').classList.contains('active')) refreshGoldEconomyLive();
         if (_tick % 4 == 0 && document.getElementById('manaControlModal').classList.contains('active')) refreshManaControlLive();
@@ -5219,11 +5543,13 @@ function switchTab(name){
         if(!el && String(node.getAttribute('onclick')||'').indexOf("switchTab('"+name+"')")>=0) el=node;
     });
     if (el) el.classList.add("active");
+    mountOverviewToolbar(name === 'overview');
     if (name === "other") refreshOtherFeatures();
     if (name === "dwarf") refreshCreatureList(false);
     if (name === "magic") refreshMagicItems(false);
     if (name === "map") mapActivate();
     if (name === "item") { normaliseItemToolbar(); syncItemToolbarStickyOffset(); }
+    if (name === "overview") refreshOverviewState(false);
 }
 
 var _techNodes = [];
@@ -6531,13 +6857,17 @@ function toggleItemSelect(el) {
 var _mapData = null;
 var _blockMap = {};
 var _bgHint = {};
+var _mapFavoriteBlocks = [];
 var _z = 6, _ox = 0, _oy = 0, _drag = null;
 var _modalCell = null;
 var _mapTool = 'pan', _selection = null, _selectionCells = new Set(), _selectionDrag = null, _mapEditing = false;
+// Clipboard stays in the current session only. Each entry keeps the exact
+// map fields from the selected cells and a relative offset for preview/paste.
+var _mapClipboard = null;
 var _mapWriteRequestGeneration = 0, _mapWriteChanging = false;
 var _mapHistory = [], _mapFuture = [];
 var _mapView = 'composite', _mapLabels = 'none', _mapPins = [], _mapPinsKey = '', _editingPin = -1, _mapFocusedDwarf = -1, _mapFocusedCreature = null, _mapFocusedCell = null;
-var _mapLoadedCells = null, _mapLayers = {ground:true,underground:true,water:true,buildings:true,entities:true,markers:true}, _mapLastReadAt = 0, _mapCacheMode = 'none', _mapViewportTimer = 0;
+var _mapLoadedCells = null, _mapLayers = {ground:true,underground:true,water:true,buildings:true,entities:true,objects:true,structures:true,markers:true}, _mapStructures = [], _mapWorldObjects = [], _mapObjectsLoading = false, _mapObjectsLastReadAt = 0, _mapObjectsLastPreciseAttemptAt = 0, _mapLastReadAt = 0, _mapCacheMode = 'none', _mapViewportTimer = 0;
 var _mapRenderFrame = 0, _mapDataVersion = 0, _mapRasterCache = null, _mapRasterKey = '', _mapMiniCache = null, _mapMiniKey = '';
 function mapBlocksLoad(){
     call('map_blocks', function(m){
@@ -6552,7 +6882,8 @@ function mapBlocksLoad(){
             var label = it.zh || it.en || ('id'+id);
             html += '<option value="'+id+'">'+id+' - '+label+'</option>';
         }
-        sel.innerHTML = html;
+        _opt.mapBlockAll = html;
+        mapRenderBlockSelects();
         if (keys.length) sel.value = String(keys[0]);
         var emptyOpt = '<option value="65535">65535 - 空</option>';
         var keepOpt = '<option value="">保持不变</option>';
@@ -6560,23 +6891,47 @@ function mapBlocksLoad(){
         var os = document.getElementById('mapOuterSel');
         var fis = document.getElementById('mapFillInnerSel');
         var fos = document.getElementById('mapFillOuterSel');
-        if (is) is.innerHTML = emptyOpt + html;
-        if (os) os.innerHTML = emptyOpt + html;
-        if (fis) fis.innerHTML = keepOpt + emptyOpt + html;
-        if (fos) fos.innerHTML = keepOpt + emptyOpt + html;
-        _opt.mapBlock = html;
-        _opt.mapInnerSel = emptyOpt + html;
-        _opt.mapOuterSel = emptyOpt + html;
-        _opt.mapFillInnerSel = keepOpt + emptyOpt + html;
-        _opt.mapFillOuterSel = keepOpt + emptyOpt + html;
+        _opt.mapInnerPrefix = emptyOpt;
+        _opt.mapOuterPrefix = emptyOpt;
+        _opt.mapFillPrefix = keepOpt + emptyOpt;
+        mapRenderBlockSelects();
         setupSearch('mapBlockSearch', 'mapBlock');
         setupSearch('mapInnerSearch', 'mapInnerSel');
         setupSearch('mapOuterSearch', 'mapOuterSel');
         setupSearch('mapFillInnerSearch', 'mapFillInnerSel');
         setupSearch('mapFillOuterSearch', 'mapFillOuterSel');
+        invokeApi('get_map_favorite_blocks', [], function(result){
+            _mapFavoriteBlocks = result && result.ok && Array.isArray(result.ids) ? result.ids.map(Number).filter(Number.isInteger) : [];
+            mapRenderBlockSelects();
+            if (sel && keys.length && !sel.value) sel.value = String(keys[0]);
+            mapUpdateFavoriteButton();
+        });
     });
 }
-var _opt = {mapBlock:'', mapInnerSel:'', mapOuterSel:'', mapFillInnerSel:'', mapFillOuterSel:''};
+var _opt = {mapBlock:'', mapBlockAll:'', mapInnerSel:'', mapOuterSel:'', mapFillInnerSel:'', mapFillOuterSel:''};
+function mapRenderBlockSelects(){
+    var all=_opt.mapBlockAll||'', fav=[], normal=[];
+    var ids=new Set(_mapFavoriteBlocks||[]);
+    all.split('</option>').forEach(function(raw){
+        var opt=raw.trim(); if(!opt)return;
+        opt+='</option>';
+        var match=opt.match(/value="(\d+)"/); var id=match?Number(match[1]):-1;
+        if(ids.has(id)) fav.push(opt.replace('>', '>★ ')); else normal.push(opt);
+    });
+    var main=(fav.length?'<option disabled>── 常用收藏 ──</option>'+fav.join(''):'')+normal.join('');
+    var sel=document.getElementById('mapBlock'); if(sel){var previous=sel.value;sel.innerHTML=main;if(previous&&sel.querySelector('option[value="'+previous+'"]'))sel.value=previous;}
+    var empty=_opt.mapInnerPrefix||'<option value="65535">65535 - 空</option>', keep=_opt.mapFillPrefix||'<option value="">保持不变</option><option value="65535">65535 - 空</option>';
+    _opt.mapBlock=main; _opt.mapInnerSel=empty+normal.join(''); _opt.mapOuterSel=empty+normal.join(''); _opt.mapFillInnerSel=keep+normal.join(''); _opt.mapFillOuterSel=keep+normal.join('');
+    ['mapInnerSel','mapOuterSel'].forEach(function(id){var el=document.getElementById(id);if(el)el.innerHTML=_opt[id];});
+    ['mapFillInnerSel','mapFillOuterSel'].forEach(function(id){var el=document.getElementById(id);if(el)el.innerHTML=_opt[id];});
+}
+function mapUpdateFavoriteButton(){var btn=document.getElementById('mapFavoriteToggle'),sel=document.getElementById('mapBlock');if(!btn)return;var id=Number(sel&&sel.value);var active=(_mapFavoriteBlocks||[]).indexOf(id)>=0;btn.textContent=active?'★':'☆';btn.title=active?'取消收藏当前方块':'收藏当前方块';}
+function mapToggleFavoriteCurrent(){
+    var sel=document.getElementById('mapBlock'),id=Number(sel&&sel.value); if(!Number.isInteger(id))return;
+    var list=(_mapFavoriteBlocks||[]).slice(),index=list.indexOf(id); if(index>=0)list.splice(index,1); else list.unshift(id);
+    _mapFavoriteBlocks=list.slice(0,24); mapRenderBlockSelects(); if(sel)sel.value=String(id); mapUpdateFavoriteButton();
+    invokeApi('save_map_favorite_blocks',[_mapFavoriteBlocks],function(result){if(!result||!result.ok)log((result&&result.error)||'常用方块保存失败','warning');else log(index>=0?'已取消收藏方块 '+id:'已收藏方块 '+id,'success');});
+}
 function setupSearch(searchId, selectId){
     var inp = document.getElementById(searchId);
     if (!inp) return;
@@ -6586,7 +6941,7 @@ function applySearch(searchId, selectId){
     var q = document.getElementById(searchId).value.trim().toLowerCase();
     var sel = document.getElementById(selectId);
     var all = _opt[selectId] || '';
-    if (!q){ sel.innerHTML = all; return; }
+    if (!q){ sel.innerHTML = all; if(selectId==='mapBlock')mapUpdateFavoriteButton(); return; }
     var parts = all.split('</option>');
     var out = [];
     for (var i=0;i<parts.length;i++){
@@ -6599,6 +6954,7 @@ function applySearch(searchId, selectId){
         if (val.indexOf(q) >= 0 || text.toLowerCase().indexOf(q) >= 0) out.push(opt);
     }
     sel.innerHTML = out.join('');
+    if(selectId==='mapBlock')mapUpdateFavoriteButton();
 }
 function initMapBlocks(){
     if (window.pywebview && window.pywebview.api) mapBlocksLoad();
@@ -6638,8 +6994,111 @@ function mapToggleLayer(layer){
     if (!_mapLayers.hasOwnProperty(layer)) return;
     _mapLayers[layer]=!_mapLayers[layer];
     var id='mapLayer'+layer.charAt(0).toUpperCase()+layer.slice(1), button=document.getElementById(id);
-    if(button) button.className=_mapLayers[layer]?'btn btn-peach':'btn btn-light';
+    if(button){ button.className=_mapLayers[layer]?'btn btn-peach':'btn btn-light'; button.setAttribute('aria-pressed',_mapLayers[layer]?'true':'false'); }
     scheduleMapDraw();
+}
+function mapLoadStructures(){
+    call('scan_map_structures', function(result){
+        if(!result || !result.ok){ log('读取结构失败：'+((result&&result.error)||'未收到有效结果'),'warning'); return; }
+        _mapStructures=Array.isArray(result.structures) ? result.structures.filter(function(item){
+            return item && Number.isFinite(Number(item.row)) && Number.isFinite(Number(item.col)) && Number(item.width)>0 && Number(item.height)>0;
+        }) : [];
+        scheduleMapDraw();
+        var list=document.getElementById('mapStructureList');
+        if(list){
+            if(_mapStructures.length){
+                list.style.display='block';
+                list.innerHTML='<b>结构标注（'+_mapStructures.length+'）</b> '+_mapStructures.map(function(item,idx){
+                    var file=String(item.file||'').replace(/\.map$/i,'');
+                    var name=String(item.name||file||'未命名结构');
+                    var cat=String(item.category||'未分类结构');
+                    // The native slot is authoritative.  Older records may
+                    // not carry the convenience boolean after a UI reload.
+                    var live=Number.isInteger(Number(item.native_record_index))&&Number(item.native_record_index)>=0;
+                    var state=live?'当前原生':'本地记录';
+                    var tone=live?'#4E7D58':'#9A806F';
+                    var hasMask=Array.isArray(item.mask)&&item.mask.some(function(line){return String(line||'').indexOf('1')>=0;});
+                    var occupied=Number(item.occupied_cells)||0;
+                    var range=hasMask?'精确占用 '+occupied+' 格':'范围待确认（仅定位）';
+                    var certainty=hasMask?' · 不规则掩码':' · 禁止按矩形删除';
+                    var deleteButton=hasMask?'<button class="btn btn-light" style="padding:2px 7px;font-size:12px" onclick="deleteStructureComplete('+idx+')">删除</button>':'<button class="btn btn-light" style="padding:2px 7px;font-size:12px" disabled title="尚未取得精确占用掩码">删除</button>';
+                    return '<span style="display:inline-flex;align-items:center;gap:6px;margin:3px 8px 0 0;padding:3px 7px;background:#fff8e5;border:1px solid #f0c85a;border-radius:4px">'+cat+' · '+name+' · '+range+' · 容器'+Number(item.width)+'×'+Number(item.height)+certainty+' <small style="color:'+tone+'">'+state+'</small> '+deleteButton+'</span>';
+                }).join('');
+            }else{
+                list.style.display='block';
+                list.innerHTML='<span style="color:#8c7c6e">当前存档没有已确认结构记录；原有未记录结构只能显示为未分类，暂不能可靠命名。</span>';
+            }
+        }
+        var note=String(result.note||'');
+        log(_mapStructures.length ? ('已显示 '+_mapStructures.length+' 个游戏原生结构') : note,'info');
+    });
+}
+function mapLoadWorldObjects(silent, preciseOverride){
+    if(_mapObjectsLoading || _mapCacheMode==='offline-cache') return;
+    var now=Date.now();
+    var missingFootprint=(_mapWorldObjects||[]).some(function(item){return String(item&&item.occupancy_state||'')!=='native-cell-hit';});
+    var precise=preciseOverride===undefined ? (!silent || (missingFootprint && now-_mapObjectsLastPreciseAttemptAt>=5000)) : !!preciseOverride;
+    if(precise)_mapObjectsLastPreciseAttemptAt=now;
+    _mapObjectsLoading=true;
+    call('scan_map_world_objects', function(result){
+        _mapObjectsLoading=false;
+        if(!result || !result.ok){
+            if(!silent) log('读取独立对象失败：'+((result&&result.error)||'未收到有效结果'),'warning');
+            return;
+        }
+        _mapWorldObjects=Array.isArray(result.entities) ? result.entities.filter(function(item){
+            return item && Number.isFinite(Number(item.row)) && Number.isFinite(Number(item.col)) && Number(item.width)>0 && Number(item.height)>0;
+        }) : [];
+        _mapObjectsLastReadAt=Date.now();
+        var list=document.getElementById('mapObjectList');
+        if(list){
+            list.style.display='block';
+            if(_mapWorldObjects.length){
+                list.innerHTML='<b>独立对象（'+_mapWorldObjects.length+'）</b> <span style="color:#8c7c6e">与外层方块分开读取，仅显示当前存档。</span> '+_mapWorldObjects.map(function(item,idx){
+                    var name=escapeHtml(String(item.name||'未命名对象'));
+                    var objectId=escapeHtml(String(item.id||'类型待识别'));
+                    var row=Math.floor(Number(item.row)), col=Math.floor(Number(item.col));
+                    var cellCount=Math.max(1,Number(item.occupied_cells)||((item.cells||[]).length)||1);
+                    var exact=String(item.occupancy_state||'')==='native-cell-hit';
+                    var footprint=exact ? ('原生占用 '+cellCount+' 格') : '仅定位（待精确读取）';
+                    return '<span style="display:inline-flex;align-items:center;gap:6px;margin:3px 8px 0 0;padding:3px 7px;background:#f7efff;border:1px solid #b987dd;border-radius:4px"><b style="color:#70459a">'+name+'</b><small title="'+(exact?'已按游戏原生逐格占用读取':'自动刷新只保留对象定位；点击读取对象可取得实际占格')+'">'+objectId+' · 行'+row+' 列'+col+' · '+footprint+'</small><button class="btn btn-light" style="padding:2px 7px;font-size:12px" onclick="mapLocateWorldObject('+idx+')">定位</button></span>';
+                }).join('');
+            }else{
+                list.innerHTML='<span style="color:#8c7c6e">当前地图没有读取到独立对象。</span>';
+            }
+        }
+        scheduleMapDraw();
+        if(!silent) log('已读取 '+_mapWorldObjects.length+' 个独立游戏对象','success');
+    }, precise);
+}
+function mapLocateWorldObject(index){
+    var item=_mapWorldObjects[Number(index)];
+    if(!item){ log('该对象已不在当前读取结果中','warning'); return; }
+    var row=Math.floor(Number(item.row)), col=Math.floor(Number(item.col));
+    if(!Number.isFinite(row)||!Number.isFinite(col)){ log('对象位置无效','warning'); return; }
+    mapCenterOn(row,col,true);
+    mapSetFocusedCell(row,col,'对象 · '+String(item.name||'未命名对象'));
+    var info=document.getElementById('mapInfo');
+    var cellCount=Math.max(1,Number(item.occupied_cells)||((item.cells||[]).length)||1);
+    var exact=String(item.occupancy_state||'')==='native-cell-hit';
+    if(info) info.textContent='独立对象：'+String(item.name||'未命名对象')+'（'+String(item.id||'类型待识别')+'）· 行'+row+' 列'+col+' · '+(exact?('原生精确占用 '+cellCount+' 格'):'仅显示定位；点击“读取对象”后显示实际占格');
+    scheduleMapDraw();
+}
+function deleteStructureComplete(index){
+    var item=_mapStructures[Number(index)];
+    if(!item)return;
+    var mask=Array.isArray(item.mask)?item.mask:null, hit=null;
+    if(mask){ for(var rr=0;rr<mask.length&&!hit;rr++){ var line=String(mask[rr]||''); for(var cc=0;cc<line.length;cc++){ if(line.charAt(cc)==='1'){ hit={row:Number(item.mask_origin_row||item.row)+rr,col:Number(item.mask_origin_col||item.col)+cc}; break; } } } }
+    if(!hit){ log('该结构尚未取得精确占用掩码，已拒绝删除，避免误删矩形外地形','warning'); return; }
+    call('delete_structure_complete',function(r){
+        if(r&&r.ok){
+            var exact=!!(r.tiles&&r.tiles.exact_mask);
+            log((r.message||('结构已删除：列'+Number(item.col)+' 行'+Number(item.row)))+
+                (exact?'':'。该结构没有可靠占用掩码，未按矩形清除地图方块'), exact?'success':'info');
+            mapLoadStructures();mapScan();
+        }
+        else log('结构删除失败：'+((r&& (r.error||r.message))||'游戏未确认'),'error');
+    },null,Number(hit.col),Number(hit.row));
 }
 
 function mapName(id){
@@ -6656,7 +7115,10 @@ var _mapScanning = false;
 var _mapStatusScanning = false;
 var _mapRegionScanning = false;
 var _mapViewportLastAt = 0;
+var _mapDwarfMarkersLastAt = 0;
+var _mapDwarfMarkersBusy = false;
 var MAP_VIEWPORT_REFRESH_MS = 1000;
+var MAP_DWARF_MARKER_REFRESH_MS = 350;
 function invalidateMapCaches(){
     _mapRasterCache = null; _mapRasterKey = '';
     _mapMiniCache = null; _mapMiniKey = '';
@@ -6731,12 +7193,20 @@ function mapDropCache(){
     _mapStatusScanning=false;
     _mapRegionScanning=false;
     _mapViewportLastAt=0;
+    _mapDwarfMarkersLastAt=0;
+    _mapDwarfMarkersBusy=false;
     _mapDataVersion++;
     _mapPinsKey='';
     _mapPins=[];
     _mapFocusedDwarf=-1;
     _mapFocusedCreature=null;
     _mapFocusedCell=null;
+    _mapStructures=[];
+    _mapWorldObjects=[];
+    _mapObjectsLastReadAt=0;
+    _mapObjectsLoading=false;
+    _mapClipboard=null;
+    mapUpdateClipboardUi();
     _selection=null;
     _selectionCells.clear();
     invalidateMapCaches();
@@ -6751,6 +7221,13 @@ function mapActivate(){
         mapSetWriteAvailability(!!_mapData.write_enabled);
         scheduleMapDraw();
         if (_mapCacheMode === 'offline-cache') { mapCacheStatus('缓存数据 · 已断开游戏',true); return; }
+        // Structure annotations are save-scoped and inexpensive to read.
+        // Reload them whenever the map panel becomes active so structures
+        // created earlier in this save are visible without a second button.
+        mapLoadStructures();
+        // Resolve object footprints once when the map panel is opened. The
+        // periodic refresh stays lightweight and reuses this cache.
+        mapLoadWorldObjects(true, true);
         mapLiveRefresh(true);
         return;
     }
@@ -6759,6 +7236,10 @@ function mapActivate(){
 }
 function mapScan(silent, done){
     if (_mapScanning || _mapEditing){ if(done) done(null); return; }
+    // A full map read can mean that another save was loaded.  Remove old
+    // structure overlays immediately; the next scan may only repopulate them
+    // from authoritative native-runtime records.
+    _mapStructures=[]; _mapWorldObjects=[]; scheduleMapDraw();
     _mapScanning=true;
     call('map_metadata',function(meta){
         _mapScanning=false;
@@ -6774,6 +7255,11 @@ function mapScan(silent, done){
         _mapDataVersion++;invalidateMapCaches();_mapCacheMode='live-viewport';_mapViewportLastAt=0;mapSetWriteAvailability(!!_mapData.write_enabled);
         if(!_mapLoaded){_mapLoaded=true;if(!silent)log('已读取地图元数据 '+meta.width+'×'+meta.height+'；正在读取当前视口');}else if(!silent)log('已刷新当前视口');
         if(keyChanged)mapLoadPinsForWorld(meta.map_key||'');
+        mapLoadStructures();
+        // Populate native per-cell occupancy after a map/save switch. Without
+        // this first precise read every object is temporarily shown as a
+        // one-cell anchor until the user presses "读取对象" manually.
+        mapLoadWorldObjects(true, true);
         mapCacheStatus('实时视口缓存 · 正在读取 '+new Date(_mapLastReadAt).toLocaleTimeString());
         scheduleMapDraw();
         var region=mapViewportRegion(5);
@@ -6915,13 +7401,32 @@ function mapLiveTick(){
     if (_uiClosing) return;
     if (!_mapData || _mapCacheMode === 'offline-cache' || !mapPanelActive() || _drag || _selectionDrag || _mapEditing || _mapScanning || _mapRegionScanning) return;
     var now=Date.now();
+    if (now-_mapDwarfMarkersLastAt>=MAP_DWARF_MARKER_REFRESH_MS){
+        _mapDwarfMarkersLastAt=now;
+        mapRefreshLiveDwarfMarkers();
+    }
     if (now-_mapViewportLastAt<MAP_VIEWPORT_REFRESH_MS) return;
     _mapViewportLastAt=now;
     var region=mapViewportRegion(4);
     if(region) mapReadLiveRegions([region],true);
+    if(now-_mapObjectsLastReadAt>=2500) mapLoadWorldObjects(true);
+}
+function mapRefreshLiveDwarfMarkers(){
+    if (_mapDwarfMarkersBusy || !_mapData || _mapCacheMode==='offline-cache') return;
+    _mapDwarfMarkersBusy=true;
+    var version=_mapDataVersion;
+    call('map_dwarf_markers',function(result){
+        _mapDwarfMarkersBusy=false;
+        if(!_mapData || version!==_mapDataVersion || !result || !result.ok) return;
+        if(result.changed){ mapScan(true); return; }
+        _mapData.dwarves=Array.isArray(result.dwarves)?result.dwarves:[];
+        mapRefreshDwarfNavigation();
+        scheduleMapDraw();
+    });
 }
 function mapLiveRefresh(silent){
     _mapViewportLastAt=0;
+    _mapDwarfMarkersLastAt=0;
     mapLiveTick();
 }
 startUiRefreshTimers();
@@ -7062,9 +7567,177 @@ function drawMap(){
         for (var r = Math.ceil(r0 / 10) * 10; r < r1; r += 10) ctx.fillText(String(r), 2, _oy + r * _z + 2);
     }
     drawMapPins(ctx);
+    drawMapStructures(ctx);
+    drawStructurePreview(ctx);
+    drawMapWorldObjects(ctx);
+    drawMapClipboardPreview(ctx);
     drawDwarfMarkers(ctx);
     drawMapFocusedCell(ctx);
     drawMiniMap();
+}
+function drawStructurePreview(ctx){
+    var item=_structurePreviewItem;
+    if(!_mapData || !item) return;
+    var col=Math.trunc(Number((document.getElementById('structureCol')||{}).value));
+    var row=Math.trunc(Number((document.getElementById('structureRow')||{}).value));
+    var width=Math.max(1,Math.trunc(Number(item.width)||1)), height=Math.max(1,Math.trunc(Number(item.height)||1));
+    if(!Number.isFinite(col)||!Number.isFinite(row)) return;
+    var x=_ox+col*_z,y=_oy+row*_z,w=width*_z,h=height*_z;
+    if(x+w<0||y+h<0||x>ctx.canvas.width||y>ctx.canvas.height)return;
+    ctx.save();
+    ctx.fillStyle='rgba(112,208,255,.14)';ctx.fillRect(x,y,w,h);
+    ctx.strokeStyle='rgba(112,208,255,.92)';ctx.lineWidth=Math.max(1.5,Math.min(3,_z*.1));
+    ctx.setLineDash([Math.max(4,_z*.35),Math.max(3,_z*.22)]);ctx.strokeRect(x+.5,y+.5,Math.max(0,w-1),Math.max(0,h-1));ctx.setLineDash([]);
+    if(_z>=8){
+        var label='预览 · '+String(item.name||item.category||'结构');
+        ctx.font='600 11px sans-serif';var tw=Math.ceil(ctx.measureText(label).width)+10;
+        var lx=Math.max(2,Math.min(ctx.canvas.width-tw-2,x)),ly=Math.max(20,Math.min(ctx.canvas.height-2,y));
+        ctx.fillStyle='rgba(28,76,96,.9)';ctx.fillRect(lx,ly-18,tw,17);ctx.fillStyle='#e8fbff';ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillText(label,lx+5,ly-5);
+    }
+    ctx.restore();
+}
+function drawMapClipboardPreview(ctx){
+    var clip=_mapClipboard;
+    if(!_mapData||!clip||!Array.isArray(clip.cells)||!clip.cells.length)return;
+    var row=Math.trunc(Number(clip.previewRow)),col=Math.trunc(Number(clip.previewCol));
+    if(!Number.isInteger(row)||!Number.isInteger(col))return;
+    var cells=[],seen={};
+    clip.cells.forEach(function(source){
+        var rr=row+Number(source.row),cc=col+Number(source.col);
+        if(!Number.isInteger(rr)||!Number.isInteger(cc)||rr<0||cc<0||rr>=_mapData.height||cc>=_mapData.width)return;
+        var key=cc+','+rr;if(seen[key])return;seen[key]=true;cells.push({row:rr,col:cc});
+    });
+    if(!cells.length)return;
+    ctx.save();
+    ctx.fillStyle='rgba(80,205,255,.24)';
+    cells.forEach(function(cell){ctx.fillRect(_ox+cell.col*_z,_oy+cell.row*_z,_z,_z);});
+    ctx.strokeStyle='rgba(123,226,255,.98)';ctx.lineWidth=Math.max(1.5,Math.min(3,_z*.12));ctx.setLineDash([Math.max(4,_z*.35),Math.max(3,_z*.22)]);ctx.beginPath();
+    cells.forEach(function(cell){var x=_ox+cell.col*_z,y=_oy+cell.row*_z;if(!seen[(cell.col-1)+','+cell.row]){ctx.moveTo(x,y);ctx.lineTo(x,y+_z);}if(!seen[(cell.col+1)+','+cell.row]){ctx.moveTo(x+_z,y);ctx.lineTo(x+_z,y+_z);}if(!seen[cell.col+','+(cell.row-1)]){ctx.moveTo(x,y);ctx.lineTo(x+_z,y);}if(!seen[cell.col+','+(cell.row+1)]){ctx.moveTo(x,y+_z);ctx.lineTo(x+_z,y+_z);}});ctx.stroke();ctx.setLineDash([]);
+    var entities=Array.isArray(clip.entities)?clip.entities:[];
+    entities.forEach(function(entity){var ec=col+Number(entity.col),er=row+Number(entity.row);if(!Number.isInteger(ec)||!Number.isInteger(er)||ec<0||er<0||ec>=_mapData.width||er>=_mapData.height)return;var cx=_ox+(ec+.5)*_z,cy=_oy+(er+.5)*_z,radius=Math.max(4,Math.min(10,_z*.28));ctx.fillStyle='rgba(199,112,236,.92)';ctx.beginPath();ctx.moveTo(cx,cy-radius);ctx.lineTo(cx+radius,cy);ctx.lineTo(cx,cy+radius);ctx.lineTo(cx-radius,cy);ctx.closePath();ctx.fill();ctx.strokeStyle='#321844';ctx.lineWidth=1;ctx.stroke();});
+    if(_z>=8){var label='复制预览 · '+clip.width+'×'+clip.height+' 格'+(entities.length?' · '+entities.length+' 个实体':'');ctx.font='600 11px sans-serif';ctx.textAlign='left';ctx.textBaseline='bottom';var x0=_ox+col*_z,y0=_oy+row*_z,tw=Math.ceil(ctx.measureText(label).width)+10,lx=Math.max(2,Math.min(ctx.canvas.width-tw-2,x0)),ly=Math.max(20,Math.min(ctx.canvas.height-2,y0));ctx.fillStyle='rgba(28,76,96,.92)';ctx.fillRect(lx,ly-18,tw,17);ctx.fillStyle='#e8fbff';ctx.fillText(label,lx+5,ly-5);}
+    ctx.restore();
+}
+function drawMapStructures(ctx){
+    if(!_mapLayers.structures || !_mapData || !_mapStructures.length) return;
+    _mapStructures.forEach(function(item){
+        var hasSourceMask=Array.isArray(item.mask)&&item.mask.length>0;
+        var row=Math.floor(Number(hasSourceMask&&item.mask_origin_row!=null?item.mask_origin_row:item.row)), col=Math.floor(Number(hasSourceMask&&item.mask_origin_col!=null?item.mask_origin_col:item.col));
+        var width=Math.floor(Number(hasSourceMask&&item.mask_width?item.mask_width:item.width)), height=Math.floor(Number(hasSourceMask&&item.mask_height?item.mask_height:item.height));
+        if(!Number.isInteger(row)||!Number.isInteger(col)||width<1||height<1) return;
+        var x=_ox+col*_z, y=_oy+row*_z, w=width*_z, h=height*_z;
+        if(x+w<0 || y+h<0 || x>ctx.canvas.width || y>ctx.canvas.height) return;
+        ctx.save();
+        /* A placed room is merged into ordinary map cells.  Only the saved
+           post-placement mask is authoritative; looking at current terrain
+           would incorrectly absorb nearby blocks into the marker. */
+        var sourceMask=Array.isArray(item.mask)?item.mask:null;
+        var hasMask=!!(sourceMask && sourceMask.length && sourceMask.some(function(line){return String(line||'').indexOf('1')>=0;}));
+        var occupied=[], occupiedCount=0;
+        for(var rr=0;rr<height;rr++){
+            var line=[], maskLine=hasMask?String(sourceMask[rr]||''):'';
+            for(var cc=0;cc<width;cc++){
+                var present=hasMask ? maskLine.charAt(cc)==='1' : false;
+                line.push(present); if(present) occupiedCount++;
+            }
+            occupied.push(line);
+        }
+        ctx.fillStyle='rgba(255, 190, 67, .16)';
+        ctx.strokeStyle='#ffd166';
+        ctx.lineWidth=Math.max(1.5,Math.min(3,_z*.12));
+        for(var r2=0;r2<height;r2++) for(var c2=0;c2<width;c2++) if(occupied[r2][c2]){
+            var sx=_ox+(col+c2)*_z, sy=_oy+(row+r2)*_z;
+            ctx.fillRect(sx,sy,_z,_z);
+            ctx.beginPath();
+            if(r2===0 || !occupied[r2-1][c2]){ctx.moveTo(sx,sy);ctx.lineTo(sx+_z,sy);}
+            if(r2===height-1 || !occupied[r2+1][c2]){ctx.moveTo(sx,sy+_z);ctx.lineTo(sx+_z,sy+_z);}
+            if(c2===0 || !occupied[r2][c2-1]){ctx.moveTo(sx,sy);ctx.lineTo(sx,sy+_z);}
+            if(c2===width-1 || !occupied[r2][c2+1]){ctx.moveTo(sx+_z,sy);ctx.lineTo(sx+_z,sy+_z);}
+            ctx.stroke();
+        }
+        /* Legacy records may not have a readback mask.  Keep them visible as
+           an anchor and label, but never invent a rectangular room outline. */
+        if(_z>=8){
+            var label=String(item.category||'结构')+' · '+String(item.file||'').replace(/\.map$/i,'');
+            ctx.font='600 11px sans-serif';ctx.textAlign='left';ctx.textBaseline='bottom';
+            var tw=Math.ceil(ctx.measureText(label).width)+10;
+            var labelX=x,labelY=y;
+            if(occupiedCount){
+                outer: for(var lr=0;lr<height;lr++) for(var lc=0;lc<width;lc++) if(occupied[lr][lc]){labelX=_ox+(col+lc)*_z;labelY=_oy+(row+lr)*_z;break outer;}
+            }
+            /* Keep the badge visible when the room touches the viewport edge
+               or when its first occupied row is above the canvas. */
+            labelX=Math.max(2,Math.min(ctx.canvas.width-tw-2,labelX));
+            labelY=Math.max(20,Math.min(ctx.canvas.height-2,labelY));
+            ctx.fillStyle='rgba(54,40,25,.88)';ctx.fillRect(labelX,labelY-18,tw,17);
+            ctx.fillStyle='#fff5d6';ctx.fillText(label,labelX+5,labelY-5);
+        }
+        if(!hasMask){
+            /* Native Room records expose a reliable centre/size container even
+               when the sparse tile silhouette is unavailable.  Draw this as
+               a dashed, labelled range only; deletion remains disabled until
+               a conservative mask has been derived. */
+            ctx.save();
+            ctx.strokeStyle='#ffd166'; ctx.lineWidth=Math.max(2,Math.min(4,_z*.14));
+            var ax=x+_z*.5, ay=y+_z*.5, arm=Math.max(5,Math.min(14,_z*.38));
+            ctx.beginPath(); ctx.moveTo(ax-arm,ay); ctx.lineTo(ax+arm,ay);
+            ctx.moveTo(ax,ay-arm); ctx.lineTo(ax,ay+arm); ctx.stroke();
+            ctx.fillStyle='rgba(255,190,67,.28)'; ctx.beginPath(); ctx.arc(ax,ay,Math.max(3,_z*.18),0,Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+        ctx.restore();
+    });
+}
+function drawMapWorldObjects(ctx){
+    if(!_mapLayers.objects || !_mapData || !_mapWorldObjects.length) return;
+    _mapWorldObjects.forEach(function(item){
+        var anchorRow=Number(item.row), anchorCol=Number(item.col);
+        if(!Number.isFinite(anchorRow)||!Number.isFinite(anchorCol)) return;
+        var rawCells=Array.isArray(item.cells) && item.cells.length ? item.cells : [{col:anchorCol,row:anchorRow}];
+        var seen={}, cells=[];
+        rawCells.forEach(function(cell){
+            var col=Number(cell&&cell.col), row=Number(cell&&cell.row);
+            if(!Number.isInteger(col)||!Number.isInteger(row)||col<0||row<0||col>=_mapData.width||row>=_mapData.height) return;
+            var key=col+','+row;
+            if(!seen[key]){seen[key]=true;cells.push({col:col,row:row});}
+        });
+        if(!cells.length) return;
+        var minCol=Math.min.apply(null,cells.map(function(cell){return cell.col;}));
+        var minRow=Math.min.apply(null,cells.map(function(cell){return cell.row;}));
+        var maxCol=Math.max.apply(null,cells.map(function(cell){return cell.col;}));
+        var maxRow=Math.max.apply(null,cells.map(function(cell){return cell.row;}));
+        var x0=_ox+minCol*_z, y0=_oy+minRow*_z, x1=_ox+(maxCol+1)*_z, y1=_oy+(maxRow+1)*_z;
+        if(x1<0 || y1<0 || x0>ctx.canvas.width || y0>ctx.canvas.height) return;
+        var centerX=_ox+(anchorCol+.5)*_z, centerY=_oy+(anchorRow+.5)*_z, radius=Math.max(4,Math.min(10,_z*.28));
+        var exact=String(item.occupancy_state||'')==='native-cell-hit';
+        ctx.save();
+        // Each fill is a native cell hit.  Draw only its exposed sides, so
+        // irregular object footprints are never turned into a guessed box.
+        ctx.fillStyle=exact?'rgba(181,104,224,.19)':'rgba(181,104,224,.11)';
+        cells.forEach(function(cell){ctx.fillRect(_ox+cell.col*_z,_oy+cell.row*_z,_z,_z);});
+        ctx.strokeStyle=exact?'rgba(216,160,246,.98)':'rgba(216,160,246,.72)';
+        ctx.lineWidth=Math.max(1.5,Math.min(3,_z*.12));
+        ctx.setLineDash(exact?[]:[Math.max(3,_z*.35),Math.max(2,_z*.18)]);
+        ctx.beginPath();
+        cells.forEach(function(cell){
+            var x=_ox+cell.col*_z, y=_oy+cell.row*_z;
+            if(!seen[(cell.col-1)+','+cell.row]){ctx.moveTo(x,y);ctx.lineTo(x,y+_z);}
+            if(!seen[(cell.col+1)+','+cell.row]){ctx.moveTo(x+_z,y);ctx.lineTo(x+_z,y+_z);}
+            if(!seen[cell.col+','+(cell.row-1)]){ctx.moveTo(x,y);ctx.lineTo(x+_z,y);}
+            if(!seen[cell.col+','+(cell.row+1)]){ctx.moveTo(x,y+_z);ctx.lineTo(x+_z,y+_z);}
+        });
+        ctx.stroke();ctx.setLineDash([]);
+        ctx.fillStyle='#c770ec'; ctx.beginPath();
+        ctx.moveTo(centerX,centerY-radius);ctx.lineTo(centerX+radius,centerY);ctx.lineTo(centerX,centerY+radius);ctx.lineTo(centerX-radius,centerY);ctx.closePath();ctx.fill();
+        ctx.strokeStyle='#321844';ctx.lineWidth=1;ctx.stroke();
+        if(_z>=9){
+            var label='对象 · '+String(item.name||item.id||'未命名');
+            ctx.font='600 11px sans-serif';ctx.textAlign='left';ctx.textBaseline='bottom';
+            var tw=Math.ceil(ctx.measureText(label).width)+10, lx=Math.max(2,Math.min(ctx.canvas.width-tw-2,x0)), ly=Math.max(20,Math.min(ctx.canvas.height-2,y0));
+            ctx.fillStyle='rgba(58,27,78,.9)';ctx.fillRect(lx,ly-18,tw,17);ctx.fillStyle='#faecff';ctx.fillText(label,lx+5,ly-5);
+        }
+        ctx.restore();
+    });
 }
 function drawMapFocusedCell(ctx){
     var target=_mapFocusedCell;
@@ -7138,6 +7811,13 @@ function drawMiniMap(){
     ((_mapData && _mapData.dwarves) || []).forEach(function(dwarf){
         ctx.fillStyle='#4fd1ff'; ctx.fillRect(dwarf.col*sx-1.5,dwarf.row*sy-1.5,3,3);
     });
+    if(_mapLayers.objects){
+        _mapWorldObjects.forEach(function(item){
+            var row=Number(item.row),col=Number(item.col),width=Math.max(1,Number(item.width)||1),height=Math.max(1,Number(item.height)||1);
+            if(!Number.isFinite(row)||!Number.isFinite(col))return;
+            ctx.fillStyle='#c770ec';ctx.fillRect((col+width/2)*sx-1.5,(row+height/2)*sy-1.5,3,3);
+        });
+    }
     var main=document.getElementById('mapCanvas'), rw=main.getBoundingClientRect().width, rh=parseFloat(main.style.height)||main.getBoundingClientRect().height;
     ctx.strokeStyle='#fff'; ctx.lineWidth=1; ctx.strokeRect((-_ox/_z)*sx,(-_oy/_z)*sy,(rw/_z)*sx,(rh/_z)*sy);
 }
@@ -7151,6 +7831,14 @@ function mapCellFromEvent(e){
     if (r < 0 || r >= _mapData.height) return null;
     return {row:r, col:c};
 }
+function mapObjectsAt(row,col){
+    return (_mapWorldObjects||[]).filter(function(item){
+        var top=Number(item.row),left=Number(item.col),bottom=Number(item.bottom),right=Number(item.right);
+        if(!Number.isFinite(bottom)) bottom=top+Math.max(1,Number(item.height)||1);
+        if(!Number.isFinite(right)) right=left+Math.max(1,Number(item.width)||1);
+        return row>=top && row<bottom && col>=left && col<right;
+    });
+}
 function mapInfo(row, col){
     if(!_mapData) return '';
     var i=row*_mapData.width+col;
@@ -7162,10 +7850,11 @@ function mapInfo(row, col){
     // strip that presentation prefix here so the map never shows "ID" twice.
     var innerName=String(mapName(inn)||'').replace(/^ID\s*/i,'').trim();
     var outerName=String(mapOuterName(out)||'').replace(/^ID\s*/i,'').trim();
+    var objects=mapObjectsAt(row,col), objectText=objects.length?'　|　对象：'+objects.map(function(item){return String(item.name||item.id||'未命名对象');}).join('、'):'';
     return '行 '+row+' · 列 '+col+'　|　'+explored+
         '　|　内层：'+innerName+'（'+mapDecimalId(inn)+'）'+
         '　|　外层：'+outerName+'（'+mapDecimalId(out)+'）'+
-        (wl?'　|　水量 '+wl:'');
+        (wl?'　|　水量 '+wl:'')+objectText;
 }
 function mapDecimalId(value){
     var n=Number(value);
@@ -7175,6 +7864,13 @@ function mapDecimalId(value){
 function mapSetFocusedCell(row, col, label){
     if (!_mapData) return;
     _mapFocusedCell = {row:Number(row), col:Number(col), label:String(label || '定位目标')};
+    var sc=document.getElementById('structureCol'), sr=document.getElementById('structureRow');
+    if(sc) sc.value=String(Math.trunc(Number(col)||0));
+    if(sr) sr.value=String(Math.trunc(Number(row)||0));
+    if(typeof specialEntityMapCoordinate==='function') specialEntityMapCoordinate(col,row);
+    if(typeof updateStructurePreview==='function') updateStructurePreview();
+    var info=document.getElementById('mapInfo');
+    if(info) info.textContent=mapInfo(Math.trunc(Number(row)),Math.trunc(Number(col)));
     scheduleMapDraw();
 }
 var mapCanvasEl = document.getElementById('mapCanvas');
@@ -7184,18 +7880,20 @@ if (mapCanvasEl){
         if(!p) return;
         g('mapRow', p.row); g('mapCol', p.col);
         mapSetFocusedCell(p.row, p.col, '当前选择');
-        document.getElementById('mapInfo').textContent = mapInfo(p.row, p.col);
     });
     mapCanvasEl.addEventListener('dblclick', function(e){
-        if (_mapTool === 'select') return;
         var p = mapCellFromEvent(e);
         if(!p) return;
+        if (_mapClipboard){ mapPasteClipboard(p.row,p.col); return; }
+        if (_mapTool === 'select') return;
         mapOpenModal(p.row, p.col);
     });
     mapCanvasEl.addEventListener('mousemove', function(e){
         var p = mapCellFromEvent(e);
         if(!p) return;
-        document.getElementById('mapInfo').textContent = mapInfo(p.row, p.col);
+        if(_mapClipboard){
+            _mapClipboard.previewRow=p.row; _mapClipboard.previewCol=p.col; scheduleMapDraw();
+        }
     });
     mapCanvasEl.addEventListener('pointerdown', function(e){
         // Right drag always pans, including while the selection tool is active.
@@ -7248,6 +7946,7 @@ if (mapCanvasEl){
             } else {
                 mapUpdateSelection(p, p, drag.mode, drag.base);
             }
+            mapSetFocusedCell(p.row, p.col, '选区末格');
             _selectionDrag = null;
         }
         _drag = null;
@@ -7280,13 +7979,16 @@ function mapTypingTarget(target){
     return target && (target.isContentEditable || /^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(target.tagName));
 }
 document.addEventListener('keydown', function(e){
-    if (!_mapData || mapTypingTarget(e.target)) return;
-    if (e.key === 'Escape' && _selectionCells.size){
-        e.preventDefault(); mapClearSelection(); return;
+    if (!_mapData || !mapPanelActive() || mapTypingTarget(e.target)) return;
+    if (e.key === 'Escape'){
+        if(_mapClipboard){e.preventDefault();mapCancelClipboard();return;}
+        if (_selectionCells.size){e.preventDefault();mapClearSelection();return;}
     }
     if (!(e.ctrlKey || e.metaKey)) return;
     var key=e.key.toLowerCase();
-    if (key === 'z'){
+    if (key === 'c' && _selectionCells.size){
+        e.preventDefault(); mapCopySelection();
+    } else if (key === 'z'){
         e.preventDefault();
         if (e.shiftKey) mapRedo(); else mapUndo();
     } else if (key === 'y'){
@@ -7422,6 +8124,30 @@ function mapSetExploredSelection(explored){
     });
     mapSetExploredCells(cells, explored, explored?'设为已探索':'取消探索');
 }
+function mapDeleteSpecialEntitiesInSelection(done){
+    var cells=mapCellsForSelection().map(function(cell){return {col:cell.col,row:cell.row};});
+    if(!cells.length){if(done)done(true);return;}
+    call('delete_special_entities_in_cells',function(result){
+        if(!result||!result.ok){log('选区特殊实体删除失败：'+((result&&(result.error||result.message))||'游戏未确认'),'error');if(done)done(false);return;}
+        var count=Number(result.deleted_count||0);
+        if(count)log('已提交 '+count+' 个特殊实体的原生销毁','success');
+        if(done)done(true);
+    },cells);
+}
+function mapClearSpecialEntitiesInSelection(){
+    var policy=writePolicyMessage('delete_special_entities_in_cells');
+    if(policy){log(policy,'warning');return;}
+    if(!_selectionCells.size){log('请先框选要删除特殊实体的区域','warning');return;}
+    var count=mapCellsForSelection().length;
+    showConfirm('将删除框选的 '+count+' 格内已识别特殊实体。\n\n不会改动方块、水、材质或地图结构。是否继续？',function(yes){
+        if(!yes)return;
+        mapDeleteSpecialEntitiesInSelection(function(ok){
+            if(!ok)return;
+            mapLoadWorldObjects(false,true);
+            log('特殊实体清除请求已完成；地图方块和结构未改动。','success');
+        });
+    },{title:'清除结构'});
+}
 function mapExploreAll(){
     if (mapWriteBlocked('全图标记已探索')) return;
     if (!_mapData || !_mapData.width || !_mapData.height){ log('请先读取当前地图'); return; }
@@ -7434,6 +8160,11 @@ function mapExploreAll(){
 }
 function mapClearModal(){
     if (mapWriteBlocked('清空此格')) return;
+    if(_selectionCells.size){
+        var selected=mapCellsForSelection(), count=selected.length;
+        showConfirm('清空已框选的 '+count+' 格内层、外层、材质和水量？\n\n不会删除特殊实体或地图结构。',function(yes){if(!yes)return;mapCommitCells(selected,{inner:0xFFFF,front:0xFFFF,bg:0,water:0},'清空选区',function(ok){if(ok)mapCancelModal();});},{title:'清空选区'});
+        return;
+    }
     if(!_modalCell) return;
     var row = _modalCell.row, col = _modalCell.col;
     showConfirm('清空行'+row+' 列'+col+' 的内层、外层和水量？',function(yes){if(!yes)return;mapCommitPatch(row,col,row,col,{inner:0xFFFF,front:0xFFFF,bg:0,water:0},'清空格子',function(ok){if(ok)mapCancelModal();});},{title:'清空此格'});
@@ -7452,6 +8183,11 @@ function mapReplaceInput(){
 }
 function mapClearInput(){
     if (mapWriteBlocked('清空此格')) return;
+    if (_selectionCells.size){
+        var selected=mapCellsForSelection(), count=selected.length;
+        showConfirm('清空已框选的 '+count+' 格内层、外层、材质和水量？\n\n不会删除特殊实体或地图结构。',function(yes){if(!yes)return;mapCommitCells(selected,{inner:0xFFFF,front:0xFFFF,bg:0,water:0},'清空选区');},{title:'清空选区'});
+        return;
+    }
     var row = parseInt(g('mapRow'))||0, col = parseInt(g('mapCol'))||0;
     showConfirm('清空 行'+row+' 列'+col+' 的内层、外层和水量？',function(yes){if(yes)mapCommitPatch(row,col,row,col,{inner:0xFFFF,front:0xFFFF,bg:0,water:0},'清空格子');},{title:'清空此格'});
 }
@@ -7527,13 +8263,93 @@ function mapCellsForSelection(){
     });
     return cells;
 }
+function mapUpdateClipboardUi(){
+    var button=document.getElementById('mapCopyCancel'),status=document.getElementById('mapClipboardStatus');
+    if(button)button.style.display=_mapClipboard?'inline-flex':'none';
+    if(status){
+        var entityCount=_mapClipboard&&Array.isArray(_mapClipboard.entities)?_mapClipboard.entities.length:0;
+        status.textContent=_mapClipboard?'复制预览：'+_mapClipboard.width+'×'+_mapClipboard.height+' 格'+(entityCount?' · 特殊实体 '+entityCount+' 个':'')+' · 移动鼠标后双击放置':' ';
+        status.style.color=_mapClipboard?'#9a641d':'';
+    }
+}
+var _copyableSpecialEntityIds={dragon_egg:true,beetle_nest:true,beetle_egg:true,octopus_nest:true,rat_nest:true,animal_trap:true,wooden_trap:true,iron_trap:true,slime_trap:true,snow_globe:true,ice_tree:true,new_year_tree:true,boost_chest:true,goblin_chest:true,chest_lev1_coop:true,scroll_chest:true,evil_chest:true,wine_barrel_dlc:true,exploding_barrel:true,biome1_crystal:true,dig_machine_crystal:true,large_crystal_of_the_main_hall:true,melting_plant_01:true,melting_plant_02:true,shop:true,lighthouse:true,goblin_camp:true,totem:true,god_altar:true,frostling_camp:true,cave_goblins_camp:true,home:true,home_add:true,portal:true,mana_generator:true,static_portal:true,prison_door:true,ancient_door:true,sand_room_door:true,sand_rune_door:true,alien_door:true,pandora_chest:true,portal_shard:true,pirate_ship:true,pirate_cannon:true,shop_elf:true,ww_elf_merchant:true,dark_elfs_altar:true,dark_elfs_portal:true,dwarf_kind_portal:true,tf_elf_portal:true,tf_dwarf_portal:true,tf_level_portal:true,pyramid_spawner:true};
+function mapClipboardSpecialEntities(bounds){
+    if(!bounds)return [];
+    var selected=_selectionCells||new Set(),seen={};
+    return (_mapWorldObjects||[]).filter(function(item){
+        var id=String(item&&item.id||'').trim().toLowerCase();
+        if(!_copyableSpecialEntityIds[id])return false;
+        var anchorRow=Math.floor(Number(item.row)),anchorCol=Math.floor(Number(item.col));
+        if(!Number.isInteger(anchorRow)||!Number.isInteger(anchorCol))return false;
+        var occupied=Array.isArray(item.cells)&&item.cells.length?item.cells:[{row:anchorRow,col:anchorCol}];
+        var hit=occupied.some(function(cell){return selected.has(String(Math.floor(Number(cell.row)))+':'+String(Math.floor(Number(cell.col))));});
+        if(!hit)return false;
+        var key=id+'@'+anchorRow+':'+anchorCol;
+        if(seen[key])return false;seen[key]=true;return true;
+    }).map(function(item){return {id:String(item.id).trim().toLowerCase(),name:String(item.name||item.id||'特殊实体'),row:Math.floor(Number(item.row))-bounds.r0,col:Math.floor(Number(item.col))-bounds.c0};});
+}
+function mapCopySelection(){
+    if(!_mapData||!_selectionCells||!_selectionCells.size){log('请先框选要复制的方块','warning');return;}
+    var bounds=mapSelectionBounds(_selectionCells),source=mapCellsForSelection();
+    if(!bounds||!source.length){log('选区没有可复制的地图数据','warning');return;}
+    var specialEntities=mapClipboardSpecialEntities(bounds);
+    _mapClipboard={width:bounds.c1-bounds.c0+1,height:bounds.r1-bounds.r0+1,cells:source.map(function(cell){return {row:cell.row-bounds.r0,col:cell.col-bounds.c0,inner:cell.inner,front:cell.front,bg:cell.bg,water:cell.water};}),entities:specialEntities,previewRow:bounds.r0,previewCol:bounds.c0};
+    mapUpdateClipboardUi();
+    var info=document.getElementById('mapInfo');
+    if(info)info.textContent='已复制选区 '+_mapClipboard.width+'×'+_mapClipboard.height+' 格'+(specialEntities.length?'，含 '+specialEntities.length+' 个特殊实体':'')+'；移动鼠标后双击生成，按 Esc 取消';
+    scheduleMapDraw();
+    log('已复制选区：'+_mapClipboard.width+'×'+_mapClipboard.height+' 格'+(specialEntities.length?'，含 '+specialEntities.length+' 个特殊实体':''),'success');
+}
+function mapCancelClipboard(silent){
+    if(!_mapClipboard)return;
+    _mapClipboard=null; mapUpdateClipboardUi(); scheduleMapDraw();
+    if(!silent)log('已取消方块复制预览','info');
+}
+function mapPasteClipboard(row,col){
+    if(!_mapClipboard||!_mapData)return;
+    if(mapWriteBlocked('生成复制的方块'))return;
+    row=Math.trunc(Number(row));col=Math.trunc(Number(col));
+    if(!Number.isInteger(row)||!Number.isInteger(col)){log('复制目标位置无效','warning');return;}
+    var clip=_mapClipboard;
+    if(row<0||col<0||row+clip.height>_mapData.height||col+clip.width>_mapData.width){log('复制预览超出地图边界，请换一个位置','warning');return;}
+    var entityPlacements=(Array.isArray(clip.entities)?clip.entities:[]).map(function(entity){return {id:String(entity.id||'').trim().toLowerCase(),col:col+Number(entity.col),row:row+Number(entity.row),name:String(entity.name||entity.id||'特殊实体')};});
+    if(entityPlacements.some(function(entity){return !entity.id||!Number.isInteger(entity.col)||!Number.isInteger(entity.row)||entity.col<0||entity.row<0||entity.col>=_mapData.width||entity.row>=_mapData.height;})){log('复制的特殊实体目标超出地图边界，请换一个位置','warning');return;}
+    var before=[],after=[];
+    clip.cells.forEach(function(source){
+        var targetRow=row+source.row,targetCol=col+source.col,index=targetRow*_mapData.width+targetCol;
+        before.push({row:targetRow,col:targetCol,inner:_mapData.w2[index],front:_mapData.front[index],bg:_mapData.bg[index],water:_mapData.water[index]&31});
+        after.push({row:targetRow,col:targetCol,inner:source.inner,front:source.front,bg:source.bg,water:source.water,preserve_water:false});
+    });
+    if(!after.length){log('复制内容为空','warning');return;}
+    var preservedSelection=new Set(_selectionCells||[]);
+    mapWriteCellsBatched(after,'生成复制方块',function(ok,result){
+        if(!ok){log('生成复制方块失败：'+((result&&result.error)||'未知错误'),'error');return;}
+        _mapHistory.push({label:'生成复制方块',before:before,after:after});
+        if(_mapHistory.length>12)_mapHistory.shift();
+        _mapFuture=[];
+        function finishPaste(entityResult){
+            if(entityPlacements.length){
+                if(entityResult&&entityResult.ok)log('复制的 '+Number(entityResult.created_count||0)+' 个特殊实体已原生生成','success');
+                else log('方块已复制，但特殊实体生成失败：'+((entityResult&&entityResult.error)||'游戏未确认'),'error');
+            }
+            mapCancelClipboard(true);
+            mapScan(true,function(){
+                _selectionCells=preservedSelection;mapRefreshSelectionInfo();scheduleMapDraw();
+            });
+        }
+        if(!entityPlacements.length){finishPaste(null);return;}
+        log('方块已复制，正在生成 '+entityPlacements.length+' 个特殊实体…','info');
+        call('spawn_special_entities',finishPaste,entityPlacements.map(function(entity){return {id:entity.id,col:entity.col,row:entity.row};}));
+    });
+}
 function mapPatchedCells(cells, patch){
     return cells.map(function(cell){
         var bg = patch.bg===undefined ? cell.bg : patch.bg;
         if (patch.explored !== undefined) bg = patch.explored ? (bg & ~0x02) : (bg | 0x02);
         return {row:cell.row, col:cell.col, inner:patch.inner===undefined?cell.inner:patch.inner,
             front:patch.front===undefined?cell.front:patch.front, bg:bg,
-            water:patch.water===undefined?cell.water:patch.water};
+            water:patch.water===undefined?cell.water:patch.water,
+            preserve_water:patch.water===undefined};
     });
 }
 function mapWriteCells(cells, done){
@@ -7568,11 +8384,17 @@ function mapCommitCells(before, patch, label, afterWrite){
     if (!_mapData.write_enabled){ log('保护模式：地图方块写入已暂停，避免游戏崩溃'); return; }
     var limit=_mapData.edit_limit || 128;
     var after = mapPatchedCells(before, patch);
+    var preservedSelection=new Set(_selectionCells||[]);
+    function restoreSelection(){
+        if(!preservedSelection.size||!_mapData)return;
+        var valid=new Set(); preservedSelection.forEach(function(key){var p=String(key).split(':');var r=Number(p[0]),c=Number(p[1]);if(Number.isInteger(r)&&Number.isInteger(c)&&r>=0&&c>=0&&r<_mapData.height&&c<_mapData.width)valid.add(r+':'+c);});
+        _selectionCells=valid; mapRefreshSelectionInfo(); scheduleMapDraw();
+    }
     mapWriteCellsBatched(after, label, function(ok, result){
         if (!ok){
             var partial=(result&&result.cells)||0;
             log(label+'失败: '+((result&&result.error)||'')+(partial ? ('（已完成 '+partial+' 格）') : ''));
-            mapScan();
+            mapScan(true,function(){restoreSelection();});
             return;
         }
         if (count <= 2048){
@@ -7581,8 +8403,7 @@ function mapCommitCells(before, patch, label, afterWrite){
         }
         _mapFuture = [];
         log(label+'：'+count+' 格'+(count>limit ? ('（已自动分 '+Math.ceil(count/limit)+' 批）') : ''));
-        mapScan();
-        if (afterWrite) afterWrite(true);
+        mapScan(true,function(){restoreSelection();if(afterWrite) afterWrite(true);});
     });
 }
 function mapCommitPatch(r0, c0, r1, c1, patch, label, afterWrite){
@@ -8054,7 +8875,7 @@ function refreshWorldPandoraControl(){
         call('get_pandora_status',function(runtime){
             _worldPandora.busy=false;var exists=!!(runtime&&runtime.ok&&runtime.exists),timer=document.getElementById('worldPandoraTimer'),hint=document.getElementById('worldPandoraHint');setWorldPandoraWriteAvailability(exists);
             var localNote='语义未验证 · 事件列表来自本地定义；';
-            if(runtime&&runtime.ok){if(timer&&document.activeElement!==timer&&runtime.timer!==null&&runtime.timer!==undefined)timer.value=(Math.round(Number(runtime.timer)*10)/10).toString();worldPandoraStatus(localNote+(exists?'已验证 · 当前已有 '+(runtime.chest_count||1)+' 个盒子':(runtime.armed?'已验证 · 预设已就绪':'已验证 · 当前存档未发现盒子')));if(hint)hint.textContent=writePolicyMessage('force_pandora_event')|| (exists?'当前盒子的事件已经确定，请等它被打开或消失后再预设。':'只影响之后新生成的盒子；地图已存在的盒子不会被改变。');}
+            if(runtime&&runtime.ok){if(timer&&document.activeElement!==timer&&runtime.timer!==null&&runtime.timer!==undefined)timer.value=(Math.round(Number(runtime.timer)*10)/10).toString();worldPandoraStatus(localNote+(exists?'已验证 · 当前已有 '+(runtime.chest_count||1)+' 个盒子':(runtime.armed?(runtime.restart_required?'已写入配置 · 重启游戏后生效':'已验证 · 预设已就绪'):'已验证 · 当前存档未发现盒子')));if(hint)hint.textContent=writePolicyMessage('force_pandora_event')|| (exists?'当前盒子的事件已经确定，请等它被打开或消失后再预设。':(runtime.restart_required?'事件表在游戏启动时读取；请完全重启游戏后再生成盒子。':'只影响之后新生成的盒子；地图已存在的盒子不会被改变。'));}
             else {worldPandoraStatus(localNote+readStateText(runtime,'读取失败')+'：'+readStateDetail(runtime),true);if(hint)hint.textContent='运行时状态未定位，不能把它解释为“当前没有潘多拉盒子”。';}
         });
     },true);
@@ -8072,7 +8893,7 @@ function pandoraDirectorRenderCatalog(){var host=document.getElementById('pandor
 function pandoraDirectorRenderSelected(){var host=document.getElementById('pandoraDirectorSelected'),event=pandoraDirectorSelected();if(!host)return;if(!event){host.textContent='请选择目录中的事件。';return;}host.innerHTML='<strong>'+escapeHtml(event.title)+'</strong><br><span>ID：'+escapeHtml(event.id)+' · '+escapeHtml(event.source)+'</span><br><span>分类：'+escapeHtml(event.category)+' · 风险：'+escapeHtml(event.risk)+' · 权重：'+escapeHtml(String(event.weight))+'</span><br><span>生成条件：'+escapeHtml(event.conditions||event.place||'游戏自动判定')+'</span><br><span>选址：'+escapeHtml(event.placement||'游戏自动选址')+'</span>'+(event.long_lived?'<br><span style="color:#A15A2D">长期对象：发生后需重进存档确认。</span>':'')+'<br><span style="color:'+(event.controllable?'#4E8B58':'#A15A2D')+'">'+escapeHtml(event.allow_reason||'')+'</span>';}
 function pandoraDirectorRenderQueue(){var host=document.getElementById('pandoraDirectorQueue');if(!host)return;host.innerHTML=_pandoraDirector.queue.length?_pandoraDirector.queue.map(function(key,index){var event=_pandoraDirector.events.find(function(item){return item.key===key;});return '<div class="pandora-queue-row"><span style="min-width:18px">'+(index+1)+'.</span><span style="flex:1">'+escapeHtml(event?event.title:key)+'</span><button class="btn btn-light" onclick="pandoraDirectorQueueRemove('+index+')" style="padding:3px 7px;font-size:11px">取消</button></div>';}).join(''):'<div class="pandora-queue-empty">队列为空。选择事件后点击“加入队列”。</div>';}
 function pandoraDirectorHistory(kind,text){_pandoraDirector.history.push({at:Date.now(),kind:String(kind||'潘多拉'),text:String(text||'')});while(_pandoraDirector.history.length>40)_pandoraDirector.history.shift();log('潘多拉 · '+String(kind||'事件')+'：'+String(text||''),'info');}
-function pandoraDirectorSetRuntime(status,error){var host=document.getElementById('pandoraDirectorRuntime'),bar=document.getElementById('pandoraDirectorRuntimeBar');if(!host)return;if(!status||!status.ok){host.className='pandora-unconnected';host.textContent='未连接或运行时未就绪：'+String(error||'可浏览目录，预设/倒计时需连接游戏。');if(bar)bar.innerHTML='<span class="pandora-director-pill">未连接：可浏览目录</span><button class="btn btn-light" onclick="pandoraDirectorRefresh(true)" style="padding:6px 10px">↻ 刷新目录</button>';return;}var forced=_pandoraDirector.events.find(function(event){return event.key===_pandoraDirector.forcedKey;});host.className='';host.innerHTML='当前盒子：'+(status.exists?(forced?'已预设：'+escapeHtml(forced.title):'已生成 · 实际事件 ID 尚未定位'):'未生成')+'<br>下一次倒计时：<b>'+Number(status.timer).toFixed(1)+' 秒</b><br>下一事件：'+(forced?escapeHtml(forced.title):(status.armed?'已预设':'原始随机'))+'<br><span style="color:#9A806F">事件由游戏自动选址；盒子生成后结果不会再被修改。</span>';if(bar)bar.innerHTML='<span class="pandora-director-pill">'+(status.exists?'盒子已生成':'等待下一次潘多拉')+'</span><span>倒计时 '+Number(status.timer).toFixed(1)+' 秒</span><button class="btn btn-light" onclick="pandoraDirectorRefresh(true)" style="padding:6px 10px">↻ 刷新</button>';var input=document.getElementById('pandoraDirectorTimerInput');if(input&&document.activeElement!==input)input.value=Number(status.timer).toFixed(1);var pause=document.getElementById('pandoraDirectorPause');if(pause)pause.textContent=(_timerLocks.pandora||{}).enabled?'恢复':'暂停';}
+function pandoraDirectorSetRuntime(status,error){var host=document.getElementById('pandoraDirectorRuntime'),bar=document.getElementById('pandoraDirectorRuntimeBar');if(!host)return;if(!status||!status.ok){host.className='pandora-unconnected';host.textContent='未连接或运行时未就绪：'+String(error||'可浏览目录，预设/倒计时需连接游戏。');if(bar)bar.innerHTML='<span class="pandora-director-pill">未连接：可浏览目录</span><button class="btn btn-light" onclick="pandoraDirectorRefresh(true)" style="padding:6px 10px">↻ 刷新目录</button>';return;}var runtimeTimer=Number(status.timer),hasTimer=Number.isFinite(runtimeTimer)&&((runtimeTimer!==0)||!!status.timer_address);var forced=_pandoraDirector.events.find(function(event){return event.key===_pandoraDirector.forcedKey;});var restartNote=status.restart_required?'已写入配置，请完全重启游戏后生效。':'事件由游戏自动选址；盒子生成后结果不会再被修改。';host.className='';host.innerHTML='当前盒子：'+(status.exists?(forced?'已预设：'+escapeHtml(forced.title):'已生成 · 实际事件 ID 尚未定位'):'未生成')+'<br>下一次倒计时：<b>'+(hasTimer?runtimeTimer.toFixed(1)+' 秒':'未读取')+'</b><br>下一事件：'+(forced?escapeHtml(forced.title):(status.armed?'已写入配置':'原始随机'))+'<br><span style="color:#9A806F">'+restartNote+'</span>';if(bar)bar.innerHTML='<span class="pandora-director-pill">'+(status.exists?'盒子已生成':'等待下一次潘多拉')+'</span><span>倒计时 '+(hasTimer?runtimeTimer.toFixed(1)+' 秒':'未读取')+'</span><button class="btn btn-light" onclick="pandoraDirectorRefresh(true)" style="padding:6px 10px">↻ 刷新</button>';var input=document.getElementById('pandoraDirectorTimerInput');if(input&&document.activeElement!==input&&hasTimer)input.value=runtimeTimer.toFixed(1);var pause=document.getElementById('pandoraDirectorPause');if(pause)pause.textContent=(_timerLocks.pandora||{}).enabled?'恢复':'暂停';}
 function pandoraDirectorPollRuntime(){call('get_pandora_status',function(status){_pandoraDirector.status=status||null;pandoraDirectorSetRuntime(status,status&&status.error);if(!status||!status.ok)return;if(status.auto_restored){pandoraDirectorHistory('派发完成','上一只潘多拉盒子已消失，已恢复随机权重。');if(_pandoraDirector.running)pandoraDirectorAdvanceQueue();}});}
 function pandoraDirectorRefresh(force){ensurePandoraEventDirector();function runtime(){pandoraDirectorPollRuntime();pandoraDirectorRenderQueue();}if(!force&&_pandoraDirector.events.length){runtime();return;}call('get_pandora_events',function(events){if(!events||!events.ok){var status=document.getElementById('pandoraDirectorStatus');if(status)status.textContent=(events&&events.error)||'事件目录读取失败';return;}_pandoraDirector.events=events.events||[];_pandoraDirector.forcedKey=events.forced_key||'';var category=document.getElementById('pandoraDirectorCategory'),previous=String(category&&category.value||'');if(category){category.innerHTML='<option value="">全部分类</option>';Array.from(new Set(_pandoraDirector.events.map(function(event){return event.category||'其它';}))).sort().forEach(function(value){var option=document.createElement('option');option.value=value;option.textContent=value;category.appendChild(option);});category.value=previous;}if(!_pandoraDirector.selected&&_pandoraDirector.events.length)_pandoraDirector.selected=_pandoraDirector.events[0].key;pandoraDirectorRenderCatalog();pandoraDirectorRenderSelected();var status=document.getElementById('pandoraDirectorStatus');if(status)status.textContent='目录 '+_pandoraDirector.events.length+' 项 · 本体事件可预设，模组事件按验证状态显示。';runtime();},true);}
 function pandoraDirectorStartPolling(){if(_pandoraDirector.pollTimer)clearInterval(_pandoraDirector.pollTimer);_pandoraDirector.pollTimer=setInterval(function(){if(!_uiClosing&&document.getElementById('pandoraEventDirector'))pandoraDirectorPollRuntime();},1000);}
@@ -8083,8 +8904,8 @@ function pandoraDirectorStartQueue(){if(!_pandoraDirector.queue.length){log('队
 function pandoraDirectorRenderQueue(){var host=document.getElementById('pandoraDirectorQueue');if(!host)return;var active=_pandoraDirector.activeKey&&_pandoraDirector.events.find(function(item){return item.key===_pandoraDirector.activeKey;});var html=active?'<div class="pandora-queue-row" style="background:#FFF5E9"><span style="min-width:18px">▶</span><span style="flex:1"><b>当前队列项：</b>'+escapeHtml(active.title)+' · 等待潘多拉生成并完成</span></div>':'';html+=_pandoraDirector.queue.length?_pandoraDirector.queue.map(function(key,index){var event=_pandoraDirector.events.find(function(item){return item.key===key;});return '<div class="pandora-queue-row"><span style="min-width:18px">'+(index+1)+'.</span><span style="flex:1">'+escapeHtml(event?event.title:key)+'</span><button class="btn btn-light" onclick="pandoraDirectorQueueRemove('+index+')" style="padding:3px 7px;font-size:11px">取消</button></div>';}).join(''):(active?'':'<div class="pandora-queue-empty">队列为空。选择事件后点击“加入队列”。</div>');host.innerHTML=html;}
 function pandoraDirectorFinishQueue(){_pandoraDirector.running=false;_pandoraDirector.activeKey='';call('restore_pandora_events',function(result){pandoraDirectorHistory('队列结束',result&&result.ok?'所有队列项已完成，已恢复游戏原始随机权重。':'队列已结束；恢复随机请手动确认。');pandoraDirectorRenderQueue();pandoraDirectorRefresh(true);});}
 function pandoraDirectorPollRuntime(){call('get_pandora_status',function(status){_pandoraDirector.status=status||null;if(status&&status.ok&&!status.armed)_pandoraDirector.forcedKey='';pandoraDirectorSetRuntime(status,status&&status.error);if(!status||!status.ok){pandoraDirectorRenderQueue();return;}if(status.auto_restored&&_pandoraDirector.running&&_pandoraDirector.activeKey){var active=_pandoraDirector.events.find(function(event){return event.key===_pandoraDirector.activeKey;});pandoraDirectorHistory('队列完成',(active?active.title:'当前项')+' 已完成，准备处理下一项。');_pandoraDirector.activeKey='';if(_pandoraDirector.queue.length)pandoraDirectorAdvanceQueue();else pandoraDirectorFinishQueue();}pandoraDirectorRenderQueue();});}
-function pandoraDirectorSetNext(){var event=pandoraDirectorSelected();if(!event){log('请先选择潘多拉事件','warning');return;}if(!event.controllable){log(event.allow_reason||'该事件当前仅支持目录读取','warning');return;}call('force_pandora_event',function(result){if(!result||!result.ok){pandoraDirectorHistory('预设失败',(result&&result.error)||'未确认');pandoraDirectorRefresh(false);return;}_pandoraDirector.forcedKey=event.key;pandoraDirectorHistory('预设下一次',event.title+'；等待游戏原生潘多拉派发。');pandoraDirectorSetRuntime({ok:true,exists:false,armed:true,timer:(_pandoraDirector.status&&_pandoraDirector.status.timer)||0});pandoraDirectorRefresh(false);},event.key);}
-function pandoraDirectorAdvanceQueue(){if(_pandoraDirector.activeKey)return;if(!_pandoraDirector.queue.length){pandoraDirectorFinishQueue();return;}var key=_pandoraDirector.queue[0],event=_pandoraDirector.events.find(function(item){return item.key===key;});if(!event){_pandoraDirector.queue.shift();pandoraDirectorAdvanceQueue();return;}_pandoraDirector.selected=key;pandoraDirectorRenderCatalog();pandoraDirectorRenderSelected();call('force_pandora_event',function(result){if(!result||!result.ok){_pandoraDirector.running=false;pandoraDirectorHistory('队列暂停',(result&&result.error)||'下一项未能预设，保留队列。');pandoraDirectorRenderQueue();pandoraDirectorRefresh(false);return;}_pandoraDirector.queue.shift();_pandoraDirector.activeKey=key;_pandoraDirector.forcedKey=key;pandoraDirectorHistory('队列已预设',event.title+'；等待潘多拉生成和完成。');pandoraDirectorSetRuntime({ok:true,exists:false,armed:true,timer:(_pandoraDirector.status&&_pandoraDirector.status.timer)||0});pandoraDirectorRenderQueue();pandoraDirectorRefresh(false);},key);}
+function pandoraDirectorSetNext(){var event=pandoraDirectorSelected();if(!event){log('请先选择潘多拉事件','warning');return;}if(!event.controllable){log(event.allow_reason||'该事件当前仅支持目录读取','warning');return;}call('force_pandora_event',function(result){if(!result||!result.ok){pandoraDirectorHistory('预设失败',(result&&result.error)||'未确认');pandoraDirectorRefresh(false);return;}_pandoraDirector.forcedKey=event.key;_pandoraDirector.running=false;pandoraDirectorHistory('已写入配置',event.title+'；请完全重启游戏后再生成潘多拉盒子。');var previousTimer=_pandoraDirector.status&&Number.isFinite(Number(_pandoraDirector.status.timer))?Number(_pandoraDirector.status.timer):null;pandoraDirectorSetRuntime({ok:true,exists:false,armed:true,restart_required:true,timer:previousTimer});pandoraDirectorRefresh(false);},event.key);}
+function pandoraDirectorAdvanceQueue(){if(_pandoraDirector.activeKey)return;if(!_pandoraDirector.queue.length){pandoraDirectorFinishQueue();return;}var key=_pandoraDirector.queue[0],event=_pandoraDirector.events.find(function(item){return item.key===key;});if(!event){_pandoraDirector.queue.shift();pandoraDirectorAdvanceQueue();return;}_pandoraDirector.selected=key;pandoraDirectorRenderCatalog();pandoraDirectorRenderSelected();call('force_pandora_event',function(result){if(!result||!result.ok){_pandoraDirector.running=false;pandoraDirectorHistory('队列暂停',(result&&result.error)||'下一项未能预设，保留队列。');pandoraDirectorRenderQueue();pandoraDirectorRefresh(false);return;}_pandoraDirector.queue.shift();_pandoraDirector.activeKey='';_pandoraDirector.running=false;_pandoraDirector.forcedKey=key;pandoraDirectorHistory('已写入配置',event.title+'；请完全重启游戏后再生成潘多拉盒子，队列已暂停。');var previousTimer=_pandoraDirector.status&&Number.isFinite(Number(_pandoraDirector.status.timer))?Number(_pandoraDirector.status.timer):null;pandoraDirectorSetRuntime({ok:true,exists:false,armed:true,restart_required:!!result.restart_required,timer:previousTimer});pandoraDirectorRenderQueue();pandoraDirectorRefresh(false);},key);}
 function pandoraDirectorStartQueue(){if(_pandoraDirector.activeKey){log('当前已有队列项正在等待潘多拉完成','warning');return;}if(!_pandoraDirector.queue.length){log('队列为空','warning');return;}_pandoraDirector.running=true;pandoraDirectorAdvanceQueue();}
 function pandoraDirectorClearQueue(){_pandoraDirector.queue=[];_pandoraDirector.running=false;_pandoraDirector.activeKey='';pandoraDirectorHistory('队列','已清空；恢复游戏原始随机权重。');call('restore_pandora_events',function(){pandoraDirectorRenderQueue();pandoraDirectorRefresh(true);});}
 // The native shop path is intentionally one selected package at a time.  It
@@ -8099,6 +8920,38 @@ function procurementStartNativeSelectionPoll(){procurementStopNativeSelectionPol
 function openProcurementCenter(){var modal=document.getElementById('goldEconomyModal');if(modal)modal.classList.add('active');procurementPrepareNativePurchaseUi();procurementSelectTab(_procurement.tab||'catalog');procurementStartNativeSelectionPoll();}
 function closeProcurementCenter(){procurementStopNativeSelectionPoll();var modal=document.getElementById('goldEconomyModal');if(modal)modal.classList.remove('active');}
 function procurementNativePurchase(){var selected=_procurement.nativeSelection;if(_procurement.nativeBuying){log('正在等待上一笔原生购买完成，请稍候。','info');return;}if(!selected||!selected.ok){procurementReadNativeSelection(false);procurementStatus('请先在游戏商店选中商品',true);return;}var id=String(selected.id||'').trim().toLowerCase();if(!id){procurementStatus('当前商品 ID 读取失败',true);return;}showConfirm('确认通过游戏原生商店购买 1 包“'+(selected.name||id)+'”？\n将由游戏自己扣除金币并生成商品。',function(yes){if(!yes)return;_procurement.nativeBuying=true;procurementStatus('正在调用游戏原生购买…');call('native_shop_purchase_one',function(r){_procurement.nativeBuying=false;if(!r||!r.ok){procurementStatus((r&&r.error)||'原生购买失败',true);log((r&&r.error)||'原生购买失败；未将其当作成功。','error');return;}procurementSetGold(r.after);if(_procurement.cart&&_procurement.cart[id]){_procurement.cart[id]=Math.max(0,Number(_procurement.cart[id])-1);if(!_procurement.cart[id])delete _procurement.cart[id];}_procurement.cartSummary=null;procurementRenderCart();procurementStatus('已原生购买 1 包');log('原生购买完成：'+(r.name||r.id)+' ×'+procurementFmt(r.pack_qty)+'，金币 '+procurementFmt(r.before)+' → '+procurementFmt(r.after),'success');procurementReadNativeSelection(true);},id);});}
+// Pandora has its own runtime locator.  A locator miss must not be shown as
+// a disconnected game when the main connection is already live.
+var _pandoraDirectorSetRuntimeBase=pandoraDirectorSetRuntime;
+pandoraDirectorSetRuntime=function(status,error){
+    if(status&&status.ok){_pandoraDirectorSetRuntimeBase(status,error);return;}
+    var host=document.getElementById('pandoraDirectorRuntime'),bar=document.getElementById('pandoraDirectorRuntimeBar');
+    if(!host)return;
+    var connectedNow=document.getElementById('connDot')&&document.getElementById('connDot').classList.contains('on');
+    host.className='pandora-unconnected';
+    host.textContent=(connectedNow?'已连接游戏，但潘多拉运行时尚未定位：':'未连接游戏：')+String(error||'请进入已载入的地图后重试。');
+    if(bar)bar.innerHTML='<span class="pandora-director-pill">'+(connectedNow?'已连接：等待定位':'未连接：可浏览目录')+'</span><button class="btn btn-light" onclick="pandoraDirectorRefresh(true)" style="padding:6px 10px">↻ 刷新目录</button>';
+};
+// The legacy refresh path wrote its own error text and bypassed the unified
+// runtime renderer.  Keep directory loading, then always render through the
+// polling path so connection and locator states remain distinct.
+pandoraDirectorRefresh=function(force){
+    ensurePandoraEventDirector();
+    function runtime(){pandoraDirectorPollRuntime();pandoraDirectorRenderQueue();}
+    if(!force&&_pandoraDirector.events.length){runtime();return;}
+    call('get_pandora_events',function(events){
+        if(!events||!events.ok){var label=document.getElementById('pandoraDirectorStatus');if(label)label.textContent=(events&&events.error)||'事件目录读取失败';return;}
+        _pandoraDirector.events=events.events||[];_pandoraDirector.forcedKey=events.forced_key||'';
+        var category=document.getElementById('pandoraDirectorCategory'),current=String(category&&category.value||'');
+        if(category){category.innerHTML='<option value="">全部分类</option>';Array.from(new Set(_pandoraDirector.events.map(function(event){return event.category||'其它';}))).sort().forEach(function(value){var option=document.createElement('option');option.value=value;option.textContent=value;category.appendChild(option);});category.value=current;}
+        if(!_pandoraDirector.selected&&_pandoraDirector.events.length)_pandoraDirector.selected=_pandoraDirector.events[0].key;
+        pandoraDirectorRenderCatalog();pandoraDirectorRenderSelected();
+        var label=document.getElementById('pandoraDirectorStatus');if(label)label.textContent='目录 '+_pandoraDirector.events.length+' 项 · 本体事件可预设，模组事件按验证状态显示。';
+        runtime();
+    },!!force);
+};
+var _pandoraDirectorStartPollingBase=pandoraDirectorStartPolling;
+pandoraDirectorStartPolling=function(){_pandoraDirectorStartPollingBase();scheduleUiTimeout(function(){if(!_uiClosing)pandoraDirectorPollRuntime();},450);};
 mapSetWriteAvailability(false);
 initMapBlocks();
 function beginUiShutdown(){
@@ -8202,6 +9055,10 @@ function offlineInventoryGrantPrepare(){
 }
 window.addEventListener('DOMContentLoaded',function(){
     normalizeDecorativeUiIcons(document);
+    mountOverviewToolbar(true);
+    arrangeMapControlLayout();
+    refreshOverviewState(false);
+    startOverviewPolling();
     scheduleUiTimeout(initializeUpdateStatus,180);
     if(window.MutationObserver){
         var observer=new MutationObserver(function(records){

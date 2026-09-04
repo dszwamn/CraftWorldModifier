@@ -1,10 +1,124 @@
 ### 1. 导入与常量
-import webview, webbrowser, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys, random
+import webview, webbrowser, pymem, pymem.memory, struct, threading, time, ctypes, os, json, re, math, csv, hashlib, shutil, uuid, sys, random, collections
 import urllib.parse, urllib.request, urllib.error, zipfile, tempfile, subprocess, io
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime, timezone
 from functools import wraps
+
+try:
+    from embedded_game_data import (
+        EMBEDDED_PANDORA_EVENTS_XML,
+        EMBEDDED_STRUCTURE_CATALOG,
+        EMBEDDED_TECH_LOCALE_CSV,
+        EMBEDDED_TECH_TREE_FILES,
+    )
+except Exception:
+    # The source checkout and packaged EXE both include this module. Keep a
+    # harmless empty fallback so diagnostics can still start if a developer
+    # temporarily removes the generated snapshot.
+    EMBEDDED_PANDORA_EVENTS_XML = ""
+    EMBEDDED_STRUCTURE_CATALOG = []
+    EMBEDDED_TECH_LOCALE_CSV = ""
+    EMBEDDED_TECH_TREE_FILES = {}
+
+
+def _embedded_structure_index():
+    """Index the bundled structure directory once, without touching Levels."""
+    result = {}
+    for item in EMBEDDED_STRUCTURE_CATALOG or ():
+        try:
+            filename = str(item[0]).strip()
+            if filename:
+                result[filename.lower()] = item
+        except (IndexError, TypeError, ValueError):
+            continue
+    return result
+
+
+EMBEDDED_STRUCTURE_INDEX = _embedded_structure_index()
+
+
+def _structure_chinese_suffix(value):
+    """Turn compact Level filenames into Chinese-only display labels.
+
+    Original filenames remain the native ``putRoom`` argument and a hidden
+    search key.  The visible catalog should be readable without exposing the
+    game's abbreviated English naming scheme.
+    """
+    raw = str(value or "").lower()
+    if not raw:
+        return ""
+    phrases = {
+        "corridviphatch": "贵宾通道舱口", "corridluxury": "豪华通道",
+        "corridlong": "长通道", "corridhigh": "高通道",
+        "corridcross": "十字通道", "corridhatch": "通道舱口",
+        "corridiron": "铁质通道", "corridlux": "豪华通道",
+        "corridvip": "贵宾通道", "corridone": "单格通道",
+        "corridgrotto": "矿洞通道", "corrid": "通道",
+        "elevdownhigh": "高位下行井", "elevmineblock": "矿井方块",
+        "elevmine": "矿井升降井", "elevdown": "下行升降井",
+        "elevtop": "上行升降井", "guardmanhole": "守卫检修口",
+        "guardvip": "贵宾守卫室", "grottoriver": "矿洞河流",
+        "grottolake": "矿洞湖泊", "grottopipes": "矿洞管道",
+        "railwayhatch": "铁路舱口", "railwaymine": "铁路矿井",
+        "wallstrong": "坚固墙体", "wallvip": "贵宾墙体",
+        "walllnd": "左侧墙体", "wallrnd": "右侧墙体",
+        "rockldirt": "左岩土层", "rockrdirt": "右岩土层",
+        "stairslux": "豪华楼梯", "treasluxury": "豪华宝库",
+        "vipdining": "贵宾餐厅", "lightempty": "空光照区",
+        "l1coop": "第一关合作模式", "greate": "巨型",
+    }
+    # Longest tokens first prevents "corrid" from consuming "corridlong".
+    for token, chinese in sorted(phrases.items(), key=lambda item: len(item[0]), reverse=True):
+        raw = raw.replace(token, " " + chinese + " ")
+    raw = re.sub(r"(?<=\d)x(?=\d)", "×", raw)
+    raw = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", raw)
+    words = {
+        "ancient": "远古", "aliens": "异星", "armory": "军械库", "aver": "普通",
+        "barr": "兵营", "big": "大型", "block": "方块", "border": "边界",
+        "bottom": "下层", "branch": "树枝", "bridge": "桥", "carpenter": "木工房",
+        "castle": "城堡", "ceiling": "顶部", "cellar": "地窖", "chest": "宝箱",
+        "colony": "殖民地", "coop": "合作", "corner": "转角", "crown": "树冠",
+        "crystal": "水晶", "dark": "黑暗", "desert": "沙漠", "dining": "餐厅",
+        "dirt": "泥土", "eater": "吞噬者", "empty": "空置", "entrance": "入口",
+        "evil": "邪恶", "exemple": "示例", "floor": "地板", "forge": "熔炉",
+        "forest": "森林", "four": "四向", "frt": "森林", "gate": "大门",
+        "gnats": "飞虫", "grotto": "矿洞", "growth": "生长", "guard": "守卫",
+        "hatch": "舱口", "high": "高", "its": "事件", "kitch": "厨房",
+        "l": "左", "lab": "实验室", "left": "左侧", "light": "光照", "little": "小型",
+        "live": "生物", "long": "长", "luxury": "豪华", "m": "中型", "manuf": "工坊",
+        "map": "地图", "melting": "熔炼", "mine": "矿井", "mines": "矿区",
+        "minestl": "钢矿", "mount": "山体", "mountain": "山地", "mushroom": "蘑菇",
+        "new": "新版", "old": "旧版", "pandora": "潘多拉", "pirate": "海盗",
+        "pipes": "管道", "portal": "传送门", "quarry": "采石场", "r": "右",
+        "railwater": "水运铁轨", "railway": "铁路", "rock": "岩石", "romm": "房间",
+        "room": "房间", "root": "树根", "roots": "树根", "sand": "沙地",
+        "schema": "图纸", "ship": "船只", "shop": "商店", "small": "小型",
+        "spawn": "生成", "stairs": "楼梯", "stone": "石制", "store": "仓库",
+        "t": "测试", "temple": "神殿", "test": "测试", "tf": "特殊",
+        "thron": "王座", "top": "上层", "trap": "陷阱", "treas": "宝库",
+        "treasury": "宝库", "trunk": "树干", "vip": "贵宾", "wall": "墙体",
+        "warehouse": "仓库", "water": "水域", "ww": "世界遗迹",
+    }
+    parts = re.split(r"[\s_\-]+", raw)
+    result = []
+    for part in parts:
+        if not part:
+            continue
+        if re.fullmatch(r"\d+(?:×\d+)?", part):
+            result.append(part)
+        elif re.search(r"[\u4e00-\u9fff]", part):
+            result.append(part)
+        elif part in words:
+            result.append(words[part])
+        elif re.fullmatch(r"[a-z]+", part):
+            # Preserve uniqueness through adjacent sequence numbers while
+            # keeping unknown developer abbreviations out of the visible UI.
+            result.append("结构片段")
+        else:
+            result.append(part)
+    return " ".join(result) or "未命名结构"
 
 
 def _diagnostic(*parts):
@@ -84,7 +198,7 @@ _install_webview_disposal_guard()
 
 
 DEFAULT_GAME_ROOT = r"D:\Steam\steamapps\common\CraftTheWorld"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1"
 APP_ID = "crafttheworld-modifier"
 # Public release metadata for the maintainer's GitHub repository.  The UI
 # performs one display-only check after startup; it never downloads or applies
@@ -96,7 +210,7 @@ UPDATE_RELEASE_PAGE_URL = "https://github.com/dszwamn/CraftWorldModifier/release
 UPDATE_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 UPDATE_MAX_PACKAGE_BYTES = 300 * 1024 * 1024
 UPDATE_ALLOWED_SOURCE_NAMES = frozenset({
-    "block_data.py", "item_translations.txt", "config/marks.json",
+    "block_data.py", "embedded_game_data.py", "item_translations.txt", "config/marks.json",
 })
 UPDATE_ALLOWED_SOURCE_PREFIXES = ("craft_web_", "ui_v")
 UPDATE_ALLOWED_EXE_NAMES = frozenset({"CraftWorldModifier.exe"})
@@ -262,6 +376,7 @@ DEFAULT_CONFIG = {
     "item_quick_settings": {},
     "mana_max_lock": {"enabled": False, "target": None},
     "map_pins": {},
+    "map_favorite_blocks": [],
     "proof_text": {},
     "scrapped_items": [],
     "verified_items": [],
@@ -748,6 +863,7 @@ V2_DAYTIME_VTABLE_RVA = 0xA99834
 V2_GAME_SPEED_ACTIVE_OFF = 0x178
 V2_GAME_SPEED_SOURCE_OFF = 0x188
 DAYTIME_CURRENT_OFF = 0xC0
+DAYTIME_DAY_COUNT_OFF = 0xBC
 DAYTIME_DAY_END_OFF = 0xC4
 DAYTIME_SUNSET_MID_OFF = 0xC8
 DAYTIME_NIGHT_BEGIN_OFF = 0xCC
@@ -972,10 +1088,36 @@ def get_base(pm_obj=None):
     return base_addr
 
 
+def _is_plausible_32bit_pointer(value):
+    """Accept normal user-space pointers from the 32-bit game process.
+
+    CraftWorld can allocate heap objects above 2 GB under WOW64.  Those
+    addresses are still valid unsigned 32-bit pointers; rejecting them at
+    ``0x80000000`` made live entities disappear selectively on affected
+    machines.
+    """
+    try:
+        pointer = int(value or 0) & 0xFFFFFFFF
+        return 0x10000 <= pointer < 0xFFF00000
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _read_ascii_string(pm, addr, max_len=16):
     """读取ASCII字符串"""
 
-    raw = pm.read_bytes(addr, max_len)
+    try:
+        addr = int(addr or 0)
+        max_len = int(max_len or 0)
+        # Object/string pointers are supplied by the live game heap.  During
+        # an object destruction pass a vector slot can outlive its string
+        # buffer briefly, so reject implausible requests and treat unreadable
+        # memory as an absent string rather than surfacing it to pywebview.
+        if not (_is_plausible_32bit_pointer(addr) and 0 < max_len <= 256):
+            return ""
+        raw = pm.read_bytes(addr, max_len)
+    except Exception:
+        return ""
 
     null_idx = raw.find(b'\x00')
 
@@ -998,7 +1140,7 @@ def _read_item_name(pm, slot_addr, offset, max_direct=16, max_ptr=32):
     import re as _re
     try:
         ptr = pm.read_int(slot_addr + offset)
-        if ptr and 0x10000 <= ptr <= 0x7FFFFFFF:
+        if _is_plausible_32bit_pointer(ptr):
             name = _read_ascii_string(pm, ptr, max_ptr)
             if name and len(name) >= 2 and _re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
                 return name
@@ -1076,6 +1218,31 @@ def _read_utf8_string(pm, addr, max_len=32):
     # Final fallback
 
     return raw.decode('utf-8', errors='replace')
+
+
+def _read_msvc_string(pm_obj, string_addr, max_length=260):
+    """Read a 32-bit MSVC ``std::string`` without making any game writes."""
+    try:
+        string_addr = int(string_addr)
+        length = int(pm_obj.read_int(string_addr + 0x10) or 0)
+        if not 0 < length <= int(max_length):
+            return ""
+        data_addr = string_addr if length <= 15 else int(pm_obj.read_int(string_addr) or 0)
+        if data_addr < 0x10000:
+            return ""
+        raw = pm_obj.read_bytes(data_addr, length)
+        if not raw or len(raw) != length:
+            return ""
+        for encoding in ("utf-8", "gbk", "ascii"):
+            try:
+                value = raw.decode(encoding).strip()
+                if value:
+                    return value
+            except UnicodeDecodeError:
+                continue
+    except Exception:
+        pass
+    return ""
 
 def load_item_name_map(filepath=None):
     """加载物品名称映射文件，返回{slot_key: (en_display, cn_name)} 字典
@@ -2134,28 +2301,47 @@ def _tech_game_dir():
 
 
 def _load_tech_locale():
-    """Return {node_key: Chinese title} from the game's official locale file."""
+    """Return embedded {node_key: Chinese title} without reading game files."""
     result = {}
-    path = os.path.join(_tech_game_dir(), "lang", "tech_locale.csv")
     try:
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f, delimiter=";")
-            for row in reader:
-                key = (row.get("key") or "").strip()
-                title = (row.get("chinese") or "").strip()
-                if key:
-                    result[key] = title or key
+        reader = csv.DictReader(io.StringIO(EMBEDDED_TECH_LOCALE_CSV), delimiter=";")
+        for row in reader:
+            key = (row.get("key") or "").strip()
+            title = (row.get("chinese") or "").strip()
+            if key:
+                result[key] = title or key
     except Exception:
         pass
     return result
 
 
-def _parse_tech_tree_file(path):
-    """Parse node -> recipes mapping from a *_techtree.csv file."""
+def _embedded_tech_tree_records():
+    """Return the bundled base/DLC tech tree snapshots as parsed records."""
+    result = {}
+    for filename, text in (EMBEDDED_TECH_TREE_FILES or {}).items():
+        parsed = {}
+        try:
+            for segment in text.replace("\r", "").replace("\n", ";").split(";"):
+                segment = re.sub(r"^\s*level:\d+\|", "", segment.strip())
+                segment = re.sub(r"^[<>!|\s]+", "", segment)
+                tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*", segment)
+                if tokens:
+                    parsed[tokens[0]] = tokens[1:]
+        except Exception:
+            parsed = {}
+        result[filename] = parsed
+    return result
+
+
+def _parse_tech_tree_file(path, _source=None):
+    """Parse a node -> recipes mapping from a path or embedded text."""
     result = {}
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            text = f.read()
+        if isinstance(path, str) and path in (EMBEDDED_TECH_TREE_FILES or {}):
+            text = EMBEDDED_TECH_TREE_FILES[path]
+        else:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                text = f.read()
         for segment in text.replace("\r", "").replace("\n", ";").split(";"):
             segment = re.sub(r"^\s*level:\d+\|", "", segment.strip())
             segment = re.sub(r"^[<>!|\s]+", "", segment)
@@ -2168,14 +2354,11 @@ def _parse_tech_tree_file(path):
 
 
 def _load_active_tech_recipes(node_keys):
-    """Pick the map/DLC technology CSV which best matches live node keys."""
-    data_dir = os.path.join(_tech_game_dir(), "data")
+    """Pick the bundled technology CSV which best matches live node keys."""
     best, best_score = {}, -1
     try:
-        for filename in os.listdir(data_dir):
-            if not filename.lower().endswith("techtree.csv"):
-                continue
-            parsed = _parse_tech_tree_file(os.path.join(data_dir, filename))
+        for filename in (EMBEDDED_TECH_TREE_FILES or {}):
+            parsed = _parse_tech_tree_file(filename)
             score = len(set(parsed).intersection(node_keys))
             if score > best_score:
                 best, best_score = parsed, score
@@ -2686,6 +2869,18 @@ class Api:
     # cave is per-process and is always removed before disconnecting.
     _wave_portal_controller = None
     _wave_portal_lock = threading.RLock()
+    # Dwarf population is calculated by DwarfSpawner::UpdateSpawns rather
+    # than stored in a writable "max dwarves" field.  Keep its tiny, separate
+    # hook independent from the portal dispatcher so changing the cap neither
+    # creates workers nor changes the wave-controller lifecycle.
+    _dwarf_population_controller = None
+    _dwarf_population_lock = threading.RLock()
+    # The game stores merged room tiles rather than the source .map filename,
+    # so source identity cannot be reconstructed from map cells alone. Keep a
+    # runtime list for the current session and persist verified placements in
+    # the hidden user configuration keyed by the current map identity.
+    _structure_runtime_history = []
+    _structure_history_lock = threading.RLock()
     # The full map payload is large.  Keep only a lightweight identity for the
     # current map so the UI can refresh dwarf markers without serialising every
     # tile again.  A reconnect always clears this identity.
@@ -2815,8 +3010,16 @@ class Api:
         self._time_controls_scan_running = False
         self._wave_portal_controller = None
         self._wave_portal_lock = threading.RLock()
+        self._dwarf_population_controller = None
+        self._dwarf_population_lock = threading.RLock()
         self._map_cache_signature = None
         self._map_cache_key = ""
+        # Independent objects are process/save scoped.  Their native visual
+        # occupancy masks are kept only in memory: a stale mask from another
+        # save must never be drawn on a newly loaded map.
+        self._world_object_occupancy_cache = {"scope": None, "items": {}}
+        self._special_entity_item_cache = {"scope": None, "items": {}}
+        self._structure_save_identity_cache = {"pid": 0, "value": ""}
         self._mana_max_lock_guard = threading.RLock()
         self._mana_max_lock_enabled = False
         self._mana_max_lock_target = None
@@ -3717,7 +3920,6 @@ class Api:
         ready = _read_json_object(ready_path)
         if not isinstance(ready, dict):
             # Migrate away from the old visible app\updates staging folder.
-            # It only contained an abandoned package from the pre-fix updater.
             try:
                 shutil.rmtree(os.path.join(_application_dir(), "updates"), ignore_errors=True)
             except Exception:
@@ -3734,6 +3936,12 @@ class Api:
         if not stage_dir or not files:
             return None
         ready["files"] = files
+        saved_hashes = ready.get("file_sha256") if isinstance(ready.get("file_sha256"), dict) else {}
+        ready["file_sha256"] = {
+            rel: str(saved_hashes.get(rel) or "").strip().lower()
+            for rel in files
+            if re.fullmatch(r"[0-9a-f]{64}", str(saved_hashes.get(rel) or "").strip().lower())
+        }
         return ready
 
     def stage_update(self, manifest_url=""):
@@ -3761,6 +3969,7 @@ class Api:
             if not package_format:
                 package_format = "zip" if str(package_url).lower().split("?", 1)[0].endswith(".zip") else "exe"
             files = []
+            file_sha256 = {}
             if package_format == "zip":
                 with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
                     for info in archive.infolist():
@@ -3776,12 +3985,14 @@ class Api:
                         with archive.open(info, "r") as source, open(target, "wb") as destination:
                             shutil.copyfileobj(source, destination, length=1024 * 1024)
                         files.append(rel)
+                        file_sha256[rel] = self._preflight_file_hash(target).lower()
             elif package_format in ("exe", "binary"):
                 rel = "CraftWorldModifier.exe"
                 target = os.path.join(stage_dir, rel)
                 with open(target, "wb") as handle:
                     handle.write(raw)
                 files.append(rel)
+                file_sha256[rel] = digest
             else:
                 shutil.rmtree(stage_dir, ignore_errors=True)
                 return {"ok": False, "error": "不支持的更新包格式：%s" % package_format}
@@ -3790,7 +4001,8 @@ class Api:
                 return {"ok": False, "error": "更新包没有包含允许替换的修改器文件"}
             ready = {"app_id": APP_ID, "version": str(manifest.get("version")), "current_version": APP_VERSION,
                      "stage_dir": stage_dir, "files": sorted(set(files)), "format": package_format,
-                     "package_sha256": digest, "package_size": len(raw), "manifest": manifest,
+                     "package_sha256": digest, "file_sha256": file_sha256,
+                     "package_size": len(raw), "manifest": manifest,
                      "staged_at": datetime.now().astimezone().isoformat(timespec="seconds")}
             ready_path = os.path.join(updates_root, "ready.json")
             temporary = ready_path + ".tmp"
@@ -3824,11 +4036,12 @@ class Api:
         stage_dir = os.path.abspath(ready["stage_dir"])
         app_dir = os.path.abspath(_application_dir())
         mappings = []
+        staged_hashes = ready.get("file_sha256") if isinstance(ready.get("file_sha256"), dict) else {}
         if getattr(sys, "frozen", False):
             exe_source = os.path.join(stage_dir, "CraftWorldModifier.exe")
             if not os.path.isfile(exe_source):
                 return {"ok": False, "error": "更新包中没有 CraftWorldModifier.exe"}
-            mappings.append((exe_source, os.path.abspath(sys.executable)))
+            mappings.append((exe_source, os.path.abspath(sys.executable), "CraftWorldModifier.exe"))
         else:
             current_script = os.path.abspath(__file__)
             current_ui = os.path.abspath(_resource_path("ui_v1.0.html"))
@@ -3840,20 +4053,20 @@ class Api:
                     target = current_ui
                 else:
                     target = os.path.abspath(os.path.join(app_dir, *rel.split("/")))
-                mappings.append((source, target))
+                mappings.append((source, target, rel))
         if not mappings:
             return {"ok": False, "error": "没有可应用的更新文件"}
         def ps_literal(value):
             return "'" + str(value).replace("'", "''") + "'"
 
         script_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_update_%s.ps1" % uuid.uuid4().hex)
+        launcher_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_launcher_%s.cmd" % uuid.uuid4().hex)
         updates_root = _update_staging_root()
         ready_path = os.path.join(updates_root, "ready.json")
         # Keep the diagnostic beside ready.json so a user can find it even
         # after the temporary PowerShell helper has finished.
         log_path = os.path.join(updates_root, "update.log")
         stage_root = os.path.dirname(stage_dir)
-        expected_hash = str(ready.get("package_sha256") or "").strip().lower()
         script_lines = [
             "$ErrorActionPreference = 'Stop'",
             "$ownerPid = %d" % os.getpid(),
@@ -3864,9 +4077,16 @@ class Api:
             "$launchArgs = @(%s)" % (ps_literal(os.path.abspath(__file__)) if not getattr(sys, "frozen", False) else ""),
             "$items = @(",
         ]
-        for source, target in mappings:
-            script_lines.append("  @{ Source = %s; Target = %s }" % (ps_literal(source), ps_literal(target)))
-        target_exe = next((target for _source, target in mappings
+        for source, target, rel in mappings:
+            # Single-file EXE releases historically stored only the package
+            # digest.  Keep that format compatible while ZIP releases verify
+            # every extracted file against its own recorded digest.
+            expected = str(staged_hashes.get(rel) or "").strip().lower()
+            if not expected and str(ready.get("format") or "").lower() in ("exe", "binary"):
+                expected = str(ready.get("package_sha256") or "").strip().lower()
+            script_lines.append("  @{ Source = %s; Target = %s; ExpectedHash = %s }" % (
+                ps_literal(source), ps_literal(target), ps_literal(expected)))
+        target_exe = next((target for _source, target, _rel in mappings
                            if os.path.basename(target).lower() == "craftworldmodifier.exe"), "")
         script_lines.extend([
             ")",
@@ -3927,10 +4147,9 @@ class Api:
             "    }",
             "    if (-not $copied) { throw ('无法替换文件：' + $item.Target) }",
         ])
-        if expected_hash:
-            script_lines.extend([
-                "    if ((Get-FileSha256 ([string]$item.Target)) -ne %s) { throw ('目标文件校验失败：' + $item.Target) }" % ps_literal(expected_hash),
-            ])
+        script_lines.extend([
+            "    if ($item.ExpectedHash -and (Get-FileSha256 ([string]$item.Target)) -ne [string]$item.ExpectedHash) { throw ('目标文件校验失败：' + $item.Target) }",
+        ])
         script_lines.extend([
             "    Write-UpdateLog ('已替换：' + $item.Target)",
             "  }",
@@ -3943,16 +4162,14 @@ class Api:
             "  exit 1",
             "}",
         ])
-        launcher_path = os.path.join(tempfile.gettempdir(), "ctw_modifier_launcher_%s.cmd" % uuid.uuid4().hex)
         try:
             # Windows PowerShell 5.1 needs the UTF-8 BOM; without it a path or
             # Chinese diagnostic text is decoded as the legacy code page and
             # the helper can fail to parse before it ever reaches Copy-Item.
             with open(script_path, "w", encoding="utf-8-sig", newline="\r\n") as handle:
                 handle.write("\r\n".join(script_lines) + "\r\n")
-            # A direct child of the PyInstaller host can be terminated with
-            # that host.  Use ``start`` from a short-lived cmd wrapper so the
-            # PowerShell worker is a separate process before the host exits.
+            # Start a separate PowerShell worker through ``start`` so it
+            # survives the PyInstaller host process exiting.
             launcher_lines = [
                 "@echo off",
                 'start "" /b powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s"' % script_path.replace('"', '""'),
@@ -3964,7 +4181,8 @@ class Api:
             subprocess.Popen(["cmd.exe", "/d", "/c", launcher_path], close_fds=True, creationflags=flags)
             threading.Thread(target=self._close_after_update, name="ctw-update-exit", daemon=True).start()
             return {"ok": True, "restarting": True, "version": ready.get("version"),
-                    "message": "更新已排队；修改器退出后将自动替换并重新启动。若失败，可查看 updates\\update.log。"}
+                    "log_path": log_path,
+                    "message": "更新已排队；修改器退出后将自动替换并重新启动。若失败，可查看更新日志：%s" % log_path}
         except Exception as exc:
             return {"ok": False, "error": "无法启动更新程序：%s" % exc}
 
@@ -4080,6 +4298,24 @@ class Api:
                 return self._activate_local_game_root(candidate, source)
         return {"ok": False, "needs_path": True,
                 "error": "没有自动定位到游戏目录。请选择包含 CraftWorld.exe 与 data 文件夹的位置"}
+
+    def read_embedded_data(self):
+        """Report the bundled data snapshot without scanning the game directory."""
+        structures = len(EMBEDDED_STRUCTURE_INDEX)
+        valid_structures = 0
+        for item in EMBEDDED_STRUCTURE_INDEX.values():
+            try:
+                valid_structures += int(bool(item[3]))
+            except (IndexError, TypeError, ValueError):
+                continue
+        return {
+            "ok": bool(structures),
+            "structures": structures,
+            "valid_structures": valid_structures,
+            "pandora_events": bool(EMBEDDED_PANDORA_EVENTS_XML),
+            "tech_trees": len(EMBEDDED_TECH_TREE_FILES or {}),
+            "message": "修改器内嵌数据已读取",
+        }
 
     def choose_local_game_dir(self):
         """Let the player choose a game folder after automatic discovery fails."""
@@ -4734,6 +4970,169 @@ class Api:
             return {"ok": False, "display": "未识别", "state": "未识别",
                     "source": "", "detail": "游戏版本读取失败：%s" % exc}
 
+    LEVEL_CONFIG_SINGLETON_RVA = 0xDC3E64
+    LEVEL_CONFIG_SOURCE_OFF = 0xC8
+    LEVEL_CONFIG_WORLD_OFF = 0x270
+    LEVEL_CONFIG_SIZE_OFF = 0x288
+    LEVEL_CONFIG_HUMIDITY_OFF = 0x2A0
+    LEVEL_CONFIG_LANDSCAPE_OFF = 0x2B8
+    LEVEL_CONFIG_TEMPERATURE_OFF = 0x2D0
+    LEVEL_CONFIG_NAME_OFF = 0x318
+    LEVEL_CONFIG_DIFFICULTY_OFF = 0x330
+
+    @staticmethod
+    def _overview_label(value, labels):
+        raw = str(value or "").strip()
+        return labels.get(raw.lower(), raw or "未读取")
+
+    @staticmethod
+    def _overview_level_definition(source):
+        """Read the active campaign level's authored settings, if available.
+
+        ``LevelConfig`` keeps several copied strings, but campaign maps do not
+        consistently populate every one after a world switch.  The currently
+        loaded ``levels/*.xml`` is the authoritative definition for static
+        settings such as difficulty and humidity, and is safe to inspect.
+        """
+        try:
+            relative = str(source or "").replace("\\", "/").strip().lstrip("/")
+            if not relative.lower().startswith("levels/") or not relative.lower().endswith(".xml"):
+                return {}
+            game_root = os.path.abspath(GAME_ROOT)
+            filename = os.path.abspath(os.path.join(game_root, relative.replace("/", os.sep)))
+            if os.path.commonpath((game_root, filename)) != game_root or not os.path.isfile(filename):
+                return {}
+            root = ET.parse(filename).getroot()
+            params = root.find("./level/params")
+            if params is None:
+                return {}
+            fields = {
+                "planetType": "world_key", "sizeTemplate": "size_key",
+                "humidityTemplate": "humidity_key", "lanscapeTemplate": "landscape_key",
+                "temperatureTemplate": "temperature_key", "difficulty": "difficulty_key",
+                "techTreeTemplate": "tech_tree_key",
+            }
+            result = {}
+            for tag, field in fields.items():
+                node = params.find(tag)
+                value = str(node.get("value") or "").strip() if node is not None else ""
+                if value:
+                    result[field] = value
+            return result
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _overview_source_display(source, campaign):
+        normalized = str(source or "").replace("\\", "/").strip()
+        match = re.fullmatch(r"levels/(\d+)\.xml", normalized, flags=re.IGNORECASE)
+        if match:
+            return "战役第%s关" % int(match.group(1))
+        if campaign:
+            return "战役关卡"
+        return "自定义世界"
+
+    def _read_level_config_overview(self):
+        """Return verified LevelConfig fields for the startup overview.
+
+        The singleton and string offsets were read from the live Steam V1
+        object.  This path is deliberately observational: unsupported builds
+        return an explicit unavailable state rather than inferred world data.
+        """
+        try:
+            module_base = int(get_base())
+            config = int(pm.read_int(module_base + self.LEVEL_CONFIG_SINGLETON_RVA) or 0)
+            if config < 0x10000:
+                return None, "世界配置尚未加载"
+            source = _read_msvc_string(pm, config + self.LEVEL_CONFIG_SOURCE_OFF, 260)
+            world_key = _read_msvc_string(pm, config + self.LEVEL_CONFIG_WORLD_OFF, 80)
+            size_key = _read_msvc_string(pm, config + self.LEVEL_CONFIG_SIZE_OFF, 80)
+            humidity_key = _read_msvc_string(pm, config + self.LEVEL_CONFIG_HUMIDITY_OFF, 80)
+            landscape_key = _read_msvc_string(pm, config + self.LEVEL_CONFIG_LANDSCAPE_OFF, 80)
+            temperature_key = _read_msvc_string(pm, config + self.LEVEL_CONFIG_TEMPERATURE_OFF, 80)
+            world_name = _read_msvc_string(pm, config + self.LEVEL_CONFIG_NAME_OFF, 120)
+            difficulty_key = _read_msvc_string(pm, config + self.LEVEL_CONFIG_DIFFICULTY_OFF, 80)
+            if not any((source, world_key, size_key, humidity_key, landscape_key, difficulty_key)):
+                return None, "世界配置字段未通过校验"
+
+            source_lower = source.replace("\\", "/").lower()
+            campaign = source_lower.startswith("levels/")
+            # Campaign XML supplies the values LevelConfig leaves blank or
+            # stale after switching worlds.  It describes the loaded map,
+            # while live memory remains the source for its identity.
+            level_values = self._overview_level_definition(source) if campaign else {}
+            world_key = level_values.get("world_key") or world_key
+            size_key = level_values.get("size_key") or size_key
+            humidity_key = level_values.get("humidity_key") or humidity_key
+            landscape_key = level_values.get("landscape_key") or landscape_key
+            temperature_key = level_values.get("temperature_key") or temperature_key
+            difficulty_key = level_values.get("difficulty_key") or difficulty_key
+            tech_tree_key = level_values.get("tech_tree_key") or ("default_techtree" if campaign else "")
+            return {
+                "source": source,
+                "source_display": self._overview_source_display(source, campaign),
+                "mode": "战役" if campaign else "自定义游戏",
+                "world": self._overview_label(world_key, {
+                    "usual_medium": "森林", "biome_usual_medium": "森林",
+                    "usual_cold": "冰雪", "cold": "冰雪",
+                    "usual_desert": "沙漠", "hot": "沙漠",
+                    "underground": "地底", "biome_underground": "地底",
+                    "dlc_temples": "山谷", "lonely_mountain": "孤山",
+                    "two_fortress": "双塔奇兵", "wonderwood": "奇妙的森林",
+                    "biome1": "狂野平原", "biome_beetles": "极寒冰洞",
+                }) if world_key else (world_name or "未读取"),
+                "world_key": world_key,
+                "size": self._overview_label(size_key, {
+                    "small": "小型", "normal": "中型", "medium": "中型", "large": "大型",
+                    "large_vertical": "大型（纵向）", "huge": "巨大",
+                }),
+                "weather": self._overview_label(humidity_key, {
+                    "low": "低湿度", "normal": "标准湿度", "high": "高湿度",
+                    "dry": "干燥", "wet": "潮湿", "rainy": "多雨",
+                }),
+                "terrain": self._overview_label(landscape_key, {
+                    "plain": "平原", "hills": "丘陵", "mountains": "山地",
+                }),
+                "temperature": self._overview_label(temperature_key, {
+                    "cold": "寒冷", "normal": "适中", "hot": "炎热",
+                }),
+                "difficulty": self._overview_label(difficulty_key, {
+                    "very_easy": "非常简单", "easy": "简单", "normal": "普通",
+                    "hard": "困难", "very_hard": "非常困难", "nightmare": "噩梦",
+                }),
+                "tech_mode": self._overview_label(tech_tree_key, {
+                    "default_techtree": "默认科技树", "underground_techtree": "地下世界科技树",
+                    "mountain_techtree": "高山科技树", "fortresses_techtree": "堡垒科技树",
+                    "ww_dlc_techtree": "奇妙森林科技树",
+                }),
+            }, ""
+        except Exception as exc:
+            return None, "世界配置读取失败：%s" % exc
+
+    def get_overview_state(self):
+        """Read the small, read-only snapshot used by the overview homepage."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏并进入已载入的地图"}
+        details, error = self._read_level_config_overview()
+        game_version = self.get_game_version(pm.process_id)
+        response = {
+            "ok": details is not None,
+            "state": self.STATUS_VERIFIED if details else self.STATUS_STALE,
+            "game_version": game_version,
+            "world": details or {},
+            "error": error,
+            "day_count": None,
+            "time_state": "读取中",
+        }
+        time_state = self.get_game_time_state()
+        if time_state.get("ok"):
+            response["day_count"] = time_state.get("day_count")
+            response["time_state"] = time_state.get("phase", "已读取")
+        elif time_state.get("error"):
+            response["time_state"] = time_state.get("error")
+        return response
+
     def list_processes(self):
         """列出所有 CraftWorld.exe 进程"""
         import psutil
@@ -4780,6 +5179,7 @@ class Api:
         with self._portal_lock_guard:
             self._portal_locks.clear()
         self._restore_pet_limit_override_internal()
+        self._dispose_dwarf_population_controller()
         self._dispose_wave_portal_controller()
         self._v2_cache = None
         self._other_feature_profile_cache = {"pid": 0, "exe_path": "", "profile": None}
@@ -4804,6 +5204,14 @@ class Api:
         self._clear_time_controls_cache()
         self._map_cache_signature = None
         self._map_cache_key = ""
+        self._world_object_occupancy_cache = {"scope": None, "items": {}}
+        self._special_entity_item_cache = {"scope": None, "items": {}}
+        self._structure_save_identity_cache = {"pid": 0, "value": ""}
+        # Structure annotations are deliberately session-only until the
+        # game's native Room/UnderRoom container has been located.  Never
+        # carry records from an earlier process or save into this session.
+        with self._structure_history_lock:
+            self._structure_runtime_history = []
         self._pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0, "houses": [], "pets": []}
         self._pet_limit_override_original = None
         self._pet_limit_override_value = None
@@ -4823,14 +5231,14 @@ class Api:
                 pm = None; connected = False; dwarf_cache = []; item_cache = []
                 return {"success":False,"error":"检测到旧版修改器遗留的存档代码补丁；请完全退出并重新启动游戏后再连接"}
             native_layout = self._apply_v1_native_layout()
+            # Start the independent DayTime locator before roster/item reads.
+            # This lets the overview receive the saved-day value during the
+            # existing connection work instead of only at the end.
+            self._start_time_controls_scan()
             doctor = self._run_compatibility_doctor()
             self.scan_dwarves_stable()
             self.scan_items()
             self.scan_shop()
-            # The first time lookup uses a broad, read-only heap pass.  Start
-            # it only after connection-critical reads finish, so it never
-            # competes with roster/inventory startup scans.
-            self._start_time_controls_scan()
             self._restore_mana_max_lock()
             # Magic parameters are loaded lazily when the Magic tab is opened.
             # They use a broad heap pass; keeping that work out of connection
@@ -4873,6 +5281,7 @@ class Api:
         self.locks["mana"] = False
         self.locks["xp"] = False
         self._clear_timer_locks()
+        self._dispose_dwarf_population_controller()
         self._dispose_wave_portal_controller()
         self._v2_cache = None
         self._v1_native_layout = {"key": "unknown", "label": "未收录版本",
@@ -4912,6 +5321,10 @@ class Api:
         self._clear_time_controls_cache()
         self._map_cache_signature = None
         self._map_cache_key = ""
+        self._world_object_occupancy_cache = {"scope": None, "items": {}}
+        self._special_entity_item_cache = {"scope": None, "items": {}}
+        with self._structure_history_lock:
+            self._structure_runtime_history = []
         self._pet_house_runtime_cache = {"pid": 0, "base": 0, "at": 0.0, "houses": [], "pets": []}
         self._pet_limit_override_original = None
         self._pet_limit_override_value = None
@@ -4948,16 +5361,16 @@ class Api:
         return int(width) * self.MAP_COL_W
 
     def _map_identity(self, width, height, world_width, world_height, payload):
-        """Build a persistent world key from fields map edits deliberately preserve."""
+        """Build a stable per-map key.
+
+        The previous key sampled tile metadata.  Native room placement changes
+        those bytes, so every placement silently moved annotations to a new
+        key and made earlier structures disappear.  Dimensions are stable for
+        the lifetime of a save and are sufficient for the local annotation
+        cache; the payload argument remains for call-site compatibility.
+        """
         digest = __import__("hashlib").blake2s(digest_size=12)
         digest.update(f"{width}x{height}:{world_width:.1f}x{world_height:.1f}".encode("ascii"))
-        stride = self._map_row_stride(width)
-        # Map operations touch byte ranges 0..12 only. Bytes 14..31 hold
-        # generated metadata and remain stable for a saved world.
-        for row in sorted({0, height - 1, *[(height - 1) * n // 7 for n in range(1, 7)]}):
-            for col in sorted({0, width - 1, *[(width - 1) * n // 7 for n in range(1, 7)]}):
-                off = row * stride + col * self.MAP_COL_W + 14
-                digest.update(payload[off:off + 18])
         return "world-" + digest.hexdigest()
 
     def _map_cache_id(self, data, width, height, world_width, world_height):
@@ -4969,18 +5382,303 @@ class Api:
         return (pid, int(data), int(width), int(height),
                 round(float(world_width), 3), round(float(world_height), 3))
 
-    def _map_dwarf_markers(self, width, height, world_width, world_height):
-        """Return live dwarf positions without touching the large map payload."""
+    def _structure_map_key(self):
+        """Return a persistent save key for structure annotations on demand.
+
+        ``map_metadata`` intentionally avoids reading tile data and has only a
+        process-local key. Structure annotations are rare and need to survive
+        a restart, so this path reads the map once and uses the same stable
+        identity already used by per-save map pins.
+        """
+        resolved = self._map_resolve()
+        if not resolved:
+            return ""
+        data, width, height, world_width, world_height = resolved
+        # Keep the same stable dimensions/world-size identity used by the
+        # full map scan.  This intentionally survives restarting the modifier,
+        # while native Room records still remain authoritative for natural
+        # structures in the currently loaded save.
+        # Dimensions alone identify a map layout, not a save slot.  Include a
+        # per-save identity so records from another slot/world cannot appear
+        # after reconnecting to a same-sized map.
+        save_identity = self._active_save_identity()
+        digest = hashlib.blake2s(digest_size=12)
+        digest.update(self._map_identity(width, height, world_width, world_height, None).encode("ascii"))
+        digest.update(str(save_identity).encode("utf-8", "replace"))
+        key = "world-" + digest.hexdigest()
+        self._map_cache_signature = self._map_cache_id(data, width, height, world_width, world_height)
+        self._map_cache_key = key
+        return key
+
+    def _active_save_identity(self):
+        """Resolve the loaded save path when the game exposes it in memory.
+
+        CraftWorld does not keep a source filename in Room records.  The save
+        provider does retain ``.../saves/slotN/game1.sav`` as a diagnostic
+        string while a slot is loaded, which is a much stronger cache key than
+        map dimensions.  If it cannot be recovered, fall back to the process
+        id so stale annotations never cross a game session.
+        """
+        try:
+            pid = int(pm.process_id) if pm else 0
+        except Exception:
+            pid = 0
+        cached = getattr(self, "_structure_save_identity_cache", {}) or {}
+        if int(cached.get("pid", 0)) == pid and cached.get("value"):
+            return str(cached["value"])
+        value = "process-%d" % pid
+        try:
+            if pm and pid:
+                hits = pymem.pattern.pattern_scan_all(pm.process_handle, b"game1.sav", return_multiple=True) or []
+                for hit in hits[:24]:
+                    start = max(0, int(hit) - 768)
+                    blob = pm.read_bytes(start, 1024) or b""
+                    text = blob.decode("ascii", "ignore")
+                    match = re.search(r"([A-Za-z]:)?[/\\][^\x00\r\n]*?[/\\]saves[/\\]slot\d+[/\\]game1\.sav", text, re.IGNORECASE)
+                    if not match:
+                        continue
+                    path = os.path.normcase(os.path.abspath(match.group(0).replace("/", os.sep)))
+                    file_hash = ""
+                    if os.path.isfile(path):
+                        try:
+                            file_hash = self._save_hash(path)
+                        except OSError:
+                            file_hash = ""
+                    value = "save-%s" % hashlib.sha256((path + "|" + file_hash).encode("utf-8", "replace")).hexdigest()[:32]
+                    break
+        except Exception:
+            pass
+        self._structure_save_identity_cache = {"pid": pid, "value": value}
+        return value
+
+    def _clean_structure_records(self, records):
+        """Keep display metadata; source map files remain game-owned.
+
+        ``mask`` is an optional post-placement readback captured by the
+        modifier.  It is deliberately kept small (one bit-like character per
+        local cell) so the map overlay can draw the real silhouette instead
+        of guessing from whatever terrain happens to surround the anchor.
+        """
+        clean, seen = [], set()
+        for record in records if isinstance(records, list) else []:
+            try:
+                filename = str(record.get("file") or "").strip()
+                row, col = int(record.get("row")), int(record.get("col"))
+                width, height = int(record.get("width")), int(record.get("height"))
+                if (not filename or row < 0 or col < 0 or width < 1 or height < 1):
+                    continue
+                key = (filename.lower(), row, col)
+                if key in seen:
+                    continue
+                seen.add(key)
+                item = {
+                    "file": filename, "row": row, "col": col,
+                    "width": min(width, 400), "height": min(height, 400),
+                    "category": str(record.get("category") or "已确认结构")[:40],
+                    "source": str(record.get("source") or "modifier-session")[:40],
+                    "confidence": str(record.get("confidence") or self.STATUS_VERIFIED)[:40],
+                    "timestamp": int(record.get("timestamp") or 0),
+                }
+                # Keep the real World::UnderRoom vector slot.  It is not the
+                # browser list index, and is required for native deletion.
+                try:
+                    native_slot = int(record.get("native_record_index", record.get("record_index", -1)))
+                    if native_slot >= 0:
+                        item["native_record_index"] = native_slot
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                item["live_native_room"] = "native_record_index" in item
+                for key in ("native_anchor_col", "native_anchor_row", "bounds_source",
+                            "mask_origin_col", "mask_origin_row", "mask_width",
+                            "mask_height", "occupied_cells", "mask_source",
+                            "mask_confidence", "occupied_bounds"):
+                    if key in record:
+                        item[key] = record[key]
+                mask = record.get("mask")
+                mask_width = int(record.get("mask_width", width) or width)
+                mask_height = int(record.get("mask_height", height) or height)
+                if isinstance(mask, list) and len(mask) == mask_height:
+                    valid = []
+                    for line in mask[:mask_height]:
+                        text = str(line or "")[:mask_width]
+                        valid.append("".join("1" if ch == "1" else "0" for ch in text.ljust(mask_width, "0")))
+                    if any("1" in line for line in valid):
+                        item["mask"] = valid
+                        item["mask_source"] = str(record.get("mask_source") or "placement-readback")[:32]
+                        item["mask_width"] = mask_width
+                        item["mask_height"] = mask_height
+                        item["mask_origin_col"] = int(record.get("mask_origin_col", col))
+                        item["mask_origin_row"] = int(record.get("mask_origin_row", row))
+                clean.append(item)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+        return clean[:96]
+
+    def _read_native_room_records(self):
+        """Read the live World::UnderRoom vector without touching map tiles.
+
+        The current Steam build keeps room footprints as 0x34-byte POD
+        records at ``World+0x310``.  This is runtime evidence for both
+        naturally generated and event-created rooms; unlike the old marker
+        cache it is process-scoped and disappears with the loaded save.
+        The first byte at +0x30 is the native hidden/removed flag, so hidden
+        records are deliberately excluded from the visible list.
+        """
+        if not connected or pm is None:
+            return []
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                return []
+            _map_data, map_width, map_height, _world_width, _world_height = resolved
+            world = int(pm.read_int(base_addr + ITEM_BASE_OFFSET) or 0)
+            if not world:
+                return []
+            begin = int(pm.read_int(world + 0x310) or 0)
+            end = int(pm.read_int(world + 0x314) or 0)
+            span = end - begin
+            if (begin <= 0 or end <= begin or span > 0x34 * 2048
+                    or span % 0x34 != 0):
+                return []
+            count = span // 0x34
+            raw = pm.read_bytes(begin, span)
+            if not raw or len(raw) < span:
+                return []
+            records = []
+            for index in range(count):
+                offset = index * 0x34
+                # UnderRoom layout observed in the current build:
+                # +04/+08 = anchor column/row, +0C/+10 = footprint,
+                # +30 (one byte) = native hidden/removed flag.  The remaining
+                # bytes in the record are retained native metadata and
+                # are retained by the game and intentionally not guessed.
+                col_f, row_f, width_f, height_f = struct.unpack_from(
+                    "<4f", raw, offset + 0x04)
+                # RemoveHiddenRoom writes only the byte at +0x30.  The
+                # remaining bytes belong to adjacent native metadata and may
+                # legitimately be non-zero; reading a DWORD here hid valid
+                # room records from the scanner.
+                hidden = raw[offset + 0x30]
+                if hidden:
+                    continue
+                if not all(math.isfinite(value) for value in
+                           (col_f, row_f, width_f, height_f)):
+                    continue
+                # These fields are the native room centre, not the upper-left
+                # tile.  Keep both representations: the centre is required
+                # by RemoveHiddenRoom, while the derived top-left bounds are
+                # what the map overlay and selection UI need.
+                center_col, center_row = int(round(col_f)), int(round(row_f))
+                width, height = int(round(width_f)), int(round(height_f))
+                if not (0 <= center_col < int(map_width) and 0 <= center_row < int(map_height)
+                        and 1 <= width <= 400 and 1 <= height <= 400):
+                    continue
+                col = center_col - (width // 2)
+                row = center_row - (height // 2)
+                if col < 0 or row < 0 or col + width > int(map_width) or row + height > int(map_height):
+                    continue
+                records.append({
+                    "file": "native_room_%03d" % index,
+                    "row": row,
+                    "col": col,
+                    "width": width,
+                    "height": height,
+                    "category": "原生房间",
+                    "source": "native-room-container",
+                    "confidence": self.STATUS_VERIFIED,
+                    "record_index": index,
+                    "native_anchor_col": center_col,
+                    "native_anchor_row": center_row,
+                    "bounds_source": "native-room-centre-size",
+                })
+            # Enrich each native record with a conservative, irregular mask.
+            # This is display/deletion evidence only; failure to derive one is
+            # safe and leaves the native record visible without enabling a
+            # destructive rectangular fallback.
+            for item in records:
+                occupancy = self._native_structure_occupancy(item, map_width, map_height)
+                if occupancy:
+                    item.update(occupancy)
+                    item["occupied_bounds"] = {
+                        "col": int(occupancy["mask_origin_col"]),
+                        "row": int(occupancy["mask_origin_row"]),
+                        "width": int(occupancy["mask_width"]),
+                        "height": int(occupancy["mask_height"]),
+                    }
+            return records
+        except (AttributeError, OSError, struct.error, TypeError, ValueError,
+                OverflowError):
+            return []
+
+    def _saved_map_structures(self, map_key):
+        """Load modifier-created structure records for the current map.
+
+        The source filename is not retained by the game after ``putRoom``
+        merges the tiles, so these records are the only way to keep a
+        generated structure named after the modifier is restarted.  Records
+        are keyed by the stable map dimensions/world size key and are removed
+        again by the native delete workflow.
+        """
+        try:
+            if not isinstance(map_key, str) or not map_key.startswith("world-"):
+                return []
+            cfg = self._read_config()
+            groups = cfg.get("map_structures", {}) if isinstance(cfg, dict) else {}
+            records = groups.get(map_key, []) if isinstance(groups, dict) else []
+            # Drop annotations written by the retired test-map recovery path.
+            # Only records produced by a successful native placement are
+            # eligible for persistence; natural structures come from the
+            # live UnderRoom container instead.
+            records = [item for item in records if isinstance(item, dict)
+                        and str(item.get("source") or "").startswith("native-runtime")]
+            return self._clean_structure_records(records)
+        except Exception:
+            return []
+
+    def _save_map_structures(self, map_key, records):
+        """Persist only sanitized structure metadata in hidden user config."""
+        try:
+            if not isinstance(map_key, str) or not map_key.startswith("world-"):
+                return False
+            clean = self._clean_structure_records(records)
+            # UnderRoom slots are process-local vector positions.  Persisting
+            # one across a restart could make a later delete target a wholly
+            # different room, so the live scanner always reattaches it.
+            for item in clean:
+                item.pop("native_record_index", None)
+            def update(cfg):
+                groups = dict(cfg.get("map_structures", {}) or {})
+                groups[map_key] = clean[:128]
+                cfg["map_structures"] = groups
+            return bool(self._update_config(update))
+        except Exception as exc:
+            _diagnostic("save_map_structures error:", exc)
+            return False
+
+    def _map_dwarf_markers(self, width, height, world_width, world_height, live=False):
+        """Return dwarf markers, optionally rereading only their coordinates."""
         dwarves = []
+        is_v2 = self._detect_v2() if live else None
         for dwarf in _dwarf_cache_snapshot():
             try:
-                x, y = float(dwarf["x"]), float(dwarf["y"])
+                if live:
+                    edi = int(dwarf.get("edi") or 0) & 0xFFFFFFFF
+                    if not self._valid_runtime_pointer(edi):
+                        continue
+                    x_off = V2_DWARF_X if is_v2 else 0x428
+                    y_off = V2_DWARF_Y if is_v2 else 0x42C
+                    x, y = float(pm.read_float(edi + x_off)), float(pm.read_float(edi + y_off))
+                else:
+                    x, y = float(dwarf["x"]), float(dwarf["y"])
                 col, row = x * width / world_width, y * height / world_height
                 if 0 <= col < width and 0 <= row < height:
                     marker = dict(dwarf)
                     marker.update({"col": col, "row": row})
                     dwarves.append(marker)
-            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            except Exception:
+                # A dwarf may be destroyed between two coordinate reads. This
+                # marker path is display-only, so skip that one entry and keep
+                # the remaining markers responsive.
                 continue
         return dwarves
 
@@ -5083,6 +5781,34 @@ class Api:
             if not it.get("zh"):
                 it["zh"] = by_en.get(str(it.get("en", "")).lower(), "")
         return m
+
+    def get_map_favorite_blocks(self):
+        """Return the user's small, portable list of frequently used blocks."""
+        try:
+            values = self._read_config().get("map_favorite_blocks", [])
+            ids = []
+            for value in values if isinstance(values, list) else []:
+                number = int(value)
+                if 0 <= number <= 0xFFFF and number not in ids:
+                    ids.append(number)
+            return {"ok": True, "ids": ids}
+        except Exception as exc:
+            return {"ok": False, "ids": [], "error": str(exc)}
+
+    def save_map_favorite_blocks(self, values):
+        """Persist at most 24 validated block IDs in user configuration."""
+        try:
+            ids = []
+            for value in values if isinstance(values, list) else []:
+                number = int(value)
+                if 0 <= number <= 0xFFFF and number not in ids:
+                    ids.append(number)
+            ids = ids[:24]
+            if not self._update_config(lambda cfg: cfg.update({"map_favorite_blocks": ids})):
+                return {"ok": False, "error": "无法保存常用方块"}
+            return {"ok": True, "ids": ids}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def map_metadata(self):
         """Read map dimensions and live markers without transferring tile payload."""
@@ -5270,6 +5996,29 @@ class Api:
             return result
         except Exception as e:
             return {"ok": False, "state": self.STATUS_STALE, "error": "地图状态读取异常：%s" % e}
+
+    def map_dwarf_markers(self):
+        """Fast marker heartbeat: read only cached dwarves' X/Y coordinates.
+
+        This intentionally skips the full dwarf roster refresh (health, hunger,
+        skills and equipment) and avoids transferring map cells.  It is used
+        solely by the map overlay at a short interval.
+        """
+        try:
+            r = self._map_resolve()
+            if not r:
+                state, error = self._runtime_read_unavailable_state()
+                return {"ok": False, "state": state, "error": error}
+            data, w, h, world_w, world_h = r
+            signature = self._map_cache_id(data, w, h, world_w, world_h)
+            if signature != self._map_cache_signature:
+                return {"ok": True, "state": self.STATUS_VERIFIED, "changed": True,
+                        "reason": "map_buffer_changed"}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "changed": False,
+                    "dwarves": self._map_dwarf_markers(w, h, world_w, world_h, live=True)}
+        except Exception as e:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "矮人地图坐标读取异常：%s" % e}
 
     def map_read_regions(self, regions):
         """Read selected live map rectangles without serialising the full map.
@@ -5520,8 +6269,9 @@ class Api:
                 inner = int(item["inner"]) & 0xFFFF
                 front = int(item["front"]) & 0xFFFF
                 bg = int(item["bg"])
-                water = max(0, min(31, int(item["water"])))
-                rows.setdefault(row, {})[col] = (inner, front, bg, water)
+                water = max(0, min(31, int(item.get("water", 0))))
+                preserve_water = bool(item.get("preserve_water", False))
+                rows.setdefault(row, {})[col] = (inner, front, bg, water, preserve_water)
 
             bases = self._map_bases(data)
             hnd = self._suspend(pm.process_id)
@@ -5530,17 +6280,17 @@ class Api:
                     for row, changes in rows.items():
                         row_addr = base + self.MAP_DATA_OFF + row * self._map_row_stride(w)
                         row_data = bytearray(pm.read_bytes(row_addr, w * self.MAP_COL_W))
-                        for col, (inner, front, bg, water) in changes.items():
+                        for col, (inner, front, bg, water, preserve_water) in changes.items():
                             off = col * self.MAP_COL_W
                             struct.pack_into("<H", row_data, off, front)
                             struct.pack_into("<H", row_data, off + 2, inner)
                             struct.pack_into("<i", row_data, off + 8, bg)
-                            # The low five bits hold water level, but CraftWorld
-                            # only treats it as live water when bit 7 is set.
-                            # Single-cell water editing has always written 0x80;
-                            # do the same for batch/selection changes so filling
-                            # an originally dry cell actually creates water.
-                            row_data[off + 12] = (row_data[off + 12] & 0x60) | 0x80 | water
+                            if not preserve_water:
+                                # The low five bits hold water level and bit 7
+                                # marks a live water cell. Preserve the complete
+                                # byte for terrain-only edits; re-encoding it
+                                # can clear nearby water simulation flags.
+                                row_data[off + 12] = (row_data[off + 12] & 0x60) | 0x80 | water
                         pm.write_bytes(row_addr, bytes(row_data), len(row_data))
             finally:
                 self._resume(hnd)
@@ -5776,6 +6526,2110 @@ class Api:
                     "edit_limit": int(self.MAP_SAFE_EDIT_LIMIT),
                     "error": "地图编辑初始化失败：%s" % e}
 
+    def _structure_descriptor(self, filename):
+        """Read only the stable header fields needed to draw a placed room.
+
+        The game still owns parsing and placement. We use the saved map header
+        only for the visible rectangle of a structure already accepted by
+        ``luaWorld::putRoom``; no map records are reconstructed here.
+        """
+        filename = os.path.basename(str(filename or "").strip())
+        path = os.path.join(GAME_ROOT, "Levels", filename)
+        fallback = {
+            "file": str(filename or ""), "category": "小型矿洞",
+            "category_id": "other",
+            "name": "未分类结构",
+            "width": 0, "height": 0, "header_ok": False,
+        }
+        if filename == "t.map":
+            fallback["category"] = "空测试结构"
+            fallback["category_id"] = "test"
+            fallback["name"] = "空测试结构"
+        else:
+            stem = os.path.splitext(str(filename or ""))[0].lower()
+            if stem.startswith("grotto"):
+                suffix = stem[len("grotto"):].lstrip("_ -")
+                fallback.update({"category": "矿洞结构", "category_id": "grotto", "name": "矿洞结构" + ((" · " + _structure_chinese_suffix(suffix)) if suffix else "")})
+            elif stem.startswith("ancient_room"):
+                suffix = stem[len("ancient_room"):].lstrip("_ -")
+                fallback.update({"category": "远古房间", "category_id": "ancient_room", "name": "远古房间" + ((" · " + _structure_chinese_suffix(suffix)) if suffix else "")})
+            elif stem.startswith("aliens_room"):
+                suffix = stem[len("aliens_room"):].lstrip("_ -")
+                fallback.update({"category": "异星房间", "category_id": "aliens_room", "name": "异星房间" + ((" · " + _structure_chinese_suffix(suffix)) if suffix else "")})
+            elif "room" in stem:
+                fallback.update({"category": "房间结构", "category_id": "room", "name": "房间结构 · " + _structure_chinese_suffix(stem)})
+            elif stem.startswith("mnt_"):
+                fallback.update({"category": "矿脉与地形片段", "category_id": "terrain",
+                                 "name": "矿脉/地形片段 · " + _structure_chinese_suffix(stem[4:])})
+            elif stem.startswith("ww_"):
+                fallback.update({"category": "世界遗迹结构", "category_id": "world",
+                                 "name": "世界遗迹 · " + _structure_chinese_suffix(stem[3:])})
+            elif stem.startswith("evil_"):
+                fallback.update({"category": "邪恶势力场景", "category_id": "evil",
+                                 "name": "邪恶势力场景 · " + _structure_chinese_suffix(stem[5:])})
+            elif stem.startswith("frt_"):
+                fallback.update({"category": "森林场景", "category_id": "forest_scene",
+                                 "name": "森林场景 · " + _structure_chinese_suffix(stem[4:])})
+            elif stem.startswith("l1_"):
+                fallback.update({"category": "剧情场景", "category_id": "story",
+                                 "name": "剧情场景 · " + _structure_chinese_suffix(stem[3:])})
+            else:
+                fallback.update({"category": "其它结构", "category_id": "other",
+                                 "name": "其它结构 · " + _structure_chinese_suffix(stem)})
+        # The bundled directory is the source for filenames and dimensions.
+        # The game still loads the actual map through its native putRoom path.
+        embedded = EMBEDDED_STRUCTURE_INDEX.get(filename.lower())
+        if embedded:
+            try:
+                fallback.update({
+                    "width": int(embedded[1]),
+                    "height": int(embedded[2]),
+                    "header_ok": bool(embedded[3]),
+                    "size": int(embedded[4]),
+                    "catalog_source": "modifier-embedded",
+                })
+                return fallback
+            except (IndexError, TypeError, ValueError, OverflowError):
+                pass
+        try:
+            with open(path, "rb") as handle:
+                header = handle.read(32)
+            if len(header) != 32:
+                return fallback
+            words = struct.unpack("<8I", header)
+            # Level room files have two closely related headers.  Version
+            # 616 stores dimensions in words 3/4; newer 617 files (used by
+            # many temple/ruin rooms) store them in words 1/2 and otherwise
+            # carry the same native putRoom payload.
+            if words[0] == 617:
+                width, height = int(words[1]), int(words[2])
+            else:
+                width, height = int(words[3]), int(words[4])
+            # ``t.map`` is the deliberately minimal one-cell test room. Its
+            # header keeps zero dimensions because it is a resource probe,
+            # but the native putRoom call materialises one tile in the world.
+            # Give it a real display extent so the generated marker is not
+            # silently dropped by the map overlay.
+            if filename == "t.map" and width == 0 and height == 0:
+                width, height = 1, 1
+            # The first word is format version. Current scheme files keep
+            # tile dimensions in header integers #3/#4 after that version.
+            # Do not draw arbitrary extents if a future format changes them.
+            if words[0] not in (616, 617) or not (1 <= width <= 400 and 1 <= height <= 400):
+                return fallback
+            fallback.update({"width": width, "height": height,
+                             "header_ok": True, "header": list(words)})
+        except (OSError, struct.error, ValueError):
+            pass
+        return fallback
+
+    def _structure_catalog_files(self):
+        """Return the bundled structure directory, with a local fallback."""
+        if EMBEDDED_STRUCTURE_INDEX:
+            return sorted((str(item[0]) for item in EMBEDDED_STRUCTURE_INDEX.values()),
+                          key=lambda value: value.lower())
+        root = os.path.join(GAME_ROOT, "Levels")
+        try:
+            names = []
+            for entry in os.scandir(root):
+                if entry.is_file() and entry.name.lower().endswith(".map"):
+                    names.append(entry.name)
+            return sorted(names, key=lambda value: value.lower())
+        except OSError:
+            return []
+
+    @staticmethod
+    def _structure_readback_mask(before, after, width, height):
+        """Return cells changed by one native room placement.
+
+        The World merges a room into ordinary map tiles and discards its
+        filename.  Comparing all tile fields before/after the native call is
+        the only reliable display evidence available at placement time.  A
+        later map read must never turn unrelated terrain inside the source
+        rectangle into part of this structure.
+        """
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return []
+        try:
+            width, height = int(width), int(height)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        count = width * height
+        if width < 1 or height < 1 or count > 160000:
+            return []
+        fields = ("w2", "front", "bg", "water")
+        if any(not isinstance(before.get(key), list) or not isinstance(after.get(key), list)
+               or len(before[key]) != count or len(after[key]) != count for key in fields):
+            return []
+        rows, changes = [], 0
+        for row in range(height):
+            chars = []
+            for col in range(width):
+                index = row * width + col
+                changed = any(before[key][index] != after[key][index] for key in fields)
+                chars.append("1" if changed else "0")
+                changes += 1 if changed else 0
+            rows.append("".join(chars))
+        return rows if changes else []
+
+    @staticmethod
+    def _structure_live_mask(region, width, height):
+        """Build an irregular occupancy mask from the current map cells.
+
+        This is only a display fallback for annotations written by older
+        builds (which have no before/after mask).  A cell is considered part of
+        the visible structure only when the live map contains a foreground or
+        outer entity value.  Empty cells stay empty, so the UI never invents a
+        rectangular outline around an old annotation.
+        """
+        try:
+            width, height = int(width), int(height)
+            cols, rows = int(region.get("cols")), int(region.get("rows"))
+            w2, front = region.get("w2"), region.get("front")
+            if width < 1 or height < 1 or cols < 1 or rows < 1:
+                return []
+            if not isinstance(w2, list) or not isinstance(front, list):
+                return []
+            if len(w2) != cols * rows or len(front) != cols * rows:
+                return []
+            result = []
+            changed = False
+            for rr in range(height):
+                line = []
+                for cc in range(width):
+                    if rr >= rows or cc >= cols:
+                        present = False
+                    else:
+                        index = rr * cols + cc
+                        try:
+                            present = int(w2[index]) != 0xFFFF or int(front[index]) != 0xFFFF
+                        except (TypeError, ValueError, OverflowError):
+                            present = False
+                    line.append("1" if present else "0")
+                    changed = changed or present
+                result.append("".join(line))
+            return result if changed else []
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return []
+
+    @staticmethod
+    def _structure_mask_cells(record, map_width, map_height):
+        """Return only cells proven to belong to a placed structure.
+
+        A structure's header is always rectangular, while its actual tile
+        footprint often is not.  The placement readback mask is the only
+        evidence that distinguishes source tiles from terrain in the unused
+        portions of that rectangle.  Never infer a deletion mask from live
+        terrain: it can include blocks placed by the player after generation.
+        """
+        try:
+            # Native Room records keep their original bounds for display, while
+            # a conservative material probe may add a one-cell edge outside
+            # that container.  Honour the probe origin when present; this
+            # avoids silently shifting an irregular mask back to a rectangle.
+            col = int(record.get("mask_origin_col", record.get("col", -1)))
+            row = int(record.get("mask_origin_row", record.get("row", -1)))
+            width = int(record.get("mask_width", record.get("width", 0)))
+            height = int(record.get("mask_height", record.get("height", 0)))
+            mask = record.get("mask")
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return []
+        if (col < 0 or row < 0 or width < 1 or height < 1
+                or not isinstance(mask, list) or len(mask) != height):
+            return []
+        cells = []
+        for rr, raw_line in enumerate(mask):
+            line = str(raw_line or "")
+            # A truncated line cannot prove that all source cells were known.
+            # Refuse the whole destructive map step rather than treating its
+            # missing suffix as part of the room's rectangle.
+            if len(line) != width or any(flag not in "01" for flag in line):
+                return []
+            for cc, flag in enumerate(line):
+                if flag != "1":
+                    continue
+                target_row, target_col = row + rr, col + cc
+                if 0 <= target_row < int(map_height) and 0 <= target_col < int(map_width):
+                    cells.append((target_row, target_col))
+        return cells
+
+    def _native_structure_occupancy(self, record, map_width, map_height):
+        """Derive a conservative irregular mask for a live native Room.
+
+        ``UnderRoom`` exposes the room centre and container size, but not the
+        source ``.map`` filename or its sparse tile silhouette.  We therefore
+        use a read-only neighbourhood probe: a tile pair must occur at least
+        twice inside the native bounds and must not occur in the surrounding
+        one-cell ring.  Only such distinctive pairs are marked, and a ring
+        tile is admitted when it is adjacent to an already marked tile.  This
+        deliberately prefers an incomplete mask over deleting ordinary
+        terrain that happens to share a common material id.
+        """
+        try:
+            left, top = int(record.get("col")), int(record.get("row"))
+            width, height = int(record.get("width")), int(record.get("height"))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        if left < 0 or top < 0 or width < 1 or height < 1:
+            return None
+        pad = 1
+        r0, c0 = max(0, top - pad), max(0, left - pad)
+        r1 = min(int(map_height) - 1, top + height - 1 + pad)
+        c1 = min(int(map_width) - 1, left + width - 1 + pad)
+        if r1 < r0 or c1 < c0:
+            return None
+        try:
+            region = self.map_read_regions([{"r0": r0, "c0": c0,
+                                             "r1": r1, "c1": c1}])
+            region = (region.get("regions") or [None])[0] if region.get("ok") else None
+            if not region:
+                return None
+            cols, rows = int(region.get("cols")), int(region.get("rows"))
+            fronts, grounds = region.get("front"), region.get("w2")
+            if len(fronts) != cols * rows or len(grounds) != cols * rows:
+                return None
+        except (AttributeError, TypeError, ValueError, IndexError, OSError):
+            return None
+
+        def pair_at(cc, rr):
+            idx = (rr - r0) * cols + (cc - c0)
+            return int(fronts[idx]) & 0xFFFF, int(grounds[idx]) & 0xFFFF
+
+        inside, ring = collections.Counter(), collections.Counter()
+        for rr in range(top, top + height):
+            for cc in range(left, left + width):
+                if 0 <= cc < int(map_width) and 0 <= rr < int(map_height):
+                    pair = pair_at(cc, rr)
+                    if pair != (0xFFFF, 0xFFFF):
+                        inside[pair] += 1
+        for rr in range(r0, r1 + 1):
+            for cc in range(c0, c1 + 1):
+                if left <= cc < left + width and top <= rr < top + height:
+                    continue
+                pair = pair_at(cc, rr)
+                if pair != (0xFFFF, 0xFFFF):
+                    ring[pair] += 1
+        # These ids were confirmed from the native-room deletion samples.  A
+        # known structure material may legitimately continue into the ring,
+        # so permit it when it has multiple interior samples; unknown/common
+        # terrain still requires a clean ring to be considered distinctive.
+        known_ids = {326, 328, 329, 334, 2408, 1947, 1964, 1444}
+        distinctive = {pair for pair, count in inside.items()
+                       if count >= 2 and 1388 not in pair
+                       and (ring.get(pair, 0) == 0
+                            or any(int(value) in known_ids for value in pair))}
+        if not distinctive:
+            return None
+        occupied = set()
+        for rr in range(top, top + height):
+            for cc in range(left, left + width):
+                if pair_at(cc, rr) in distinctive:
+                    occupied.add((cc, rr))
+        # Capture only a directly adjacent one-cell extension.  This covers
+        # the observed structure edge spill without growing through terrain.
+        for rr in range(r0, r1 + 1):
+            for cc in range(c0, c1 + 1):
+                if (cc, rr) in occupied or pair_at(cc, rr) not in distinctive:
+                    continue
+                if any((cc + dc, rr + dr) in occupied
+                       for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                    occupied.add((cc, rr))
+        if not occupied:
+            return None
+        min_col = max(0, min(cc for cc, _ in occupied))
+        max_col = min(int(map_width) - 1, max(cc for cc, _ in occupied))
+        min_row = max(0, min(rr for _, rr in occupied))
+        max_row = min(int(map_height) - 1, max(rr for _, rr in occupied))
+        mask = []
+        for rr in range(min_row, max_row + 1):
+            mask.append("".join("1" if (cc, rr) in occupied else "0"
+                                for cc in range(min_col, max_col + 1)))
+        if not any("1" in line for line in mask):
+            return None
+        return {"mask": mask, "mask_origin_col": min_col,
+                "mask_origin_row": min_row, "mask_width": max_col - min_col + 1,
+                "mask_height": max_row - min_row + 1,
+                "occupied_cells": len(occupied),
+                "mask_source": "native-material-neighborhood",
+                "mask_confidence": "conservative"}
+
+    def get_structure_catalog(self):
+        """Return the bundled structure directory with safe preview metadata."""
+        rows = []
+        for filename in self._structure_catalog_files():
+            path = os.path.join(GAME_ROOT, "Levels", filename)
+            row = self._structure_descriptor(filename)
+            # Both inline SSO and longer ASCII names are placeable. Long names
+            # are staged and allocated by the game-thread controller before
+            # entering luaWorld::putRoom.
+            row["placeable"] = bool(filename and filename.isascii()
+                                     and len(filename.encode("ascii")) <= 0x200)
+            row["preview_only"] = not row["placeable"]
+            bundled = filename.lower() in EMBEDDED_STRUCTURE_INDEX
+            if bundled:
+                # Do not stat 1,000+ game files while opening the list. The
+                # actual native placement path validates the selected file.
+                # ``available`` means the catalog entry is available, not that
+                # the local game resource has already been verified.
+                row.update({"available": True, "catalog_available": True,
+                            "game_file_available": None,
+                            "size": int(row.get("size") or 0),
+                            "source": "modifier-embedded"})
+            else:
+                available = os.path.isfile(path)
+                row.update({"available": available, "catalog_available": available,
+                            "game_file_available": available,
+                            "size": os.path.getsize(path) if available else 0,
+                            "source": "game-levels"})
+            rows.append(row)
+        with self._structure_history_lock:
+            placed = [dict(item) for item in self._structure_runtime_history
+                      if str(item.get("source") or "").startswith("native-runtime")]
+        return {"ok": True, "state": self.STATUS_VERIFIED, "structures": rows,
+                "placed": placed,
+                "source": "modifier-embedded" if EMBEDDED_STRUCTURE_INDEX else "game-levels",
+                "note": "结构目录、名称和尺寸由修改器内嵌；生成时仍由游戏原生读取 Levels 中对应的 .map 文件。"}
+
+    def get_structure_resource_status(self, filename):
+        """Verify one selected Levels resource without rescanning the catalog."""
+        name = os.path.basename(str(filename or "").strip())
+        if not name or name.lower() not in EMBEDDED_STRUCTURE_INDEX:
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "该结构不在修改器内嵌目录中"}
+        path = os.path.join(GAME_ROOT, "Levels", name)
+        exists = os.path.isfile(path)
+        return {"ok": True, "state": self.STATUS_VERIFIED if exists else self.STATUS_FAILED,
+                "file": name, "game_file_available": exists,
+                "message": "游戏资源已确认" if exists else "本机游戏缺少该结构文件"}
+
+    def scan_map_structures(self):
+        """Return live native room records for the current save only.
+
+        A merged tile has no source-file field.  The authoritative
+        ``World::UnderRoom`` vector is therefore read first; modifier
+        placement history remains excluded so changing saves cannot leave
+        ghost annotations.
+        """
+        map_key = self._structure_map_key()
+        saved = self._read_native_room_records()
+        persisted = self._saved_map_structures(map_key)
+        # Only records emitted by a native runtime scanner/container are
+        # eligible for the map overlay.  Modifier placement history is
+        # intentionally excluded: it is not evidence of a natural structure.
+        saved = [item for item in saved if str(item.get("source") or "").startswith("native-")]
+        # A native UnderRoom record carries bounds but no source filename.
+        # Local placement metadata may *name* a matching live record; it must
+        # never create an overlay by itself.  The old fallback kept a
+        # ``portal.map`` record after the room was gone or after a save switch,
+        # which produced a large phantom “其它结构 · portal” annotation.
+        merged = {}
+        for item in saved:
+            try:
+                anchor = (int(item.get("row")), int(item.get("col")))
+                key = (str(item.get("file")).lower(), anchor[0], anchor[1])
+                merged[key] = item
+            except (TypeError, ValueError):
+                continue
+        # Persisted modifier placements retain the exact readback mask.  When
+        # the live native room has the same anchor and dimensions, enrich that
+        # placement with its actual World::UnderRoom slot instead of throwing
+        # either record away.  The browser list order is never a native slot.
+        for item in persisted:
+            try:
+                anchor = (int(item.get("row")), int(item.get("col")))
+                key = (str(item.get("file")).lower(), anchor[0], anchor[1])
+                native_match = next((existing for existing in saved
+                                     if (int(existing.get("row", -1)), int(existing.get("col", -1))) == anchor
+                                     and int(existing.get("width", -1)) == int(item.get("width", -2))
+                                     and int(existing.get("height", -1)) == int(item.get("height", -2))), None)
+                if native_match:
+                    combined = dict(item)
+                    combined["native_record_index"] = int(native_match.get("record_index", -1))
+                    for existing_key, existing in list(merged.items()):
+                        if (int(existing.get("row", -1)), int(existing.get("col", -1))) == anchor:
+                            del merged[existing_key]
+                    merged[key] = combined
+            except (TypeError, ValueError):
+                continue
+        placed = list(merged.values())
+        for item in placed:
+            descriptor = self._structure_descriptor(item.get("file"))
+            item.setdefault("name", descriptor["name"])
+            item.setdefault("width", descriptor["width"])
+            item.setdefault("height", descriptor["height"])
+            item.setdefault("category", descriptor["category"])
+            item.setdefault("source", "native-room-container")
+            item.setdefault("confidence", self.STATUS_VERIFIED)
+            item["live_native_room"] = int(item.get("native_record_index", -1)) >= 0
+        return {"ok": True, "state": self.STATUS_VERIFIED if placed else self.STATUS_UNVERIFIED,
+                "map_key": map_key, "structures": self._clean_structure_records(placed),
+                "note": ("已显示来自游戏原生 Room 容器的结构。"
+                         if placed else "当前尚未定位到游戏原生 Room/UnderRoom 容器；已隐藏修改器生成记录和旧缓存，避免误标自然结构。")}
+
+    def _query_world_object_occupancy(self, obj, anchor_col, anchor_row,
+                                      object_width, object_height, cell_width,
+                                      cell_height, map_width, map_height):
+        """Return only the cells hit by the native ItemEntity lookup.
+
+        ``width`` and ``height`` in an ItemEntity are render metrics; they are
+        useful only for selecting a conservative search neighbourhood.  The
+        returned mask itself comes exclusively from
+        ``World::FindEntityByCellWithBounds`` on the game thread.  A ``None``
+        return means the native dispatcher did not confirm a complete query,
+        never that the object has a rectangular footprint.
+        """
+        try:
+            obj = int(obj)
+            anchor_col, anchor_row = int(anchor_col), int(anchor_row)
+            span_cols = max(1, int(math.ceil(float(object_width) / float(cell_width))))
+            span_rows = max(1, int(math.ceil(float(object_height) / float(cell_height))))
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+            return None
+        # ItemEntity anchors can be centred or down-aligned. Search symmetrically
+        # with a small margin; this is only a search window, not an asserted
+        # footprint.  The native result decides every highlighted cell.
+        c0 = max(0, anchor_col - span_cols - 2)
+        c1 = min(int(map_width) - 1, anchor_col + span_cols + 2)
+        r0 = max(0, anchor_row - span_rows - 2)
+        r1 = min(int(map_height) - 1, anchor_row + span_rows + 2)
+        if c0 > c1 or r0 > r1:
+            return None
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                _diagnostic("world object occupancy controller:", error)
+                return None
+            data = int(controller["data"])
+            request = data + self.WORLD_OBJECT_OCCUPANCY_REQUEST_OFF
+            status_addr = data + self.WORLD_OBJECT_OCCUPANCY_STATUS_OFF
+            count_addr = data + self.WORLD_OBJECT_OCCUPANCY_COUNT_OFF
+            mask_addr = data + self.WORLD_OBJECT_OCCUPANCY_MASK_OFF
+            if int(pm.read_int(request) or 0):
+                return None
+            cells = []
+            # The game-thread handler has a fixed 256-byte result buffer.  A
+            # large visual search is partitioned, so no response can overrun
+            # the temporary page and every chunk remains independently valid.
+            max_cells = int(self.WORLD_OBJECT_OCCUPANCY_MAX_CELLS)
+            for chunk_c0 in range(c0, c1 + 1, 16):
+                chunk_c1 = min(c1, chunk_c0 + 15)
+                cols = chunk_c1 - chunk_c0 + 1
+                rows_per_chunk = max(1, max_cells // cols)
+                for chunk_r0 in range(r0, r1 + 1, rows_per_chunk):
+                    chunk_r1 = min(r1, chunk_r0 + rows_per_chunk - 1)
+                    rows = chunk_r1 - chunk_r0 + 1
+                    total = cols * rows
+                    if total < 1 or total > max_cells:
+                        return None
+                    pm.write_bytes(mask_addr, b"\x00" * max_cells, max_cells)
+                    pm.write_int(data + self.WORLD_OBJECT_OCCUPANCY_TARGET_OFF, obj)
+                    pm.write_int(data + self.WORLD_OBJECT_OCCUPANCY_C0_OFF, chunk_c0)
+                    pm.write_int(data + self.WORLD_OBJECT_OCCUPANCY_C1_OFF, chunk_c1)
+                    pm.write_int(data + self.WORLD_OBJECT_OCCUPANCY_R0_OFF, chunk_r0)
+                    pm.write_int(data + self.WORLD_OBJECT_OCCUPANCY_R1_OFF, chunk_r1)
+                    pm.write_int(count_addr, 0)
+                    pm.write_int(status_addr, 0)
+                    # Request is deliberately written last: the game thread
+                    # sees a complete target, bounds and empty result mask.
+                    pm.write_int(request, 1)
+                    # This queue is serviced by the running game thread on
+                    # its next normal tick.  Do not make a paused game turn
+                    # a many-second wait for every map object; fall back to
+                    # the verified anchor and let the user retry after resume.
+                    deadline = time.monotonic() + 0.6
+                    while time.monotonic() < deadline:
+                        if int(pm.read_int(status_addr) or 0) == 1:
+                            break
+                        time.sleep(0.01)
+                    if int(pm.read_int(status_addr) or 0) != 1:
+                        return None
+                    raw = pm.read_bytes(mask_addr, total)
+                    if not raw or len(raw) != total:
+                        return None
+                    # The handler walks columns outside and rows inside.
+                    for local_col in range(cols):
+                        for local_row in range(rows):
+                            if raw[local_col * rows + local_row] != 1:
+                                continue
+                            cells.append({"col": chunk_c0 + local_col,
+                                          "row": chunk_r0 + local_row})
+            return cells
+        
+    def _read_world_object_id(self, obj):
+        """Read the identifier carried by an independent World object.
+
+        The current build stores short identifiers (for example
+        ``dragon_egg``) inline at ``GameObject+0x10``.  Some longer names use
+        the normal MSVC string buffer, so fall back to its pointer only after
+        the inline bytes have failed strict validation.  This helper is
+        intentionally read-only and returns an empty name rather than guessing
+        a type from a vtable address.
+        """
+        try:
+            raw = pm.read_bytes(int(obj) + self.WORLD_OBJECT_NAME_OFF, 32)
+            if not raw:
+                return ""
+            direct = raw.split(b"\x00", 1)[0].decode("ascii", errors="ignore").strip()
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{1,63}", direct or ""):
+                return direct.lower()
+            if len(raw) < 24:
+                return ""
+            # MSVC's non-SSO layout is ``pointer, ..., length, capacity``.
+            # ``length`` is at the string object's +0x10, rather than directly
+            # after the pointer.  Reading +0x04 here treated allocator data as
+            # a length and silently hid every long object identifier.
+            text_ptr = struct.unpack_from("<I", raw, 0)[0]
+            text_len = struct.unpack_from("<I", raw, 0x10)[0]
+            if not (_is_plausible_32bit_pointer(text_ptr) and 1 <= text_len <= 64):
+                return ""
+            pointed = _read_ascii_string(pm, text_ptr, int(text_len)).strip()
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{1,63}", pointed or ""):
+                return pointed.lower()
+        except Exception:
+            return ""
+        return ""
+
+    def _is_displayable_world_object(self, object_id):
+        """Exclude runtime fragments that are not independent map objects.
+
+        Native rooms own several helper ItemEntity instances (for example
+        ``r1``/``xr1`` and ``stone_eater_cave*``).  They are real heap objects
+        but are only sprite/collision pieces of a room, so presenting them as
+        selectable structures confuses the map and makes deletion unsafe.
+        Keep the filter deliberately narrow: unknown named objects remain
+        visible for investigation instead of being silently hidden.
+        """
+        name = str(object_id or "").strip().lower()
+        if not name:
+            return False
+        if name in {"r1", "xr1"}:
+            return False
+        return not name.startswith("stone_eater_cave")
+
+    def scan_map_world_objects(self, precise=False):
+        """Return independent live World objects for the map's object layer.
+
+        Map tile layers contain only block IDs.  Visible entities such as a
+        dragon egg or an entity-backed door live in the separate World object
+        vector, so they must be read and rendered independently.  Records are
+        process/save-scoped and deliberately never persisted in configuration.
+        """
+        if not connected or pm is None:
+            return self._read_envelope(False, self.STATUS_DISCONNECTED,
+                                       error="尚未连接游戏")
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                state, detail = self._runtime_read_unavailable_state()
+                return self._read_envelope(False, state, error=detail)
+            map_data, map_width, map_height, world_width, world_height = resolved
+            world = int(pm.read_int(base_addr + ITEM_BASE_OFFSET) or 0)
+            begin = int(pm.read_int(world + self.WORLD_OBJECTS_BEGIN_OFF) or 0) if world else 0
+            end = int(pm.read_int(world + self.WORLD_OBJECTS_END_OFF) or 0) if world else 0
+            span = end - begin
+            if (begin <= 0 or end < begin or span % 4 != 0
+                    or span > 4 * self.WORLD_OBJECT_MAX_COUNT):
+                return self._read_envelope(False, self.STATUS_STALE,
+                                           error="当前版本未确认独立对象容器")
+            if span == 0:
+                return self._read_envelope(True, self.STATUS_VERIFIED, [],
+                                           entities=[], count=0,
+                                           note="当前地图没有可读取的独立对象")
+            vector_raw = pm.read_bytes(begin, span)
+            if not vector_raw or len(vector_raw) < span:
+                return self._read_envelope(False, self.STATUS_STALE,
+                                           error="独立对象容器读取不完整")
+            cell_width = float(world_width) / float(map_width)
+            cell_height = float(world_height) / float(map_height)
+            if cell_width <= 0 or cell_height <= 0:
+                return self._read_envelope(False, self.STATUS_STALE,
+                                           error="地图格尺寸无效")
+            # Only an explicit “读取对象” click starts a native per-cell
+            # lookup. Automatic map refreshes reuse the current save's mask,
+            # or show the verified anchor alone until the user asks for a
+            # precise read. This avoids turning a 2.5-second UI refresh into a
+            # heavy stream of game-thread calls.
+            precise = bool(precise)
+            scope = (int(pm.process_id), int(world), int(map_data),
+                     int(map_width), int(map_height))
+            cache = self._world_object_occupancy_cache
+            if cache.get("scope") != scope:
+                cache = {"scope": scope, "items": {}}
+                self._world_object_occupancy_cache = cache
+            cached_items = cache["items"]
+            entities = []
+            transient_failures = 0
+            for index in range(span // 4):
+                obj = int(struct.unpack_from("<I", vector_raw, index * 4)[0] or 0)
+                if not _is_plausible_32bit_pointer(obj):
+                    continue
+                try:
+                    raw = pm.read_bytes(obj, self.WORLD_OBJECT_DESTROYED_OFF + 1)
+                    if not raw or len(raw) < self.WORLD_OBJECT_DESTROYED_OFF + 1:
+                        continue
+                    # GameObject::Destroy completes component cleanup and
+                    # sets +0xA6.  Some persistent objects retain their slot
+                    # in World's vector until a later world cleanup, so a
+                    # live-object map must never draw or target them again.
+                    if raw[self.WORLD_OBJECT_DESTROYED_OFF]:
+                        continue
+                    vtable = int(struct.unpack_from("<I", raw, 0)[0] or 0)
+                    x, y, width, height = struct.unpack_from(
+                        "<4f", raw, self.WORLD_OBJECT_X_OFF)
+                    if (not all(math.isfinite(value) for value in (x, y, width, height))
+                            or width <= 0 or height <= 0
+                            or width > world_width * 2 or height > world_height * 2):
+                        continue
+                    # Object coordinates are logical placement anchors, not
+                    # pixel top-left corners.  They locate an object and set
+                    # a bounded search window only; they never define the
+                    # displayed occupancy rectangle.
+                    left = max(0, min(map_width - 1, int(math.floor(x / cell_width))))
+                    top = max(0, min(map_height - 1, int(math.floor(y / cell_height))))
+                    object_id = self._read_world_object_id(obj)
+                    if not self._is_displayable_world_object(object_id):
+                        continue
+                    label = self.WORLD_OBJECT_DISPLAY_NAMES.get(object_id)
+                    if not label:
+                        label = object_id.replace("_", " ") if object_id else "未命名对象"
+                    cache_key = (int(obj), int(vtable), int(left), int(top),
+                                 round(float(width), 3), round(float(height), 3))
+                    cached = cached_items.get(cache_key)
+                    cells = list(cached.get("cells") or []) if isinstance(cached, dict) else []
+                    occupancy_state = str(cached.get("state") or "") if isinstance(cached, dict) else ""
+                    if precise and not cells:
+                        native_cells = self._query_world_object_occupancy(
+                            obj, left, top, width, height, cell_width, cell_height,
+                            map_width, map_height,
+                        )
+                        if native_cells is not None:
+                            cells = native_cells
+                            occupancy_state = "native-cell-hit"
+                            cached_items[cache_key] = {"cells": list(cells),
+                                                       "state": occupancy_state}
+                    # A single anchor cell is a verified location. It is much
+                    # more honest than the old guessed rectangle when no
+                    # native occupancy mask has been read yet.
+                    if not cells:
+                        cells = [{"col": left, "row": top}]
+                        occupancy_state = "anchor-only"
+                    valid_cells = []
+                    seen_cells = set()
+                    for cell in cells:
+                        try:
+                            cell_col, cell_row = int(cell["col"]), int(cell["row"])
+                        except (KeyError, TypeError, ValueError, OverflowError):
+                            continue
+                        if not (0 <= cell_col < map_width and 0 <= cell_row < map_height):
+                            continue
+                        key = (cell_col, cell_row)
+                        if key not in seen_cells:
+                            seen_cells.add(key)
+                            valid_cells.append({"col": cell_col, "row": cell_row})
+                    if not valid_cells:
+                        valid_cells = [{"col": left, "row": top}]
+                        occupancy_state = "anchor-only"
+                    bounds_left = min(cell["col"] for cell in valid_cells)
+                    bounds_top = min(cell["row"] for cell in valid_cells)
+                    bounds_right = max(cell["col"] for cell in valid_cells) + 1
+                    bounds_bottom = max(cell["row"] for cell in valid_cells) + 1
+                    entities.append({
+                        "index": index,
+                        "id": object_id,
+                        "name": label,
+                        "address": "0x%08X" % obj,
+                        "vtable": "0x%08X" % vtable,
+                        "col": left,
+                        "row": top,
+                        "right": bounds_right,
+                        "bottom": bounds_bottom,
+                        "width": bounds_right - bounds_left,
+                        "height": bounds_bottom - bounds_top,
+                        "cells": valid_cells,
+                        "occupied_cells": len(valid_cells),
+                        "occupancy_state": occupancy_state,
+                        "world_x": round(float(x), 2),
+                        "world_y": round(float(y), 2),
+                        "world_width": round(float(width), 2),
+                        "world_height": round(float(height), 2),
+                        "confidence": self.STATUS_VERIFIED,
+                    })
+                # World can retain a pointer for a short period while an
+                # object is being destroyed.  A failed candidate must not
+                # abort the complete map scan or leak a traceback to the UI.
+                except Exception:
+                    # World can change this vector while an object is being
+                    # destroyed.  Keep scanning the remaining objects, while
+                    # preserving enough evidence for the UI to distinguish a
+                    # transient read race from an empty object layer.
+                    transient_failures += 1
+                    continue
+            entities.sort(key=lambda item: (int(item["row"]), int(item["col"]), int(item["index"])))
+            note = "已从游戏 World 独立对象容器读取；对象与地图外层方块分开显示。"
+            if transient_failures:
+                note += " 已跳过 %d 个正在变化或无法读取的对象；刷新后会重新尝试。" % transient_failures
+            return self._read_envelope(True, self.STATUS_VERIFIED, entities,
+                                       entities=entities, count=len(entities),
+                                       transient_failures=transient_failures,
+                                       note=note)
+        except Exception as exc:
+            _diagnostic("scan_map_world_objects:", exc)
+            return self._read_envelope(False, self.STATUS_STALE,
+                                       error="独立对象读取失败：%s" % (str(exc) or "对象容器正在变化；请刷新后重试"))
+
+    def get_special_entity_catalog(self):
+        """Return the special-entity catalogue without reading external files.
+
+        Only curated, resource-defined ItemEntity candidates are listed.
+        Event containers such as Pandora are deliberately excluded because
+        they need a separate event-container initialization chain.
+        """
+        rows = []
+        for entity_id, definition in self.SPECIAL_ENTITY_DEFINITIONS.items():
+            row = {"id": entity_id, **dict(definition)}
+            row["available"] = None
+            row["live_count"] = 0
+            rows.append(row)
+        if connected and pm:
+            try:
+                result = self.scan_map_world_objects(False)
+                entities = result.get("entities") or [] if isinstance(result, dict) else []
+                counts = {}
+                for item in entities:
+                    key = str(item.get("id") or "").strip().lower()
+                    counts[key] = counts.get(key, 0) + 1
+                for row in rows:
+                    row["live_count"] = int(counts.get(row["id"], 0))
+                    # Availability means the native Item definition is loaded,
+                    # not that an instance already exists on the map.  This is
+                    # deliberately resolved from ResourceManager's Item* table
+                    # so a fresh map can still generate a dragon egg.
+                    if row.get("supported"):
+                        resolved_item, _ = self._resolve_special_entity_item(row["id"])
+                        row["available"] = bool(resolved_item)
+                    else:
+                        row["available"] = False
+            except Exception:
+                pass
+        return {"ok": True, "state": self.STATUS_VERIFIED,
+                "entities": rows,
+                "note": "特殊实体与地图方块分开管理；生成只开放已验证的原生 ItemEntity 路径。"}
+
+    def _resolve_special_entity_item(self, entity_id):
+        """Resolve the shared Item definition used by native item lookup.
+
+        ``World::AddItemInstance`` expects an ``Item*`` from the
+        ResourceManager item-definition vector, not a resource-table slot and
+        not an ItemEntity copied from the map.  The game's FindItemByName
+        routine walks ``manager + 0x474 .. +0x478`` and compares each Item's
+        name/hash.  Reading that same authoritative vector means generation
+        works even when the requested entity has never existed in the map.
+        """
+        entity_id = str(entity_id or "").strip().lower()
+        if entity_id not in self.SPECIAL_ENTITY_ALLOWED:
+            return None, "该特殊实体尚未通过原生生成验收"
+        try:
+            manager = int(pm.read_int(int(get_base()) + ITEM_BASE_OFFSET) or 0)
+            begin = int(pm.read_int(manager + self.ITEM_DEFINITION_VECTOR_BEGIN_OFF) or 0)
+            end = int(pm.read_int(manager + self.ITEM_DEFINITION_VECTOR_END_OFF) or 0)
+            span = end - begin
+            # FindItemByName uses a vector of Item* (4-byte entries).  Keep
+            # bounds conservative so a stale manager cannot turn into an
+            # arbitrary process-memory walk.
+            if not (_is_plausible_32bit_pointer(manager) and
+                    _is_plausible_32bit_pointer(begin) and end >= begin and
+                    span % 4 == 0 and span <= 4 * 10000):
+                return None, "当前游戏的 Item 定义表不可读"
+            scope = (int(pm.process_id), manager, begin, end)
+            cache = self._special_entity_item_cache
+            if cache.get("scope") != scope:
+                # The catalogue is refreshed automatically after connection.
+                # Index the authoritative vector once per process instead of
+                # walking ~2,000 remote Item entries once for every option.
+                indexed = {}
+                for index in range(span // 4):
+                    item = int(pm.read_int(begin + index * 4) or 0)
+                    if not _is_plausible_32bit_pointer(item):
+                        continue
+                    try:
+                        name = _read_item_name(pm, item, 0x64, 32, 64).strip().lower()
+                    except Exception:
+                        continue
+                    if name and name not in indexed:
+                        indexed[name] = item
+                cache = {"scope": scope, "items": indexed}
+                self._special_entity_item_cache = cache
+            item = int((cache.get("items") or {}).get(entity_id) or 0)
+            if _is_plausible_32bit_pointer(item):
+                return item, ""
+            return None, "游戏资源中未找到 %s 的原生 Item 定义" % (
+                self.SPECIAL_ENTITY_DEFINITIONS.get(entity_id, {}).get("name", entity_id))
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError, struct.error) as exc:
+            return None, "特殊实体 Item 定义定位失败：%s" % exc
+
+    def spawn_special_entity(self, entity_id="dragon_egg", col=0, row=0):
+        """Queue one validated special ItemEntity on the real game thread."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接游戏并进入已加载的存档"}
+        entity_id = str(entity_id or "").strip().lower()
+        definition = self.SPECIAL_ENTITY_DEFINITIONS.get(entity_id)
+        if not definition or not definition.get("supported"):
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": (definition or {}).get("note", "该特殊实体暂未开放生成")}
+        try:
+            col, row = int(col), int(row)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "列和行必须是整数"}
+        if col < 0 or row < 0:
+            return {"ok": False, "error": "列和行不能为负数"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "error": "地图未载入，请进入存档后重试"}
+        _map_data, map_width, map_height, _world_width, _world_height = resolved
+        if col >= int(map_width) or row >= int(map_height):
+            return {"ok": False, "error": "坐标超出当前地图范围"}
+        item, item_error = self._resolve_special_entity_item(entity_id)
+        if not item:
+            return {"ok": False, "state": self.STATUS_STALE, "error": item_error}
+        try:
+            module_base = int(get_base())
+            add_address = module_base + self.V1_WORLD_ADD_ITEM_INSTANCE_RVA
+            if pm.read_bytes(add_address, len(self.V1_WORLD_ADD_ITEM_INSTANCE_PREFIX)) != self.V1_WORLD_ADD_ITEM_INSTANCE_PREFIX:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前游戏版本的原生实体生成入口未通过校验"}
+        except Exception as exc:
+            return {"ok": False, "error": "无法验证原生实体生成入口：%s" % exc}
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            data = int(controller["data"])
+            request = data + self.SPECIAL_ENTITY_QUEUE_REQUEST_OFF
+            result_addr = data + self.SPECIAL_ENTITY_QUEUE_RESULT_OFF
+            status_addr = data + self.SPECIAL_ENTITY_QUEUE_STATUS_OFF
+            try:
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "error": "上一条特殊实体生成请求仍在等待处理"}
+                before = self.scan_map_world_objects(False)
+                before_entities = before.get("entities") or [] if isinstance(before, dict) else []
+                before_addresses = {str(item.get("address")) for item in before_entities
+                                    if str(item.get("id") or "").lower() == entity_id}
+                pm.write_int(result_addr, 0)
+                pm.write_int(status_addr, 0)
+                pm.write_int(data + self.SPECIAL_ENTITY_QUEUE_ITEM_OFF, int(item))
+                pm.write_int(data + self.SPECIAL_ENTITY_QUEUE_X_OFF, col)
+                pm.write_int(data + self.SPECIAL_ENTITY_QUEUE_Y_OFF, row)
+                pm.write_int(request, 1)
+            except Exception as exc:
+                return {"ok": False, "error": "提交特殊实体生成请求失败：%s" % exc}
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                try:
+                    if int(pm.read_int(status_addr) or 0) == 1:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.03)
+            if int(pm.read_int(status_addr) or 0) != 1:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "游戏未确认特殊实体生成请求"}
+            native_entity = int(pm.read_int(result_addr) or 0)
+            deadline = time.monotonic() + 3.0
+            created = None
+            while time.monotonic() < deadline:
+                current = self.scan_map_world_objects(False)
+                current_entities = current.get("entities") or [] if isinstance(current, dict) else []
+                candidates = [entry for entry in current_entities
+                              if str(entry.get("id") or "").lower() == entity_id
+                              and str(entry.get("address")) not in before_addresses]
+                if native_entity:
+                    exact = "0x%08X" % native_entity
+                    exact_rows = [entry for entry in candidates if str(entry.get("address")) == exact]
+                    if exact_rows:
+                        created = exact_rows[0]
+                        break
+                if len(candidates) == 1:
+                    created = candidates[0]
+                    break
+                time.sleep(0.06)
+            if not created:
+                return {"ok": False, "created": False,
+                        "error": "原生调用已返回，但未在独立对象数组中确认新增对象"}
+            note = str(definition.get("note") or
+                       "已由游戏原生 AddItemInstance 创建；组件、孵化计时和存档登记由游戏管理。")
+            return {"ok": True, "created": True, "state": self.STATUS_VERIFIED,
+                    "entity": created, "note": note}
+
+    def spawn_special_entity_batch(self, entity_id="dragon_egg", col=0, row=0,
+                                   count=1, spacing=3):
+        """Place a small, non-overlapping grid of curated special entities."""
+        entity_id = str(entity_id or "").strip().lower()
+        definition = self.SPECIAL_ENTITY_DEFINITIONS.get(entity_id) or {}
+        if definition and not definition.get("batch_allowed", True):
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "%s 不允许批量生成：%s" % (
+                        definition.get("name", entity_id),
+                        definition.get("note", "该实体需要逐个谨慎放置"))}
+        try:
+            col, row, count, spacing = int(col), int(row), int(count), int(spacing)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "坐标、数量和间距必须是整数"}
+        if not (1 <= count <= 16):
+            return {"ok": False, "error": "批量生成数量限 1–16 个"}
+        if not (1 <= spacing <= 12):
+            return {"ok": False, "error": "实体间距限 1–12 格"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "当前地图不可读"}
+        _map_data, map_width, map_height, _world_width, _world_height = resolved
+        columns = max(1, int(math.ceil(math.sqrt(count))))
+        positions = [(col + (index % columns) * spacing,
+                      row + (index // columns) * spacing) for index in range(count)]
+        if any(c < 0 or r < 0 or c >= int(map_width) or r >= int(map_height)
+               for c, r in positions):
+            return {"ok": False, "error": "按当前数量和间距排布后会超出地图边界"}
+        created, failures = [], []
+        for c, r in positions:
+            result = self.spawn_special_entity(entity_id, c, r)
+            if result.get("ok"):
+                created.append(result.get("entity") or {"col": c, "row": r})
+            else:
+                failures.append({"col": c, "row": r,
+                                 "error": result.get("error") or "游戏未确认"})
+        return {"ok": bool(created) and not failures,
+                "state": self.STATUS_VERIFIED if created and not failures else self.STATUS_FAILED,
+                "created": created, "created_count": len(created),
+                "failed": failures, "requested_count": count,
+                "layout": {"columns": columns, "spacing": spacing},
+                "error": ("批量生成中有 %d 个未完成" % len(failures)) if failures else ""}
+
+    def spawn_special_entities(self, entities):
+        """Replay a small clipboard list of curated ItemEntities natively.
+
+        The browser sends only an id and target map cell per entity.  Each
+        placement still goes through ``spawn_special_entity`` so the Item*
+        lookup, game-thread queue and post-create object verification are
+        repeated for every copied entity.
+        """
+        if not isinstance(entities, (list, tuple)):
+            return {"ok": False, "error": "特殊实体复制数据无效"}
+        if not entities:
+            return {"ok": True, "state": self.STATUS_EMPTY,
+                    "created_count": 0, "created": []}
+        if len(entities) > 32:
+            return {"ok": False, "error": "一次复制最多包含 32 个特殊实体"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "当前地图不可读"}
+        _map_data, map_width, map_height, _world_width, _world_height = resolved
+        placements = []
+        for raw in entities:
+            if not isinstance(raw, dict):
+                return {"ok": False, "error": "特殊实体复制条目无效"}
+            entity_id = str(raw.get("id") or "").strip().lower()
+            if entity_id not in self.SPECIAL_ENTITY_ALLOWED:
+                return {"ok": False, "error": "复制内容包含未开放的实体：%s" % entity_id}
+            try:
+                col, row = int(raw.get("col")), int(raw.get("row"))
+            except (TypeError, ValueError, OverflowError):
+                return {"ok": False, "error": "特殊实体复制坐标无效"}
+            if not (0 <= col < int(map_width) and 0 <= row < int(map_height)):
+                return {"ok": False, "error": "特殊实体复制目标超出地图边界"}
+            item, item_error = self._resolve_special_entity_item(entity_id)
+            if not item:
+                return {"ok": False, "state": self.STATUS_STALE, "error": item_error}
+            placements.append({"id": entity_id, "col": col, "row": row})
+        created, failures = [], []
+        for placement in placements:
+            result = self.spawn_special_entity(placement["id"], placement["col"], placement["row"])
+            if result.get("ok"):
+                created.append(result.get("entity") or placement)
+            else:
+                failures.append({**placement, "error": result.get("error") or "游戏未确认"})
+        return {"ok": bool(created) and not failures,
+                "state": self.STATUS_VERIFIED if created and not failures else self.STATUS_FAILED,
+                "created_count": len(created), "created": created, "failed": failures,
+                "error": "特殊实体复制中有 %d 个未完成" % len(failures) if failures else ""}
+
+    def delete_special_entities_in_cells(self, cells):
+        """Queue destruction for curated ItemEntities anchored in a selection.
+
+        This never edits World vectors from Python.  Every target is freshly
+        resolved from the live vector and revalidated on the game thread with
+        both its Item pointer and primary vtable before GameObject::Destroy.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        if not isinstance(cells, (list, tuple)):
+            return {"ok": False, "error": "选区数据无效"}
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "当前地图不可读"}
+            _map_data, map_width, map_height, world_width, world_height = resolved
+            selected = set()
+            for cell in cells[:1024]:
+                c, r = int(cell.get("col")), int(cell.get("row"))
+                if 0 <= c < int(map_width) and 0 <= r < int(map_height):
+                    selected.add((c, r))
+            if not selected:
+                return {"ok": False, "state": self.STATUS_EMPTY, "error": "选区中没有有效地图格"}
+            module_base = int(get_base())
+            if pm.read_bytes(module_base + self.V1_GAME_OBJECT_DESTROY_RVA,
+                             len(self.V1_GAME_OBJECT_DESTROY_PREFIX)) != self.V1_GAME_OBJECT_DESTROY_PREFIX:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前游戏版本的实体销毁入口未通过校验"}
+            if pm.read_bytes(module_base + self.V1_GAME_OBJECT_MANAGER_UNREGISTER_RVA,
+                             len(self.V1_GAME_OBJECT_MANAGER_UNREGISTER_PREFIX)) != self.V1_GAME_OBJECT_MANAGER_UNREGISTER_PREFIX:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前游戏版本的完整实体移除入口未通过校验"}
+            if pm.read_bytes(module_base + self.V1_WORLD_OBJECT_REMOVE_RVA, 6) != self.V1_GAME_OBJECT_MANAGER_UNREGISTER_PREFIX:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前游戏版本的世界对象移除入口未通过校验"}
+            world = int(pm.read_int(module_base + ITEM_BASE_OFFSET) or 0)
+            begin = int(pm.read_int(world + self.WORLD_OBJECTS_BEGIN_OFF) or 0)
+            end = int(pm.read_int(world + self.WORLD_OBJECTS_END_OFF) or 0)
+            span = end - begin
+            if not (_is_plausible_32bit_pointer(world) and _is_plausible_32bit_pointer(begin)
+                    and end >= begin and span % 4 == 0
+                    and span <= 4 * self.WORLD_OBJECT_MAX_COUNT):
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "当前存档的独立对象容器不可读"}
+            manager = int(pm.read_int(module_base + self.V1_GAME_OBJECT_MANAGER_SINGLETON_PTR_RVA) or 0)
+            manager_begin = int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_BEGIN_OFF) or 0)
+            manager_end = int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_END_OFF) or 0)
+            manager_span = manager_end - manager_begin
+            if not (_is_plausible_32bit_pointer(manager) and _is_plausible_32bit_pointer(manager_begin)
+                    and manager_end >= manager_begin and manager_span % 4 == 0
+                    and manager_span <= 4 * 20000):
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "游戏对象管理器不可读，未执行删除"}
+            manager_objects = set(struct.unpack("<%dI" % (manager_span // 4),
+                                                pm.read_bytes(manager_begin, manager_span)))
+            cell_width, cell_height = float(world_width) / float(map_width), float(world_height) / float(map_height)
+            targets = []
+            for index in range(span // 4):
+                obj = int(pm.read_int(begin + index * 4) or 0)
+                if not _is_plausible_32bit_pointer(obj):
+                    continue
+                try:
+                    if pm.read_bytes(obj + self.WORLD_OBJECT_DESTROYED_OFF, 1)[0]:
+                        continue
+                    # UnRegister is only safe for an object still owned by
+                    # GameObjectManager.  Objects already sent through an old
+                    # partial-destroy path are intentionally left untouched.
+                    if obj not in manager_objects:
+                        continue
+                    item = int(pm.read_int(obj + 0x164) or 0)
+                    vtable = int(pm.read_int(obj) or 0)
+                    # The object itself carries the authoritative identifier.
+                    # Reading only Item+0x64 misses long-string objects such
+                    # as alien capsules and service buildings, making them
+                    # appear in the map while silently skipping deletion.
+                    entity_id = self._read_world_object_id(obj)
+                    if entity_id not in self.SPECIAL_ENTITY_REMOVABLE_IDS:
+                        continue
+                    x, y = float(pm.read_float(obj + self.WORLD_OBJECT_X_OFF)), float(pm.read_float(obj + self.WORLD_OBJECT_Y_OFF))
+                    anchor = (int(math.floor(x / cell_width)), int(math.floor(y / cell_height)))
+                    # A multi-cell entity may be selected by any one of its
+                    # occupied cells rather than only by its anchor.  Ask the
+                    # same native occupancy probe used by the map renderer;
+                    # if it is unavailable, retain the conservative anchor
+                    # rule instead of guessing a rectangle.
+                    selected_hit = anchor in selected
+                    if not selected_hit:
+                        try:
+                            occupied = self._query_world_object_occupancy(
+                                obj, max(0, min(map_width - 1, anchor[0])),
+                                max(0, min(map_height - 1, anchor[1])),
+                                float(pm.read_float(obj + self.WORLD_OBJECT_WIDTH_OFF)),
+                                float(pm.read_float(obj + self.WORLD_OBJECT_HEIGHT_OFF)),
+                                cell_width, cell_height, map_width, map_height)
+                            if occupied:
+                                selected_hit = any(
+                                    (int(cell.get("col")), int(cell.get("row"))) in selected
+                                    for cell in occupied if isinstance(cell, dict))
+                        except Exception:
+                            selected_hit = anchor in selected
+                    if not selected_hit or not (_is_plausible_32bit_pointer(item)
+                                                and _is_plausible_32bit_pointer(vtable)):
+                        continue
+                    targets.append({"address": obj, "item": item, "vtable": vtable,
+                                    "id": entity_id, "col": anchor[0], "row": anchor[1]})
+                except (AttributeError, OSError, TypeError, ValueError, OverflowError, struct.error):
+                    continue
+            if not targets:
+                return {"ok": True, "state": self.STATUS_EMPTY, "deleted_count": 0,
+                        "entities": [], "message": "选区内没有可删除的特殊实体"}
+            deleted, failures = [], []
+            with self._wave_portal_lock, self._memory_write_lock:
+                controller, error = self._ensure_wave_portal_controller()
+                if not controller:
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+                data = int(controller["data"])
+                request = data + self.SPECIAL_ENTITY_DELETE_QUEUE_REQUEST_OFF
+                target_addr = data + self.SPECIAL_ENTITY_DELETE_QUEUE_TARGET_OFF
+                item_addr = data + self.SPECIAL_ENTITY_DELETE_QUEUE_ITEM_OFF
+                vtable_addr = data + self.SPECIAL_ENTITY_DELETE_QUEUE_VTABLE_OFF
+                result_addr = data + self.SPECIAL_ENTITY_DELETE_QUEUE_RESULT_OFF
+                status_addr = data + self.SPECIAL_ENTITY_DELETE_QUEUE_STATUS_OFF
+                for target in targets:
+                    if int(pm.read_int(request) or 0):
+                        failures.append({**target, "error": "上一条实体删除请求仍在等待处理"})
+                        continue
+                    pm.write_int(result_addr, 0); pm.write_int(status_addr, -1)
+                    pm.write_int(target_addr, int(target["address"]))
+                    pm.write_int(item_addr, int(target["item"]))
+                    pm.write_int(vtable_addr, int(target["vtable"]))
+                    pm.write_int(request, 1)
+                    deadline = time.monotonic() + 2.5
+                    while time.monotonic() < deadline and int(pm.read_int(status_addr) or -1) == -1:
+                        time.sleep(0.03)
+                    status = int(pm.read_int(status_addr) or -1)
+                    if status == 1 and int(pm.read_int(result_addr) or 0) == int(target["address"]):
+                        # A successful native return alone is insufficient:
+                        # V33 returned success after UnRegister but still left
+                        # the pointer in World. Re-read both owner lists.
+                        world_now = set(struct.unpack(
+                            "<%dI" % ((int(pm.read_int(world + self.WORLD_OBJECTS_END_OFF) or 0) -
+                                        int(pm.read_int(world + self.WORLD_OBJECTS_BEGIN_OFF) or 0)) // 4),
+                            pm.read_bytes(int(pm.read_int(world + self.WORLD_OBJECTS_BEGIN_OFF) or 0),
+                                          int(pm.read_int(world + self.WORLD_OBJECTS_END_OFF) or 0) -
+                                          int(pm.read_int(world + self.WORLD_OBJECTS_BEGIN_OFF) or 0))))
+                        manager_now = set(struct.unpack(
+                            "<%dI" % ((int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_END_OFF) or 0) -
+                                        int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_BEGIN_OFF) or 0)) // 4),
+                            pm.read_bytes(int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_BEGIN_OFF) or 0),
+                                          int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_END_OFF) or 0) -
+                                          int(pm.read_int(manager + self.V1_GAME_OBJECT_MANAGER_OBJECTS_BEGIN_OFF) or 0))))
+                        if int(target["address"]) not in world_now and int(target["address"]) not in manager_now:
+                            deleted.append(target)
+                        else:
+                            failures.append({**target, "error": "对象仍残留在游戏容器中，未标记为完成"})
+                    else:
+                        detail = {2: "目标对象已失效", 3: "对象类型校验未通过"}.get(status, "游戏未确认实体销毁")
+                        failures.append({**target, "error": detail})
+            return {"ok": bool(deleted) and not failures,
+                    "state": self.STATUS_VERIFIED if deleted and not failures else self.STATUS_FAILED,
+                    "deleted_count": len(deleted), "entities": deleted,
+                    "failed": failures,
+                    "message": "已提交 %d 个特殊实体的游戏原生销毁" % len(deleted) if deleted else ""}
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError, struct.error) as exc:
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "读取或提交特殊实体删除请求失败：%s" % exc}
+
+    def restore_current_structure_test_annotations(self):
+        """Recover the exact structures generated in the 2026-08-27 test map.
+
+        This is deliberately an explicit, one-map user action rather than an
+        automatic guess.  It restores labels for the completed test placements
+        that predate persistent annotation storage.
+        """
+        return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                "error": "已停用测试结构标注恢复：当前结构面板只接受游戏原生 Room 容器数据"}
+
+    def place_structure(self, filename="t.map", col=0, row=0,
+                        mirror_x=1.0, mirror_y=1.0, force=False):
+        """Queue one whitelisted .map through the game's native putRoom path."""
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        filename = str(filename or "").strip()
+        descriptor = self._structure_descriptor(filename)
+        if (not filename or not filename.isascii()
+                or len(filename.encode("ascii")) > 0x200):
+            return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                    "error": "结构文件名必须是 ASCII，且长度不超过 512 字节"}
+        try:
+            col, row = int(col), int(row)
+            mirror_x, mirror_y = float(mirror_x), float(mirror_y)
+            force = bool(force)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "结构参数无效"}
+        if (not math.isfinite(mirror_x) or not math.isfinite(mirror_y) or
+                mirror_x not in (-1.0, 1.0) or mirror_y not in (-1.0, 1.0)):
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "镜像参数只能为 1 或 -1"}
+        meta = self.map_metadata()
+        if not meta.get("ok"):
+            return {"ok": False, "state": meta.get("state", self.STATUS_FAILED),
+                    "error": meta.get("error") or "无法读取当前地图范围"}
+        width, height = int(meta.get("width", 0)), int(meta.get("height", 0))
+        if not (0 <= col < width and 0 <= row < height):
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "结构坐标超出当前地图范围（列 %d，行 %d）" % (col, row)}
+        filename = os.path.basename(filename)
+        path = os.path.join(GAME_ROOT, "Levels", filename)
+        if not os.path.isfile(path):
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "结构文件不存在：%s" % filename}
+        # Capture the exact source extent before dispatching.  The native
+        # result flag alone only says that putRoom returned.  The before/after
+        # tile diff is also saved as the overlay silhouette, so later terrain
+        # changes cannot inflate a structure marker into a rectangle.
+        descriptor = self._structure_descriptor(filename)
+        display_width = int(descriptor.get("width") or 1)
+        display_height = int(descriptor.get("height") or 1)
+        probe = {"r0": row, "c0": col,
+                 "r1": min(height - 1, row + display_height - 1),
+                 "c1": min(width - 1, col + display_width - 1)}
+        before_probe = None
+        try:
+            before_data = self.map_read_regions([probe])
+            if before_data.get("ok") and before_data.get("regions"):
+                before_probe = dict(before_data["regions"][0])
+        except Exception:
+            before_probe = None
+        with self._wave_portal_lock, self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                        "error": "游戏连接已失效，请重新连接后再试"}
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+            data = int(controller["data"])
+            request = data + self.STRUCTURE_QUEUE_REQUEST_OFF
+            result_addr = data + self.STRUCTURE_QUEUE_RESULT_OFF
+            status_addr = data + self.STRUCTURE_QUEUE_STATUS_OFF
+            if int(pm.read_int(request) or 0):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "上一条结构请求仍在等待游戏处理"}
+            payload = filename.encode("ascii")
+            name_addr = data + self.STRUCTURE_QUEUE_NAME_OFF
+            if len(payload) <= 15:
+                # MSVC small-string optimisation: inline bytes + size/cap.
+                pm.write_bytes(name_addr, payload + b"\x00" * (16 - len(payload)), 16)
+                pm.write_int(name_addr + 0x10, len(payload))
+                pm.write_int(name_addr + 0x14, 15)
+            else:
+                # Long names are staged as plain bytes. The injected game
+                # thread allocates the final std::string buffer with the
+                # game's allocator immediately before putRoom, so no Python
+                # or VirtualAlloc pointer is ever handed to C++ for cleanup.
+                source_addr = data + self.STRUCTURE_QUEUE_STRING_BUFFER_OFF
+                pm.write_bytes(source_addr, payload + b"\x00", len(payload) + 1)
+                pm.write_bytes(name_addr, b"\x00" * 24, 24)
+            pm.write_int(data + self.STRUCTURE_QUEUE_LENGTH_OFF, len(payload))
+            pm.write_float(data + self.STRUCTURE_QUEUE_X_OFF, float(col))
+            pm.write_float(data + self.STRUCTURE_QUEUE_Y_OFF, float(row))
+            pm.write_float(data + self.STRUCTURE_QUEUE_MIRROR_X_OFF, mirror_x)
+            pm.write_float(data + self.STRUCTURE_QUEUE_MIRROR_Y_OFF, mirror_y)
+            pm.write_int(data + self.STRUCTURE_QUEUE_FORCE_OFF, 1 if force else 0)
+            pm.write_int(result_addr, -1)
+            pm.write_int(status_addr, -1)
+            pm.write_int(request, 1)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if not self._runtime_session_current(generation, pm_obj):
+                    return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                            "error": "等待结构生成时游戏连接已失效"}
+                state = int(pm.read_int(status_addr) or -1)
+                if state != -1:
+                    native = int(pm.read_int(result_addr) or 0)
+                    accepted = state == 1 and bool(native)
+                    readback_ok = None
+                    readback_mask = []
+                    if accepted and before_probe is not None:
+                        try:
+                            self.map_metadata()
+                            after_data = self.map_read_regions([probe])
+                            if after_data.get("ok") and after_data.get("regions"):
+                                after_probe = dict(after_data["regions"][0])
+                                readback_mask = self._structure_readback_mask(
+                                    before_probe, after_probe,
+                                    int(before_probe.get("cols") or display_width),
+                                    int(before_probe.get("rows") or display_height))
+                                readback_ok = bool(readback_mask)
+                        except Exception:
+                            readback_ok = False
+                    confirmed = accepted and (readback_ok is not False)
+                    if confirmed:
+                        record = {
+                            "file": filename, "col": col, "row": row,
+                            "mirror_x": mirror_x, "mirror_y": mirror_y,
+                            "force": force, "result": native,
+                            "readback_ok": readback_ok,
+                            "width": descriptor["width"],
+                            "height": descriptor["height"],
+                            "category": descriptor["category"],
+                            # This is retained only while the current game
+                            # connection lives.  It is evidence from the
+                            # successful native putRoom call, not a saved-map
+                            # annotation, and therefore cannot leak to a
+                            # different save after reconnect.
+                            "source": "native-runtime-placement",
+                            "confidence": self.STATUS_VERIFIED,
+                            "timestamp": int(time.time()),
+                        }
+                        if readback_mask:
+                            # The probe can be clipped at the world edge. Pad
+                            # the sampled rows back to the source extent so
+                            # the persistent record remains rectangular while
+                            # retaining only cells proven to have changed.
+                            padded = []
+                            for mask_row in readback_mask[:display_height]:
+                                padded.append(str(mask_row)[:display_width].ljust(display_width, "0"))
+                            while len(padded) < display_height:
+                                padded.append("0" * display_width)
+                            record["mask"] = padded
+                            record["mask_source"] = "placement-readback"
+                        with self._structure_history_lock:
+                            self._structure_runtime_history = [item for item in self._structure_runtime_history
+                                                               if not (int(item.get("row", -1)) == row
+                                                                       and int(item.get("col", -1)) == col)]
+                            self._structure_runtime_history.append(record)
+                        map_key = self._structure_map_key()
+                        self._save_map_structures(
+                            map_key,
+                            self._saved_map_structures(map_key) + [record],
+                        )
+                    return {"ok": confirmed,
+                            "state": self.STATUS_VERIFIED if confirmed else self.STATUS_FAILED,
+                            "file": filename, "col": col, "row": row, "result": native,
+                            "readback_ok": readback_ok,
+                            "error": ("游戏未接受结构放置请求" if not accepted else
+                                      "游戏已接受请求，但目标区域未读到方块变化" if readback_ok is False else "")}
+                time.sleep(0.03)
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "结构请求尚未由游戏主线程确认；未继续重试"}
+
+    def activate_structure_portal(self, object_addr=None, mode="all"):
+        """Register a structure-generated LevelPortal through native calls.
+
+        ``putRoom("portal.map")`` only materialises the room and its five
+        block records.  This method queues the missing LevelPortal::NewPart
+        calls on the game's update thread, followed by AllowAllParts, so the
+        result can enter the same component/update chain as a native portal.
+        ``mode="probe"`` intentionally registers only block1 for a safe
+        single-step test; ``mode="all"`` completes all five parts.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        mode = str(mode or "all").strip().lower()
+        if mode not in ("probe", "all"):
+            return {"ok": False, "error": "激活模式只能是 probe 或 all"}
+        try:
+            module_base = int(get_base())
+            expected_vtable = module_base + self.V1_LEVEL_PORTAL_VTABLE_RVA
+            if pm.read_int(module_base + self.V1_LEVEL_PORTAL_NEW_PART_RVA) == 0:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前版本的传送门原生入口不可读"}
+            if object_addr is None:
+                scan = self.scan_map_world_objects(False)
+                rows = scan.get("entities") or [] if isinstance(scan, dict) else []
+                rows = [row for row in rows if str(row.get("id") or "").lower() == "portal"]
+                object_addr = int(str(rows[0].get("address") or "0"), 0) if rows else 0
+            else:
+                object_addr = int(object_addr, 0) if isinstance(object_addr, str) else int(object_addr)
+            if not _is_plausible_32bit_pointer(object_addr):
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "未找到可验证的主传送门对象"}
+            if int(pm.read_int(object_addr) or 0) != expected_vtable:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "目标对象不是当前版本的 LevelPortal"}
+            begin = int(pm.read_int(object_addr + self.V1_LEVEL_PORTAL_PARTS_BEGIN_OFF) or 0)
+            end = int(pm.read_int(object_addr + self.V1_LEVEL_PORTAL_PARTS_END_OFF) or 0)
+            count = (end - begin) // 0x20 if begin and end >= begin and (end - begin) % 0x20 == 0 else 0
+            if count != 5 or not _is_plausible_32bit_pointer(begin):
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "目标传送门的部件记录表不可读"}
+            part_ids = []
+            flags = []
+            for index in range(count):
+                rec = begin + index * 0x20
+                part_id = int(pm.read_int(rec + 0x18) or 0)
+                part_ids.append(part_id)
+                flags.append(int(pm.read_bytes(rec + 0x1C, 1)[0]))
+            if part_ids != [0x45, 0x46, 0x47, 0x48, 0x49]:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "目标部件 ID 与已验证传送门布局不一致"}
+            point_x = float(pm.read_float(object_addr + self.V1_LEVEL_PORTAL_WORLD_X_OFF))
+            point_y = float(pm.read_float(object_addr + self.V1_LEVEL_PORTAL_WORLD_Y_OFF))
+            if not (math.isfinite(point_x) and math.isfinite(point_y)):
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "传送门世界坐标不可读"}
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError, struct.error) as exc:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "读取传送门对象失败：%s" % exc}
+
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+            data = int(controller["data"])
+            request = data + self.PORTAL_ACTIVATE_QUEUE_REQUEST_OFF
+            target_addr = data + self.PORTAL_ACTIVATE_QUEUE_TARGET_OFF
+            part_addr = data + self.PORTAL_ACTIVATE_QUEUE_PART_OFF
+            op_addr = data + self.PORTAL_ACTIVATE_QUEUE_OPERATION_OFF
+            px_addr = data + self.PORTAL_ACTIVATE_QUEUE_POINT_X_OFF
+            py_addr = data + self.PORTAL_ACTIVATE_QUEUE_POINT_Y_OFF
+            result_addr = data + self.PORTAL_ACTIVATE_QUEUE_RESULT_OFF
+            status_addr = data + self.PORTAL_ACTIVATE_QUEUE_STATUS_OFF
+            vtable_addr = data + self.PORTAL_ACTIVATE_QUEUE_VTABLE_OFF
+
+            def submit(operation, part_id=0):
+                if int(pm.read_int(request) or 0):
+                    return False, "上一条传送门激活请求仍在等待处理"
+                pm.write_int(target_addr, object_addr)
+                pm.write_int(vtable_addr, expected_vtable)
+                pm.write_int(part_addr, int(part_id))
+                pm.write_int(op_addr, int(operation))
+                pm.write_float(px_addr, point_x)
+                pm.write_float(py_addr, point_y)
+                pm.write_int(result_addr, 0)
+                pm.write_int(status_addr, -1)
+                pm.write_int(request, 1)
+                deadline = time.monotonic() + 2.5
+                while time.monotonic() < deadline:
+                    state = int(pm.read_int(status_addr) or -1)
+                    if state != -1:
+                        if state == 1 and int(pm.read_int(result_addr) or 0) == 1:
+                            return True, ""
+                        detail = {2: "目标传送门对象已失效", 3: "目标类型或操作校验未通过"}.get(
+                            state, "游戏未确认传送门激活")
+                        return False, detail
+                    time.sleep(0.03)
+                return False, "游戏线程未在限定时间内确认传送门激活"
+
+            requested_parts = [part_ids[0]] if mode == "probe" else [
+                part_id for part_id, flag in zip(part_ids, flags) if flag == 0]
+            completed = []
+            for part_id in requested_parts:
+                ok, detail = submit(self.PORTAL_ACTIVATE_OPERATION_NEW_PART, part_id)
+                if not ok:
+                    return {"ok": False, "state": self.STATUS_FAILED,
+                            "object": "0x%08X" % object_addr,
+                            "completed_parts": completed, "error": detail}
+                completed.append(part_id)
+            if mode == "all":
+                ok, detail = submit(self.PORTAL_ACTIVATE_OPERATION_ALLOW_ALL)
+                if not ok:
+                    return {"ok": False, "state": self.STATUS_FAILED,
+                            "object": "0x%08X" % object_addr,
+                            "completed_parts": completed, "error": detail}
+            try:
+                final_flags = [int(pm.read_bytes(begin + i * 0x20 + 0x1C, 1)[0]) for i in range(5)]
+                active_flag = int(pm.read_bytes(object_addr + self.V1_LEVEL_PORTAL_ACTIVE_FLAG_OFF, 1)[0])
+                child_owner = int(pm.read_int(object_addr + 0x1DC) or 0)
+            except Exception:
+                final_flags, active_flag, child_owner = [], 0, 0
+            verified = bool(mode == "probe" and final_flags and final_flags[0] == 1 or
+                            mode == "all" and final_flags == [1, 1, 1, 1, 1] and active_flag == 1)
+            return {"ok": verified, "state": self.STATUS_VERIFIED if verified else self.STATUS_FAILED,
+                    "object": "0x%08X" % object_addr, "mode": mode,
+                    "completed_parts": completed, "part_flags": final_flags,
+                    "active_flag": active_flag, "child_owner": "0x%08X" % child_owner,
+                    "error": "游戏调用已返回，但部件状态未完成读回" if not verified else ""}
+
+    def inspect_current_portal_lookup(self):
+        """Read which LevelPortal the game itself currently resolves.
+
+        This is a diagnostic only.  It calls the zero-argument native portal
+        lookup on the game thread and never changes a portal, its parts, or
+        any World container.  It separates a missing registration from the
+        game's lookup selecting another portal first.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        try:
+            module_base = int(get_base())
+            expected_vtable = module_base + self.V1_LEVEL_PORTAL_VTABLE_RVA
+            entry = module_base + self.V1_LEVEL_PORTAL_GET_CURRENT_RVA
+            prefix = pm.read_bytes(entry, 6)
+            if not prefix or prefix == b"\x00" * len(prefix):
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED,
+                        "error": "当前版本的传送门查找入口不可读"}
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError) as exc:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "无法验证传送门查找入口：%s" % exc}
+
+        with self._wave_portal_lock, self._memory_write_lock:
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+            data = int(controller["data"])
+            request = data + self.PORTAL_LOOKUP_QUEUE_REQUEST_OFF
+            result_addr = data + self.PORTAL_LOOKUP_QUEUE_RESULT_OFF
+            status_addr = data + self.PORTAL_LOOKUP_QUEUE_STATUS_OFF
+            vtable_addr = data + self.PORTAL_LOOKUP_QUEUE_VTABLE_OFF
+            try:
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "state": self.STATUS_STALE,
+                            "error": "上一条传送门查找请求仍在等待处理"}
+                pm.write_int(vtable_addr, expected_vtable)
+                pm.write_int(result_addr, 0)
+                pm.write_int(status_addr, -1)
+                pm.write_int(request, 1)
+                deadline = time.monotonic() + 2.5
+                while time.monotonic() < deadline:
+                    status = int(pm.read_int(status_addr) or -1)
+                    if status != -1:
+                        raw = int(pm.read_int(result_addr) or 0)
+                        if status != 1:
+                            details = {2: "游戏当前没有可解析的主传送门",
+                                       3: "查找结果不是已验证的 LevelPortal"}
+                            return {"ok": False, "state": self.STATUS_STALE,
+                                    "lookup_result": "0x%08X" % raw if raw else "",
+                                    "error": details.get(status, "游戏未确认传送门查找结果")}
+                        if not _is_plausible_32bit_pointer(raw):
+                            return {"ok": False, "state": self.STATUS_STALE,
+                                    "error": "游戏返回了不可用的传送门地址"}
+                        x = float(pm.read_float(raw + self.V1_LEVEL_PORTAL_WORLD_X_OFF))
+                        y = float(pm.read_float(raw + self.V1_LEVEL_PORTAL_WORLD_Y_OFF))
+                        active = int(pm.read_bytes(raw + self.V1_LEVEL_PORTAL_ACTIVE_FLAG_OFF, 1)[0])
+                        return {"ok": True, "state": self.STATUS_VERIFIED,
+                                "portal": "0x%08X" % raw,
+                                "world_x": x, "world_y": y,
+                                "active_flag": active}
+                    time.sleep(0.03)
+            except (AttributeError, OSError, TypeError, ValueError, OverflowError, struct.error) as exc:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "读取传送门查找结果失败：%s" % exc}
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "游戏主线程未在限定时间内确认传送门查找"}
+
+    def _clear_structure_tiles(self, record):
+        """Clear only proven cells through the game's native CrashBlock path.
+
+        The old implementation wrote the 0x20-byte map cell directly.  That
+        bypassed drops, texture/entity cleanup and the game's own tile
+        bookkeeping.  Every occupied cell now receives at most two native
+        requests (front, then inner layer); an unknown or stale cell is
+        skipped and reported instead of falling back to a rectangle.
+        """
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "error": "当前地图不可读"}
+        data, width, height, _world_w, _world_h = resolved
+        col, row = int(record.get("col", -1)), int(record.get("row", -1))
+        sw, sh = int(record.get("width", 0)), int(record.get("height", 0))
+        if col < 0 or row < 0 or sw < 1 or sh < 1:
+            return {"ok": False, "error": "结构范围无效"}
+        cells = self._structure_mask_cells(record, width, height)
+        if not cells:
+            return {"ok": True, "cells": 0, "exact_mask": False,
+                    "message": "未保存结构实际占用掩码；已跳过地图方块清理，避免按长方形误删地形"}
+        cleared, skipped = 0, []
+        for r, c in cells:
+            # A cell may contain both a front and inner value.  CrashBlock
+            # resolves the current layer when block=-1, so call it twice and
+            # stop as soon as the complete tile is empty.
+            cell_ok = True
+            for _ in range(2):
+                try:
+                    raw = pm.read_bytes(int(data) + r * self._map_row_stride(width) + c * self.MAP_COL_W, 4)
+                    if not raw or len(raw) < 4:
+                        cell_ok = False
+                        break
+                    front, ground = struct.unpack_from("<HH", raw, 0)
+                    if front == 0xFFFF and ground == 0xFFFF:
+                        break
+                    result = self.delete_structure_cell_native(c, r)
+                    if not result.get("ok"):
+                        # An already-empty layer is harmless; all other
+                        # failures make the composite operation incomplete.
+                        after = result.get("after") or {}
+                        if int(after.get("front", front)) == 0xFFFF and int(after.get("ground", ground)) == 0xFFFF:
+                            break
+                        cell_ok = False
+                        break
+                except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+                    cell_ok = False
+                    break
+            if cell_ok:
+                cleared += 1
+            else:
+                skipped.append({"col": c, "row": r})
+        return {"ok": not skipped, "cells": len(cells), "cleared": cleared,
+                "skipped": skipped, "exact_mask": True,
+                "message": ("已通过游戏原生流程清理 %d/%d 格" % (cleared, len(cells))
+                             if not skipped else
+                             "已通过游戏原生流程清理 %d/%d 格，剩余格子未强制清空" % (cleared, len(cells)))}
+
+    def _structure_service_entity_cell(self, record):
+        """Find a sand-temple service entity on a proven structure cell.
+
+        The room anchor is only the upper-left source coordinate.  It can be
+        empty for irregular rooms, so using it for World entity lookup makes
+        the native texture deletion silently miss the actual service object.
+        """
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                return None
+            _data, map_width, map_height, _world_w, _world_h = resolved
+            cells = self._structure_mask_cells(record, map_width, map_height)
+            allowed = set(cells) if cells else None
+            col, row = int(record.get("col")), int(record.get("row"))
+            width, height = int(record.get("width")), int(record.get("height"))
+            module_base = int(get_base())
+            world = int(pm.read_int(module_base + ITEM_BASE_OFFSET) or 0)
+            begin = int(pm.read_int(world + 0x194) or 0) if world else 0
+            end = int(pm.read_int(world + 0x198) or 0) if world else 0
+            if not (begin and end >= begin and (end - begin) % 4 == 0 and end - begin <= 4 * 20000):
+                return None
+            for cursor in range(begin, end, 4):
+                obj = int(pm.read_int(cursor) or 0)
+                if not _is_plausible_32bit_pointer(obj):
+                    continue
+                if int(pm.read_int(obj) or 0) != module_base + self.V1_SERVICE_SAND_TEMPLE_ITEM_VTABLE_RVA:
+                    continue
+                x, y = float(pm.read_float(obj + 0x38)), float(pm.read_float(obj + 0x3C))
+                sw, sh = float(pm.read_float(obj + 0x40)), float(pm.read_float(obj + 0x44))
+                left, top = int(math.floor(x / 60.0)), int(math.floor(y / 60.0))
+                right, bottom = int(math.ceil((x + sw) / 60.0)), int(math.ceil((y + sh) / 60.0))
+                left, top = max(left, col), max(top, row)
+                right, bottom = min(right, col + width), min(bottom, row + height)
+                for candidate_row in range(top, bottom):
+                    for candidate_col in range(left, right):
+                        if allowed is None or (candidate_row, candidate_col) in allowed:
+                            return {"col": candidate_col, "row": candidate_row}
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+            return None
+        return None
+
+    def delete_structure_complete(self, record_index=None, col=None, row=None):
+        """Delete native structure object/room first, then its map cells."""
+        listing = self.scan_map_structures()
+        records = listing.get("structures") if listing.get("ok") else None
+        if not isinstance(records, list):
+            return listing
+        target = None
+        try:
+            if record_index is not None and 0 <= int(record_index) < len(records):
+                target = records[int(record_index)]
+            elif col is not None and row is not None:
+                c, r = int(col), int(row)
+                # Prefer a proven occupied cell when a readback mask exists.
+                # Only fall back to the rectangular header for the explicit
+                # list-row delete button, where the caller supplies the room
+                # anchor rather than a selection hit.
+                target = None
+                for candidate in records:
+                    try:
+                        mask = candidate.get("mask")
+                        mask_row = int(candidate.get("mask_origin_row", candidate.get("row", 0)))
+                        mask_col = int(candidate.get("mask_origin_col", candidate.get("col", 0)))
+                        rr, cc = r - mask_row, c - mask_col
+                        mask_height = int(candidate.get("mask_height", candidate.get("height", 0)))
+                        mask_width = int(candidate.get("mask_width", candidate.get("width", 0)))
+                        if (isinstance(mask, list) and len(mask) == mask_height
+                                and 0 <= rr < mask_height and 0 <= cc < mask_width
+                                and len(str(mask[rr])) == mask_width
+                                and str(mask[rr])[cc] == "1"):
+                            target = candidate
+                            break
+                    except (AttributeError, TypeError, ValueError, IndexError):
+                        continue
+                # A native container rectangle is only a locator hint.  It
+                # must never select a structure for destructive work when the
+                # clicked cell is outside the proven occupied mask.
+        except (TypeError, ValueError, KeyError):
+            target = None
+        if not target:
+            return {"ok": False, "state": self.STATUS_EMPTY, "error": "未找到可删除的结构"}
+        resolved = self._map_resolve()
+        exact_cells = self._structure_mask_cells(target, resolved[1], resolved[2]) if resolved else []
+        if not exact_cells:
+            return {"ok": False, "state": self.STATUS_UNVERIFIED,
+                    "structure": target,
+                    "error": "该结构只有原生容器范围，尚未取得精确占用掩码；已拒绝删除，避免误删矩形外地形"}
+        # A service entity is often offset from the room anchor.  Find a cell
+        # actually covered by it, then call the original verified primitive.
+        # The public primitive's standalone safety policy is intentionally
+        # bypassed only inside this already policy-checked composite workflow.
+        entity_cell = self._structure_service_entity_cell(target)
+        native = {"ok": False, "state": self.STATUS_EMPTY,
+                  "error": "结构内未找到沙漠神庙服务贴图"}
+        if entity_cell:
+            entity_fn = self.delete_sand_temple_entity_native
+            while hasattr(entity_fn, "__wrapped__"):
+                entity_fn = entity_fn.__wrapped__
+            native = entity_fn(self, col=entity_cell["col"], row=entity_cell["row"])
+        # This composite endpoint is itself policy-checked.  Call the room
+        # primitive's implementation directly so an experimental wrapper
+        # cannot turn the already-confirmed complete workflow into a no-op.
+        room_fn = self.delete_structure_native
+        while hasattr(room_fn, "__wrapped__"):
+            room_fn = room_fn.__wrapped__
+        try:
+            native_slot = int(target.get("native_record_index", -1))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            native_slot = -1
+        # Only a live UnderRoom record may enter RemoveHiddenRoom.  A saved
+        # placement can remain visible after the game's room container has
+        # naturally discarded it; calling by its old coordinates is a false
+        # failure, not an actionable native delete.
+        room = ({"ok": False, "state": self.STATUS_EMPTY,
+                 "error": "该记录不在当前游戏原生 Room 容器中"}
+                if native_slot < 0 else room_fn(self, record_index=native_slot))
+        # Never fall back to direct tile clearing when the game did not first
+        # acknowledge removal of the owning Room record.  ``exact_cells`` is
+        # guaranteed above, so using it as part of this guard made the old
+        # condition unreachable: a failed native delete could still erase the
+        # room's visible tiles and leave its entity/collision owner behind.
+        if not bool(room.get("ok")):
+            detail = room.get("error") or "游戏未确认原生结构删除"
+            return {"ok": False, "state": self.STATUS_FAILED, "structure": target,
+                    "native": native, "room": room,
+                    "error": "原生结构记录未删除，已停止清理方块和材质：%s" % detail}
+        # A sand-temple service entity is part of the same structure.  Once a
+        # matching entity was found, it too must be removed before touching
+        # the map cells; otherwise the operation would again be only partial.
+        if entity_cell and not bool(native.get("ok")):
+            detail = native.get("error") or "游戏未确认服务贴图实体删除"
+            return {"ok": False, "state": self.STATUS_FAILED, "structure": target,
+                    "native": native, "room": room,
+                    "error": "关联贴图实体未删除，已停止清理方块和材质：%s" % detail}
+        tiles = self._clear_structure_tiles(target)
+        if not bool(tiles.get("ok")):
+            # Keep the record visible when any proven cell could not be
+            # confirmed by the native path.  The caller can retry after the
+            # game finishes its current tick; we never pretend a partial
+            # deletion is complete.
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "structure": target, "native": native, "room": room,
+                    "tiles": tiles,
+                    "error": tiles.get("message") or "部分结构格未完成原生删除"}
+        map_key = self._structure_map_key()
+        remain = [x for x in self._saved_map_structures(map_key)
+                  if not (int(x.get("col", -1)) == int(target["col"]) and int(x.get("row", -1)) == int(target["row"]))]
+        self._save_map_structures(map_key, remain)
+        with self._structure_history_lock:
+            self._structure_runtime_history = [x for x in self._structure_runtime_history
+                                               if not (int(x.get("col", -1)) == int(target["col"]) and int(x.get("row", -1)) == int(target["row"]))]
+        if tiles.get("exact_mask"):
+            message = ("已提交原生结构删除，并按实际占用清除 %d 格" % int(tiles.get("cells") or 0)
+                       if bool(room.get("ok")) or bool(native.get("ok")) else
+                       "该记录已不在原生 Room 容器中；已按保存的实际占用清除 %d 格" % int(tiles.get("cells") or 0))
+        else:
+            message = "已提交原生结构删除；未保存实际占用掩码，地图方块未清除以避免误删"
+        return {"ok": bool(tiles.get("ok")), "state": self.STATUS_VERIFIED if tiles.get("ok") else self.STATUS_FAILED,
+                "structure": target, "native": native, "room": room, "tiles": tiles,
+                "message": message if tiles.get("ok") else tiles.get("error")}
+
+    def delete_structure_cell_native(self, col, row, block_id=None):
+        """Experimental one-cell native destruction probe.
+
+        This endpoint is intentionally not wired to the UI yet.  It exists so
+        the next live test can exercise the game's own CrashBlock path from
+        the injected update-thread dispatcher and compare the complete tile
+        readback before exposing structure-wide deletion.
+        """
+        if not connected or not pm:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        try:
+            col, row = int(col), int(row)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "state": self.STATUS_FAILED, "error": "列和行必须是整数"}
+        resolved = self._map_resolve()
+        if not resolved:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "当前地图不可读"}
+        map_data, width, height, _world_w, _world_h = resolved
+        if not (0 <= col < int(width) and 0 <= row < int(height)):
+            return {"ok": False, "state": self.STATUS_FAILED,
+                    "error": "坐标超出地图范围（列 %d，行 %d）" % (col, row)}
+        cell = int(map_data) + row * int(width) * self.MAP_COL_W + col * self.MAP_COL_W
+        try:
+            # Pymem.read_int is DWORD-only in the bundled runtime.  Map tile
+            # layers are uint16 values, so decode the two bytes explicitly.
+            cell_bytes = pm.read_bytes(cell, 4)
+            if not cell_bytes or len(cell_bytes) < 4:
+                raise RuntimeError("地图单元读取返回空数据")
+            front, ground = struct.unpack_from("<HH", cell_bytes, 0)
+        except Exception as exc:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "目标格读取失败：%s" % exc}
+        if front == 0xFFFF and ground == 0xFFFF:
+            return {"ok": False, "state": self.STATUS_EMPTY,
+                    "error": "目标格为空，拒绝调用原生破坏流程"}
+        # 1388 is the game's service_block marker.  It belongs to a native
+        # room/structure record and is intentionally ignored by CrashBlock;
+        # calling the mining primitive here only returns a false-positive
+        # status while leaving the marker and its runtime owner intact.
+        if front == 1388 or ground == 1388:
+            return {"ok": False, "state": self.STATUS_UNVERIFIED,
+                    "col": col, "row": row,
+                    "error": "目标格是 service_block 结构标记，需通过原生结构容器销毁，不能按方块挖除"}
+        try:
+            # The native mining callers pass -1 here, which means "resolve
+            # the current tile".  Passing the tile ID itself makes
+            # CrashBlock accept the request yet skip the normal destruction
+            # branch for structure/background cells.
+            requested_block = int(block_id) if block_id is not None else -1
+        except (TypeError, ValueError, OverflowError):
+            requested_block = front if front != 0xFFFF else ground
+        with self._wave_portal_lock, self._memory_write_lock:
+            generation, pm_obj = self._runtime_lock_worker_context()
+            if not self._runtime_session_current(generation, pm_obj):
+                return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "游戏连接已失效"}
+            controller, error = self._ensure_wave_portal_controller()
+            if not controller:
+                return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+            data = int(controller["data"])
+            request = data + self.STRUCTURE_DELETE_QUEUE_REQUEST_OFF
+            result_addr = data + self.STRUCTURE_DELETE_QUEUE_RESULT_OFF
+            status_addr = data + self.STRUCTURE_DELETE_QUEUE_STATUS_OFF
+            if int(pm.read_int(request) or 0):
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "上一条结构删除请求仍在等待处理"}
+            pm.write_int(data + self.STRUCTURE_DELETE_QUEUE_X_OFF, col)
+            pm.write_int(data + self.STRUCTURE_DELETE_QUEUE_Y_OFF, row)
+            pm.write_int(data + self.STRUCTURE_DELETE_QUEUE_BLOCK_OFF, requested_block)
+            for off in (self.STRUCTURE_DELETE_QUEUE_ARG14_OFF,
+                        self.STRUCTURE_DELETE_QUEUE_ARG18_OFF,
+                        self.STRUCTURE_DELETE_QUEUE_ARG1C_OFF,
+                        self.STRUCTURE_DELETE_QUEUE_ARG20_OFF,
+                        self.STRUCTURE_DELETE_QUEUE_ARG24_OFF):
+                pm.write_int(data + off, 0)
+            # CrashBlock's ninth argument is a byte flag.  Native mining and
+            # Pandora cleanup calls set it to 1; keep the exact ABI value.
+            pm.write_int(data + self.STRUCTURE_DELETE_QUEUE_ARG28_OFF, 1)
+            pm.write_int(result_addr, -1)
+            pm.write_int(status_addr, -1)
+            pm.write_int(request, 1)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if not self._runtime_session_current(generation, pm_obj):
+                    return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "等待原生删除时游戏连接已失效"}
+                state = int(pm.read_int(status_addr) or -1)
+                if state != -1:
+                    native = int(pm.read_int(result_addr) or 0)
+                    try:
+                        cell_bytes = pm.read_bytes(cell, 4)
+                        if not cell_bytes or len(cell_bytes) < 4:
+                            raise RuntimeError("地图单元读回为空")
+                        after_front, after_ground = struct.unpack_from("<HH", cell_bytes, 0)
+                    except Exception:
+                        after_front, after_ground = front, ground
+                    changed = (after_front, after_ground) != (front, ground)
+                    return {"ok": bool(state == 1 and native and changed),
+                            "state": self.STATUS_VERIFIED if state == 1 and changed else self.STATUS_FAILED,
+                            "col": col, "row": row, "before": {"front": front, "ground": ground},
+                            "after": {"front": after_front, "ground": after_ground},
+                            "native": native, "changed": changed,
+                            "error": "原生流程已返回，但目标格未变化" if state == 1 and not changed else "游戏拒绝原生破坏请求" if state != 1 else ""}
+                time.sleep(0.03)
+            return {"ok": False, "state": self.STATUS_STALE, "error": "原生删除请求未在游戏主线程确认"}
+
+    def delete_structure_native(self, record_index=None, col=None, row=None):
+        """Run the game's native UnderRoom hide path for one room record.
+
+        This is a diagnostic endpoint, intentionally separate from the old
+        single-cell CrashBlock probe.  It never edits map tiles or vector
+        pointers.  Success requires the selected record's native +0x30 byte
+        to change from visible to hidden after the game-thread call.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        try:
+            resolved = self._map_resolve()
+            if not resolved:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "当前地图不可读"}
+            _map_data, map_width, map_height, _world_width, _world_height = resolved
+            world = int(pm.read_int(base_addr + ITEM_BASE_OFFSET) or 0)
+            if not world:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "World 对象不可读"}
+            begin = int(pm.read_int(world + 0x310) or 0)
+            end = int(pm.read_int(world + 0x314) or 0)
+            span = end - begin
+            if begin <= 0 or end <= begin or span > 0x34 * 2048 or span % 0x34:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "原生房间容器不可读"}
+            count = span // 0x34
+            if record_index is not None:
+                index = int(record_index)
+                if not 0 <= index < count:
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "结构记录序号超出范围"}
+            else:
+                if col is None or row is None:
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "需要 record_index 或列/行坐标"}
+                target_col, target_row = int(col), int(row)
+                index = None
+                for candidate in self._read_native_room_records():
+                    left, top = int(candidate["col"]), int(candidate["row"])
+                    right = left + int(candidate["width"])
+                    bottom = top + int(candidate["height"])
+                    if left <= target_col < right and top <= target_row < bottom:
+                        index = int(candidate.get("record_index", -1))
+                        break
+                if index is None or index < 0:
+                    return {"ok": False, "state": self.STATUS_EMPTY, "error": "目标坐标未匹配原生房间记录"}
+            record_addr = begin + index * 0x34
+            before_raw = pm.read_bytes(record_addr + 0x30, 1)
+            before_flag = int(before_raw[0]) if before_raw else -1
+            raw = pm.read_bytes(record_addr + 0x04, 16)
+            if not raw or len(raw) < 16:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "目标房间记录读回失败"}
+            anchor_col = int(round(struct.unpack_from("<f", raw, 0)[0]))
+            anchor_row = int(round(struct.unpack_from("<f", raw, 4)[0]))
+            if not (0 <= anchor_col < int(map_width) and 0 <= anchor_row < int(map_height)):
+                return {"ok": False, "state": self.STATUS_FAILED, "error": "目标房间锚点超出地图范围"}
+            with self._wave_portal_lock, self._memory_write_lock:
+                generation, pm_obj = self._runtime_lock_worker_context()
+                if not self._runtime_session_current(generation, pm_obj):
+                    return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "游戏连接已失效"}
+                controller, error = self._ensure_wave_portal_controller()
+                if not controller:
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+                data = int(controller["data"])
+                request = data + self.STRUCTURE_ROOM_DELETE_QUEUE_REQUEST_OFF
+                result_addr = data + self.STRUCTURE_ROOM_DELETE_QUEUE_RESULT_OFF
+                status_addr = data + self.STRUCTURE_ROOM_DELETE_QUEUE_STATUS_OFF
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": "上一条原生结构请求仍在等待处理"}
+                pm.write_int(data + self.STRUCTURE_ROOM_DELETE_QUEUE_POINT_OFF, anchor_col)
+                pm.write_int(data + self.STRUCTURE_ROOM_DELETE_QUEUE_POINT_OFF + 4, anchor_row)
+                pm.write_int(result_addr, -1)
+                pm.write_int(status_addr, -1)
+                pm.write_int(request, 1)
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    if not self._runtime_session_current(generation, pm_obj):
+                        return {"ok": False, "state": self.STATUS_DISCONNECTED, "error": "等待原生结构请求时游戏连接已失效"}
+                    state = int(pm.read_int(status_addr) or -1)
+                    if state != -1:
+                        after_raw = pm.read_bytes(record_addr + 0x30, 1)
+                        after_flag = int(after_raw[0]) if after_raw else -1
+                        changed = before_flag == 0 and after_flag == 1
+                        return {"ok": bool(state == 1 and changed),
+                                "state": self.STATUS_VERIFIED if state == 1 and changed else self.STATUS_FAILED,
+                                "record_index": index, "anchor": {"col": anchor_col, "row": anchor_row},
+                                "before_flag": before_flag, "after_flag": after_flag,
+                                "native": int(pm.read_int(result_addr) or 0), "changed": changed,
+                                "complete": False,
+                                "effect": "仅隐藏原生 Room 记录；未清理地图方块、碰撞、实体或存档对象",
+                                "error": "原生调用已返回，但房间记录隐藏标志未变化" if not changed else ""}
+                    time.sleep(0.03)
+            return {"ok": False, "state": self.STATUS_STALE, "error": "原生结构请求未在游戏主线程确认"}
+        except (AttributeError, OSError, struct.error, TypeError, ValueError, OverflowError) as exc:
+            return {"ok": False, "state": self.STATUS_STALE, "error": "原生结构请求失败：%s" % exc}
+
+    def delete_sand_temple_entity_native(self, col=None, row=None):
+        """Queue a verified service ItemEntity destruction from one visible cell.
+
+        This deliberately supports only the sand-temple Spine entity identified
+        from ``service_sand_temple``.  It is not a generic entity delete API:
+        every other entity type is rejected inside the game thread before any
+        destruction call can occur.
+        """
+        if not connected or pm is None:
+            return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                    "error": "请先连接并进入已加载的存档"}
+        try:
+            if col is None or row is None:
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "需要结构内部任意一格的列、行坐标"}
+            col, row = int(col), int(row)
+            resolved = self._map_resolve()
+            if not resolved:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "当前地图不可读"}
+            _map_data, width, height, _world_w, _world_h = resolved
+            if not (0 <= col < int(width) and 0 <= row < int(height)):
+                return {"ok": False, "state": self.STATUS_FAILED,
+                        "error": "坐标超出地图范围（列 %d，行 %d）" % (col, row)}
+            module_base = int(get_base())
+            signatures = (
+                (self.V1_WORLD_FIND_ENTITY_BY_CELL_RVA, self.V1_WORLD_FIND_ENTITY_BY_CELL_PREFIX),
+                (self.V1_WORLD_FIND_ENTITY_BY_CELL_BOUNDS_RVA, self.V1_WORLD_FIND_ENTITY_BY_CELL_BOUNDS_PREFIX),
+                (self.V1_GAME_OBJECT_DESTROY_RVA, self.V1_GAME_OBJECT_DESTROY_PREFIX),
+            )
+            for rva, prefix in signatures:
+                if pm.read_bytes(module_base + int(rva), len(prefix)) != prefix:
+                    return {"ok": False, "state": self.STATUS_STALE,
+                            "error": "当前游戏版本的神庙服务对象删除入口未通过校验"}
+            with self._wave_portal_lock, self._memory_write_lock:
+                generation, pm_obj = self._runtime_lock_worker_context()
+                if not self._runtime_session_current(generation, pm_obj):
+                    return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                            "error": "游戏连接已失效"}
+                controller, error = self._ensure_wave_portal_controller()
+                if not controller:
+                    return {"ok": False, "state": self.STATUS_FAILED, "error": error}
+                data = int(controller["data"])
+                request = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF
+                result_addr = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_RESULT_OFF
+                status_addr = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_STATUS_OFF
+                target_addr = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_TARGET_OFF
+                if int(pm.read_int(request) or 0):
+                    return {"ok": False, "state": self.STATUS_FAILED,
+                            "error": "上一条神庙删除请求仍在等待处理"}
+                # Resolve the target from World's authoritative entity vector,
+                # then use the clicked map cell only for footprint matching.
+                world = int(pm.read_int(module_base + ITEM_BASE_OFFSET) or 0)
+                begin = int(pm.read_int(world + 0x194) or 0) if world else 0
+                end = int(pm.read_int(world + 0x198) or 0) if world else 0
+                target = 0
+                if begin and end >= begin and (end - begin) % 4 == 0 and end - begin <= 4 * 20000:
+                    for cursor in range(begin, end, 4):
+                        obj = int(pm.read_int(cursor) or 0)
+                        if not _is_plausible_32bit_pointer(obj):
+                            continue
+                        try:
+                            if int(pm.read_int(obj)) != module_base + self.V1_SERVICE_SAND_TEMPLE_ITEM_VTABLE_RVA:
+                                continue
+                            x = float(pm.read_float(obj + 0x38)); y = float(pm.read_float(obj + 0x3C))
+                            sw = float(pm.read_float(obj + 0x40)); sh = float(pm.read_float(obj + 0x44))
+                            left = int(math.floor(x / 60.0)); top = int(math.floor(y / 60.0))
+                            right = int(math.ceil((x + sw) / 60.0)); bottom = int(math.ceil((y + sh) / 60.0))
+                            if left <= col < right and top <= row < bottom:
+                                target = obj
+                                break
+                        except Exception:
+                            continue
+                if not target:
+                    return {"ok": False, "state": self.STATUS_EMPTY,
+                            "col": col, "row": row,
+                            "error": "当前实体数组中未找到覆盖该坐标的沙漠神庙服务对象"}
+                pm.write_int(target_addr, target)
+                pm.write_int(data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_POINT_OFF, col)
+                pm.write_int(data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_POINT_OFF + 4, row)
+                pm.write_int(result_addr, 0)
+                pm.write_int(status_addr, -1)
+                pm.write_int(request, 1)
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    if not self._runtime_session_current(generation, pm_obj):
+                        return {"ok": False, "state": self.STATUS_DISCONNECTED,
+                                "error": "等待原生神庙服务对象删除时游戏连接已失效"}
+                    state = int(pm.read_int(status_addr) or -1)
+                    if state == -1:
+                        time.sleep(0.03)
+                        continue
+                    if state == 1:
+                        target = int(pm.read_int(result_addr) or 0)
+                        # The call only schedules GameObject destruction.  A
+                        # later game tick runs OnDestroy and releases the
+                        # entity, so this readback confirms submission rather
+                        # than claiming the full map cleanup has finished.
+                        queued = False
+                        try:
+                            queued = bool(pm.read_bytes(target + 0xA6, 1)[0]) if target else False
+                        except Exception:
+                            # It may already have been collected, which is
+                            # also consistent with a completed native queue.
+                            queued = bool(target)
+                        return {"ok": bool(target), "state": self.STATUS_UNVERIFIED,
+                                "col": col, "row": row, "entity": target,
+                                "queued": queued, "complete": False,
+                                "message": "已提交游戏原生沙漠神庙服务对象销毁队列；需观察后续帧的贴图、碰撞和存档清理"}
+                    errors = {
+                        2: "该位置未找到可删除的神庙实体",
+                        3: "该位置覆盖的是其它实体，已拒绝删除",
+                    }
+                    return {"ok": False, "state": self.STATUS_EMPTY if state == 2 else self.STATUS_UNVERIFIED,
+                            "col": col, "row": row, "error": errors.get(state, "原生神庙删除请求被拒绝")}
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "原生神庙删除请求未在游戏主线程确认"}
+        except (AttributeError, OSError, struct.error, TypeError, ValueError, OverflowError) as exc:
+            return {"ok": False, "state": self.STATUS_STALE,
+                    "error": "神庙服务对象删除请求失败：%s" % exc}
+
     # ==================== 魔法传送门 ====================
     PORTAL_CONTAINER_OFF = 0x194
     PORTAL_SLOT_START = 0x3C
@@ -5893,7 +8747,7 @@ class Api:
                                     if (abs(f1 - 100.0) > 0.001 or abs(f2 - 200.0) > 0.001
                                             or (kind & 0xFF) != 1):
                                         continue
-                                    if not math.isfinite(timer) or timer < -0.01 or timer > 36000:
+                                    if not math.isfinite(timer) or timer < -0.01:
                                         continue
                                     if timer <= 0.01:
                                         continue
@@ -5933,7 +8787,7 @@ class Api:
                     return
                 if abs(f1 - 100.0) > 0.001 or abs(f2 - 200.0) > 0.001 or (kind & 0xFF) != 1:
                     return
-                if not math.isfinite(timer) or timer < -0.01 or timer > 36000:
+                if not math.isfinite(timer) or timer < -0.01:
                     return
                 if timer <= 0.01:
                     return
@@ -5962,7 +8816,7 @@ class Api:
                     return None, "未找到传送门容器"
                 for slot in range(self.PORTAL_SLOT_START, self.PORTAL_SLOT_END + 1, 4):
                     obj = pm.read_int(container + slot)
-                    if not obj or obj < 0x10000 or obj >= 0x80000000:
+                    if not _is_plausible_32bit_pointer(obj):
                         continue
                     accept(obj, slot)
 
@@ -6027,7 +8881,7 @@ class Api:
                     or active_flag is None or abs(float(f1) - 100.0) > 0.001
                     or abs(float(f2) - 200.0) > 0.001 or (int(kind) & 0xFF) != 1
                     or not math.isfinite(float(timer)) or float(timer) < -0.01
-                    or float(timer) > 36000.0 or float(timer) <= 0.01):
+                    or float(timer) <= 0.01):
                 return None
             return {"object": object_addr, "timer": float(timer),
                     "active_flag": int(active_flag)}
@@ -6043,8 +8897,8 @@ class Api:
             return {"ok": False, "error": blocked}
         try:
             seconds = float(seconds)
-            if not math.isfinite(seconds) or seconds < 1 or seconds > 36000:
-                return {"ok": False, "error": "时间范围为 1~36000 秒"}
+            if not math.isfinite(seconds) or seconds < 1:
+                return {"ok": False, "error": "时间必须是不小于 1 秒的有效数字"}
             entry = self._portal_by_object(object_addr)
             if not entry:
                 return {"ok": False, "error": "传送门已消失，请刷新"}
@@ -6061,9 +8915,16 @@ class Api:
                     try:
                         pm.write_float(entry["object"] + self.PORTAL_TIMER_OFF, old_timer)
                     except Exception:
-                        pass
+                            pass
                     return {"ok": False, "state": self.STATUS_FAILED,
                             "error": "传送门倒计时写入读回失败，已尝试恢复原值"}
+                # If the UI temporarily/explicitly froze this portal, move
+                # the lock target together with the new value.  Otherwise the
+                # background lock worker would immediately restore the old
+                # countdown after this successful write.
+                with self._portal_lock_guard:
+                    if int(entry["object"]) in self._portal_locks:
+                        self._portal_locks[int(entry["object"])] = float(seconds)
             finally:
                 self._resume(hnd)
             return {"ok": True, "state": self.STATUS_VERIFIED, "timer": seconds}
@@ -6080,7 +8941,7 @@ class Api:
         entry = self._portal_by_object(object_addr)
         if not entry:
             return {"ok": False, "error": "传送门已消失，请刷新"}
-        return self.set_portal_timer(object_addr, min(36000, entry["timer"] + float(seconds)))
+        return self.set_portal_timer(object_addr, float(entry["timer"]) + float(seconds))
 
     def close_portal(self, object_addr):
         """Ask the game to close one magic portal on its next normal update.
@@ -7264,18 +10125,79 @@ class Api:
         return {'ok': not errors,
                 'state': self.STATUS_VERIFIED if not errors else self.STATUS_STALE,
                 'values': values, 'errors': errors}
-    def write_timer(self,ts):
-        """写入倒计时"""
+
+    def get_wave_countdown_state(self):
+        """Read only the live red-door countdown for the 0.5-second UI tick.
+
+        The basic-state endpoint also reads gold, mana and experience.  Using
+        it for a real-time countdown made the whole top panel refresh at the
+        same frequency and caused avoidable UI churn.  This lightweight read
+        leaves those unrelated values on their normal cadence.
+        """
+        if not pm or not connected:
+            return {'ok': False, 'state': self.STATUS_DISCONNECTED,
+                    'seconds': None, 'text': None, 'error': '未连接游戏'}
+        seconds, error = self._read_wave_countdown_seconds(attempts=1)
+        if seconds is None:
+            return {'ok': False, 'state': self.STATUS_STALE,
+                    'seconds': None, 'text': None,
+                    'error': error or '红门倒计时未识别'}
+        whole = int(seconds)
+        return {'ok': True, 'state': self.STATUS_VERIFIED,
+                'seconds': float(seconds),
+                'text': '%d:%02d' % (whole // 60, whole % 60),
+                'error': ''}
+
+    def write_timer(self, seconds):
+        """Set the live monster-wave countdown and verify it after resume.
+
+        The old version returned ``True`` as soon as ``WriteProcessMemory``
+        accepted the bytes.  MonstersWaves can update the same field on the
+        next game frame, so that was not evidence that the game retained the
+        requested countdown.  A paused transaction plus a post-resume read is
+        required before the UI may report success.
+        """
         try:
-            if self._detect_v2():
-                p = pm.read_int(get_base() + V2_TIMER_OFFSET)
-                if p:
-                    pm.write_float(p + V2_TIMER_PTR, float(ts))
-                    return True
-            tp=pm.read_int(get_base()+0xDC8858)
-            if not tp: return False
-            pm.write_float(tp+0x24,float(ts));return True
-        except: return False
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "倒计时必须是有效数字"}
+        if not math.isfinite(seconds) or seconds < 0:
+            return {"ok": False, "error": "倒计时必须是不小于 0 的有效数字"}
+        if not pm or not connected:
+            return {"ok": False, "error": "未连接游戏"}
+
+        hnd = self._suspend(pm.process_id)
+        if hnd is None:
+            return {"ok": False, "error": "无法暂停游戏以安全修改红门倒计时"}
+        try:
+            is_v2 = bool(self._detect_v2())
+            pointer = pm.read_int(get_base() + (V2_TIMER_OFFSET if is_v2 else self.WAVE_PORTAL_MANAGER_RVA))
+            if not pointer or int(pointer) <= 0x10000:
+                return {"ok": False, "error": "红门波次对象尚未加载"}
+            timer_offset = V2_TIMER_PTR if is_v2 else 0x24
+            address = int(pointer) + timer_offset
+            before = pm.read_float(address)
+            if before is None or not math.isfinite(float(before)) or float(before) < 0:
+                return {"ok": False, "error": "红门倒计时对象校验失败"}
+            pm.write_float(address, seconds)
+            immediate = pm.read_float(address)
+            if immediate is None or abs(float(immediate) - seconds) > 0.05:
+                return {"ok": False, "error": "红门倒计时写入读回失败"}
+        except Exception as exc:
+            return {"ok": False, "error": "修改红门倒计时失败：%s" % exc}
+        finally:
+            self._resume(hnd)
+
+        # Let one normal game update run, then prove that the live wave still
+        # carries the requested value.  A small tolerance covers elapsed frame
+        # time without hiding a native overwrite back to the old countdown.
+        time.sleep(0.08)
+        actual, error = self._read_wave_countdown_seconds(attempts=2)
+        if actual is None:
+            return {"ok": False, "error": "倒计时写入后无法复读：%s" % error}
+        if abs(float(actual) - seconds) > 1.5:
+            return {"ok": False, "error": "游戏未保留新的红门倒计时（当前 %.1f 秒）" % float(actual)}
+        return {"ok": True, "timer": float(actual), "before": float(before)}
 
     # ==================== 倒计时 / 时间 / 速度运行时锁定 ====================
     def _clear_timer_locks(self):
@@ -7302,15 +10224,7 @@ class Api:
         return {"ok": True, "locks": self._timer_lock_snapshot()}
 
     def _write_countdown_lock_target(self, seconds):
-        hnd = self._suspend(pm.process_id) if pm and connected else None
-        if hnd is None:
-            return {"ok": False, "error": "无法暂停游戏以锁定倒计时"}
-        try:
-            if not self.write_timer(seconds):
-                return {"ok": False, "error": "倒计时对象已失效"}
-            return {"ok": True}
-        finally:
-            self._resume(hnd)
+        return self.write_timer(seconds)
 
     def _write_pandora_timer_cached(self, seconds):
         """Write a previously-validated live spawner without a full rescan."""
@@ -7390,7 +10304,7 @@ class Api:
             except (TypeError, ValueError):
                 return {"ok": False, "error": "锁定值必须是有效数字"}
             limits = {
-                "countdown": (0.0, 604800.0), "game_time": (0.0, 36000.0),
+                "countdown": (0.0, float("inf")), "game_time": (0.0, 36000.0),
                 "game_speed": (GAME_SPEED_MIN, GAME_SPEED_MAX), "pandora": (0.1, 604800.0),
             }
             minimum, maximum = limits[kind]
@@ -7498,7 +10412,7 @@ class Api:
         end = pos + int(region_size)
         while pos < end:
             chunk = None
-            for wanted in (0x200000, 0x10000, 0x1000):
+            for wanted in (0x800000, 0x200000, 0x10000, 0x1000):
                 try:
                     size = min(wanted, end - pos)
                     if size <= 0:
@@ -7530,8 +10444,11 @@ class Api:
             # less likely to mix values from two game updates.
             game_raw = pm_obj.read_bytes(game + int(cache.get("active_off", GAME_SPEED_ACTIVE_OFF)), 0x14)
             active_speed, _unused1, _unused2, _unused3, speed = struct.unpack("<5f", game_raw)
-            day_raw = pm_obj.read_bytes(daytime + DAYTIME_CURRENT_OFF, 0x1C)
-            current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle = struct.unpack("<7f", day_raw)
+            # Day count and the seven DayTime floats are contiguous.  One
+            # read keeps the snapshot coherent and avoids a second cross-
+            # process call on every overview/time refresh.
+            day_raw = pm_obj.read_bytes(daytime + DAYTIME_DAY_COUNT_OFF, 0x20)
+            day_count, current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle = struct.unpack("<I7f", day_raw)
             values = (active_speed, speed, current, day_end, sunset_mid, night_begin, night_end, sunrise_mid, cycle)
             if not all(math.isfinite(value) for value in values):
                 return None
@@ -7554,8 +10471,11 @@ class Api:
                 phase = "夜晚"
             else:
                 phase = "黎明"
+            if day_count < 0 or day_count > 100000000:
+                return None
             return {
                 "current": float(current), "cycle": float(cycle), "phase": phase,
+                "day_count": day_count,
                 "speed": float(speed), "active_speed": float(active_speed),
                 "bounds": {
                     "day_end": float(day_end), "sunset_mid": float(sunset_mid),
@@ -7793,6 +10713,282 @@ class Api:
         return {"ok": True, "state": after}
 
 
+    # ==================== 矮人人口上限（原生计算覆盖） ====================
+    # The verified hook point is immediately after SimpleVariant::ToInt for
+    # the ``additional_dwarfs`` parameter.  Replaying these two displaced
+    # instructions preserves the rest of DwarfSpawner::UpdateSpawns exactly.
+    DWARF_POPULATION_HOOK_RVA = 0x397F23
+    DWARF_POPULATION_HOOK_PREFIX = b"\x8B\x4D\xEC\x8B\xF0"
+    DWARF_POPULATION_LEVEL_GLOBAL_RVA = 0xDC3618
+    DWARF_POPULATION_MIN = 1
+    DWARF_POPULATION_MAX = 99
+    DWARF_POPULATION_TAG = b"CTWDPCAP1\x00"
+    DWARF_POPULATION_TAG_OFF = 0x20
+    DWARF_POPULATION_TARGET_OFF = 0x00
+    DWARF_POPULATION_ENABLED_OFF = 0x04
+    DWARF_POPULATION_OBSERVED_EXTRA_OFF = 0x08
+    DWARF_POPULATION_HITS_OFF = 0x0C
+
+    @staticmethod
+    def _signed_i32(value):
+        value = int(value or 0)
+        return value - 0x100000000 if value >= 0x80000000 else value
+
+    def _dwarf_population_layout_error(self):
+        if not connected or not pm:
+            return "请先连接游戏并进入已加载的存档"
+        if self._detect_v2():
+            return "矮人上限目前只支持已验证的 Steam 原版"
+        layout = self._apply_v1_native_layout()
+        # The hook site is verified only for the Steam build used in the
+        # population analysis.  Do not infer it from nearby build offsets.
+        if not layout.get("recognized") or layout.get("key") != "steam-v1-build-21776357":
+            return "当前 CraftWorld.exe 未匹配已验证的矮人人口计算布局"
+        return ""
+
+    def _read_dwarf_population_level(self, module_base=None):
+        try:
+            base = int(module_base if module_base is not None else get_base())
+            levels = pm.read_int(base + self.DWARF_POPULATION_LEVEL_GLOBAL_RVA)
+            if not levels or int(levels) <= 0x10000:
+                return None
+            level = self._signed_i32(pm.read_int(int(levels) + 0x0C))
+            return level if 0 <= level <= 9999 else None
+        except Exception:
+            return None
+
+    def _build_dwarf_population_hook(self, module_base, cave_base):
+        """Return a tiny detour that alters only UpdateSpawns' EAX result."""
+        cave_base = int(cave_base)
+        module_base = int(module_base)
+        data = cave_base + 0x1000
+        target = data + self.DWARF_POPULATION_TARGET_OFF
+        enabled = data + self.DWARF_POPULATION_ENABLED_OFF
+        observed = data + self.DWARF_POPULATION_OBSERVED_EXTRA_OFF
+        hits = data + self.DWARF_POPULATION_HITS_OFF
+        level_global = module_base + self.DWARF_POPULATION_LEVEL_GLOBAL_RVA
+        code = bytearray()
+
+        def u32(value):
+            code.extend(struct.pack("<I", int(value) & 0xFFFFFFFF))
+
+        # Preserve all registers/flags.  The saved EAX slot is at ESP+1C
+        # after pushfd + pushad; changing that slot makes popad restore the
+        # requested additional_dwarfs value for the original two instructions.
+        code.extend(b"\x9C\x60")
+        code.extend(b"\x8B\x44\x24\x1C")                 # eax = original extra
+        code.extend(b"\xA3"); u32(observed)
+        code.extend(b"\xFF\x05"); u32(hits)
+        code.extend(b"\x83\x3D"); u32(enabled); code.extend(b"\x01")
+        jne_pos = len(code); code.extend(b"\x75\x00")
+        code.extend(b"\xA1"); u32(level_global)             # eax = CharLevels*
+        code.extend(b"\x85\xC0")
+        jz_pos = len(code); code.extend(b"\x74\x00")
+        code.extend(b"\x8B\x40\x0C")                       # eax = current level
+        code.extend(b"\x8B\x0D"); u32(target)               # ecx = requested cap
+        code.extend(b"\x29\xC1")                             # ecx -= level
+        code.extend(b"\x89\x4C\x24\x1C")                   # saved eax = extra
+        no_override = len(code)
+        code[jne_pos + 1] = (no_override - (jne_pos + 2)) & 0xFF
+        code[jz_pos + 1] = (no_override - (jz_pos + 2)) & 0xFF
+        code.extend(b"\x61\x9D")
+        code.extend(self.DWARF_POPULATION_HOOK_PREFIX)
+        return_address = module_base + self.DWARF_POPULATION_HOOK_RVA + len(self.DWARF_POPULATION_HOOK_PREFIX)
+        code.extend(b"\xE9")
+        code.extend(struct.pack("<i", int(return_address) - (cave_base + len(code) + 4)))
+        return bytes(code), data
+
+    def _dwarf_population_controller_from_live_hook(self, module_base):
+        try:
+            site = int(module_base) + self.DWARF_POPULATION_HOOK_RVA
+            patch = pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX))
+            if not patch or len(patch) != len(self.DWARF_POPULATION_HOOK_PREFIX) or patch[0] != 0xE9:
+                return None
+            cave = site + 5 + struct.unpack("<i", patch[1:5])[0]
+            if not (0x10000 <= cave < 0x80000000):
+                return None
+            data = cave + 0x1000
+            tag = pm.read_bytes(data + self.DWARF_POPULATION_TAG_OFF, len(self.DWARF_POPULATION_TAG))
+            if tag != self.DWARF_POPULATION_TAG:
+                return None
+            return {"pid": int(pm.process_id), "base": int(module_base),
+                    "cave": int(cave), "data": int(data), "patch": patch}
+        except Exception:
+            return None
+
+    def _dispose_dwarf_population_controller(self):
+        """Restore our exact population detour before ending this session."""
+        with self._dwarf_population_lock:
+            controller = self._dwarf_population_controller
+            if not controller or not pm:
+                return
+            try:
+                if int(controller.get("pid", 0)) != int(pm.process_id):
+                    self._dwarf_population_controller = None
+                    return
+                site = int(controller["base"]) + self.DWARF_POPULATION_HOOK_RVA
+                if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) != controller.get("patch"):
+                    return
+                hnd = self._suspend(int(pm.process_id))
+                if not hnd:
+                    return
+                try:
+                    if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) != controller.get("patch"):
+                        return
+                    pm.write_bytes(site, self.DWARF_POPULATION_HOOK_PREFIX,
+                                   len(self.DWARF_POPULATION_HOOK_PREFIX))
+                    if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) == self.DWARF_POPULATION_HOOK_PREFIX:
+                        self._dwarf_population_controller = None
+                finally:
+                    self._resume(hnd)
+            except Exception as exc:
+                _diagnostic("dwarf population controller cleanup:", exc)
+
+    def _ensure_dwarf_population_controller(self):
+        error = self._dwarf_population_layout_error()
+        if error:
+            return None, error
+        try:
+            process_id = int(pm.process_id)
+            module_base = int(get_base())
+        except Exception:
+            return None, "无法读取游戏进程信息"
+        with self._dwarf_population_lock:
+            current = self._dwarf_population_controller
+            site = module_base + self.DWARF_POPULATION_HOOK_RVA
+            if current and int(current.get("pid", 0)) == process_id and int(current.get("base", 0)) == module_base:
+                if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) == current.get("patch"):
+                    return current, ""
+                self._dwarf_population_controller = None
+            try:
+                raw = pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX))
+                if raw != self.DWARF_POPULATION_HOOK_PREFIX:
+                    stale = self._dwarf_population_controller_from_live_hook(module_base)
+                    if not stale:
+                        return None, "矮人人口计算代码与已验证版本不一致，请重启游戏后再试"
+                    hnd = self._suspend(process_id)
+                    if not hnd:
+                        return None, "无法暂停游戏以恢复旧的人口控制器"
+                    try:
+                        if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) != stale["patch"]:
+                            return None, "旧的人口控制器状态已变化，请重启游戏后再试"
+                        pm.write_bytes(site, self.DWARF_POPULATION_HOOK_PREFIX,
+                                       len(self.DWARF_POPULATION_HOOK_PREFIX))
+                        if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) != self.DWARF_POPULATION_HOOK_PREFIX:
+                            return None, "恢复旧的人口控制器失败"
+                    finally:
+                        self._resume(hnd)
+                cave = pymem.memory.allocate_memory(pm.process_handle, 0x2000)
+                code, data = self._build_dwarf_population_hook(module_base, cave)
+                pm.write_bytes(cave, code, len(code))
+                pm.write_bytes(data, b"\x00" * 0x100, 0x100)
+                pm.write_bytes(data + self.DWARF_POPULATION_TAG_OFF,
+                               self.DWARF_POPULATION_TAG, len(self.DWARF_POPULATION_TAG))
+                patch = self._wave_portal_jump(site, cave, len(self.DWARF_POPULATION_HOOK_PREFIX))
+                hnd = self._suspend(process_id)
+                if not hnd:
+                    return None, "无法暂停游戏以安全安装人口控制器"
+                try:
+                    if pm.read_bytes(site, len(self.DWARF_POPULATION_HOOK_PREFIX)) != self.DWARF_POPULATION_HOOK_PREFIX:
+                        return None, "人口计算代码在安装前已变化"
+                    pm.write_bytes(site, patch, len(patch))
+                    if pm.read_bytes(site, len(patch)) != patch:
+                        pm.write_bytes(site, self.DWARF_POPULATION_HOOK_PREFIX,
+                                       len(self.DWARF_POPULATION_HOOK_PREFIX))
+                        return None, "安装人口控制器失败，已恢复原代码"
+                finally:
+                    self._resume(hnd)
+                controller = {"pid": process_id, "base": module_base, "cave": cave,
+                              "data": data, "patch": patch}
+                self._dwarf_population_controller = controller
+                return controller, ""
+            except Exception as exc:
+                _diagnostic("dwarf population controller install:", exc)
+                return None, "安装矮人人口控制器失败：%s" % exc
+
+    def _wait_dwarf_population_sample(self, controller, previous_hits, timeout=0.8):
+        deadline = time.monotonic() + float(timeout)
+        hits_addr = int(controller["data"]) + self.DWARF_POPULATION_HITS_OFF
+        while time.monotonic() < deadline:
+            try:
+                hits = int(pm.read_int(hits_addr) or 0)
+                if hits > int(previous_hits):
+                    return hits
+            except Exception:
+                return None
+            time.sleep(0.04)
+        return None
+
+    def get_dwarf_population_cap_state(self):
+        """Read the native level + additional_dwarfs calculation safely."""
+        with self._dwarf_population_lock:
+            controller, error = self._ensure_dwarf_population_controller()
+            if not controller:
+                return {"ok": False, "state": self.STATUS_UNSUPPORTED, "error": error}
+            level = self._read_dwarf_population_level(controller["base"])
+            if level is None:
+                return {"ok": False, "state": self.STATUS_STALE, "error": "当前等级对象未准备好"}
+            data = int(controller["data"])
+            try:
+                hits_before = int(pm.read_int(data + self.DWARF_POPULATION_HITS_OFF) or 0)
+            except Exception:
+                hits_before = 0
+            hits = hits_before or self._wait_dwarf_population_sample(controller, 0)
+            if not hits:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "正在等待游戏原生人口计算，请稍后刷新"}
+            try:
+                enabled = int(pm.read_int(data + self.DWARF_POPULATION_ENABLED_OFF) or 0) == 1
+                target = self._signed_i32(pm.read_int(data + self.DWARF_POPULATION_TARGET_OFF))
+                additional = self._signed_i32(pm.read_int(data + self.DWARF_POPULATION_OBSERVED_EXTRA_OFF))
+                current_limit = target if enabled else level + additional
+                if current_limit < 0 or current_limit > self.DWARF_POPULATION_MAX:
+                    return {"ok": False, "state": self.STATUS_STALE,
+                            "error": "人口上限读回超出可信范围"}
+                return {"ok": True, "state": self.STATUS_VERIFIED,
+                        "current_limit": int(current_limit), "base_level": int(level),
+                        "additional_dwarfs": int(additional), "override_enabled": enabled,
+                        "target": int(target) if enabled else None}
+            except Exception as exc:
+                return {"ok": False, "state": self.STATUS_STALE,
+                        "error": "读取矮人上限失败：%s" % exc}
+
+    def set_dwarf_population_cap(self, target):
+        """Keep the requested absolute cap across level changes this session."""
+        try:
+            target = int(target)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "矮人上限必须是整数"}
+        if target < self.DWARF_POPULATION_MIN or target > self.DWARF_POPULATION_MAX:
+            return {"ok": False, "error": "矮人上限范围为 %d～%d" %
+                    (self.DWARF_POPULATION_MIN, self.DWARF_POPULATION_MAX)}
+        with self._dwarf_population_lock:
+            controller, error = self._ensure_dwarf_population_controller()
+            if not controller:
+                return {"ok": False, "error": error}
+            level = self._read_dwarf_population_level(controller["base"])
+            if level is None:
+                return {"ok": False, "error": "当前等级对象未准备好"}
+            data = int(controller["data"])
+            try:
+                hits_before = int(pm.read_int(data + self.DWARF_POPULATION_HITS_OFF) or 0)
+                # Publish target first; enabling it last prevents the game
+                # thread from observing a partly-written request.
+                pm.write_int(data + self.DWARF_POPULATION_ENABLED_OFF, 0)
+                pm.write_int(data + self.DWARF_POPULATION_TARGET_OFF, target)
+                pm.write_int(data + self.DWARF_POPULATION_ENABLED_OFF, 1)
+                if (int(pm.read_int(data + self.DWARF_POPULATION_TARGET_OFF) or -1) != target or
+                        int(pm.read_int(data + self.DWARF_POPULATION_ENABLED_OFF) or 0) != 1):
+                    return {"ok": False, "error": "人口上限控制器写入读回失败"}
+            except Exception as exc:
+                return {"ok": False, "error": "提交矮人上限失败：%s" % exc}
+            if not self._wait_dwarf_population_sample(controller, hits_before):
+                return {"ok": False, "error": "游戏未执行人口计算，请稍后重试"}
+            return {"ok": True, "state": self.STATUS_VERIFIED, "current_limit": target,
+                    "base_level": level, "additional_dwarfs": target - level,
+                    "override_enabled": True}
+
+
     # ==================== 怪物传送门 ====================
     # These RVAs were verified against the current 32-bit Steam build.  They
     # are deliberately kept module-relative: CraftWorld.exe is ASLR-enabled.
@@ -7815,6 +11011,10 @@ class Api:
     # DoAction's local portal-count comparison.  Replacing this lets the
     # game's own creation loop produce each requested portal in one call.
     WAVE_PORTAL_COUNT_RVA = 0x5B6AAD
+    # Cleanup continuation used by the relocated native portal-count check.
+    # Keep this module-relative address explicit because the dispatcher
+    # builder references it when reconstructing the original branch.
+    WAVE_PORTAL_COUNT_CLEANUP_RVA = 0x5B6BA2
     # The native loop writes an index-based opening delay to every portal.
     # Clearing it for our queued wave makes all requested doors open together.
     WAVE_PORTAL_DELAY_RVA = 0x5B6B3E
@@ -7905,6 +11105,10 @@ class Api:
     V1_CHAR_LEVELS_VTABLE_RVA = 0xBA2DA0
     V1_CHAR_LEVELS_ADD_EXP_RVA = 0x31CEE0
     V1_CHAR_LEVELS_ADD_EXP_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # LibraryBehaviour::Upgrade, called by the native skill/tech dispatcher.
+    # This was present in the profile table but missing from Api, which made
+    # rebuilding the controller fail immediately after a CE restart.
+    V1_LIBRARY_UPGRADE_RVA = 0x5034E0
     # Direct pet generation is queued into the same verified game-update
     # dispatcher as recipes, skills and magic. The request carries only a
     # validated ASCII species name (max 15 bytes, matching the game's SSO
@@ -7945,6 +11149,244 @@ class Api:
     SHOP_NATIVE_QUEUE_SOURCE_STATE_OFF = 0x294
     SHOP_NATIVE_EVENT_OFF = 0x2A0
     SHOP_NATIVE_EVENT_AUX_OFF = 0x330
+    # Special world entities (dragon eggs, Pandora chests, etc.) are ordinary
+    # ItemEntity instances owned by World's independent-object vector. The
+    # queue carries a validated resource-table Item* and a map-cell position;
+    # the game-thread handler calls World::AddItemInstance so constructors,
+    # component registration and save bookkeeping remain game-owned.
+    SPECIAL_ENTITY_QUEUE_REQUEST_OFF = 0x350
+    SPECIAL_ENTITY_QUEUE_ITEM_OFF = 0x354
+    SPECIAL_ENTITY_QUEUE_X_OFF = 0x358
+    SPECIAL_ENTITY_QUEUE_Y_OFF = 0x35C
+    SPECIAL_ENTITY_QUEUE_RESULT_OFF = 0x360
+    SPECIAL_ENTITY_QUEUE_STATUS_OFF = 0x364
+    # Native special-entity removal.  Python resolves an exact live object
+    # from both World and GameObjectManager.  The game thread then rechecks
+    # its Item* and vtable before GameObjectManager::UnRegister performs the
+    # complete lifecycle (registration, components and presentation).
+    SPECIAL_ENTITY_DELETE_QUEUE_REQUEST_OFF = 0x4A0
+    SPECIAL_ENTITY_DELETE_QUEUE_TARGET_OFF = 0x4A4
+    SPECIAL_ENTITY_DELETE_QUEUE_ITEM_OFF = 0x4A8
+    SPECIAL_ENTITY_DELETE_QUEUE_VTABLE_OFF = 0x4AC
+    SPECIAL_ENTITY_DELETE_QUEUE_RESULT_OFF = 0x4B0
+    SPECIAL_ENTITY_DELETE_QUEUE_STATUS_OFF = 0x4B4
+    # Internal recovery route for an object already unregistered by an older
+    # controller. It only accepts the destroyed state and detaches the stale
+    # World reference; it is deliberately not exposed as a UI operation.
+    SPECIAL_ENTITY_STALE_CLEANUP_REQUEST_OFF = 0x4C0
+    SPECIAL_ENTITY_STALE_CLEANUP_TARGET_OFF = 0x4C4
+    SPECIAL_ENTITY_STALE_CLEANUP_ITEM_OFF = 0x4C8
+    SPECIAL_ENTITY_STALE_CLEANUP_VTABLE_OFF = 0x4CC
+    SPECIAL_ENTITY_STALE_CLEANUP_RESULT_OFF = 0x4D0
+    SPECIAL_ENTITY_STALE_CLEANUP_STATUS_OFF = 0x4D4
+    # ResourceManager::m_items is the authoritative vector used by the
+    # game's FindItemByName routine (manager + 0x474/+0x478).  Its entries
+    # are shared Item definitions, unlike the 0x290-byte resource slots at
+    # manager->m_resources.  AddItemInstance expects one of these pointers.
+    ITEM_DEFINITION_VECTOR_BEGIN_OFF = 0x474
+    ITEM_DEFINITION_VECTOR_END_OFF = 0x478
+    V1_WORLD_ADD_ITEM_INSTANCE_RVA = 0x824430
+    V1_WORLD_ADD_ITEM_INSTANCE_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # Curated ItemEntity candidates. These are resource-defined independent
+    # entities that were accepted by the game's native placement path. Some
+    # world services finish their gameplay registration only on save reload;
+    # their individual catalogue notes state that requirement explicitly.
+    SPECIAL_ENTITY_ALLOWED = (
+        "dragon_egg", "beetle_nest", "beetle_egg", "octopus_nest",
+        "rat_nest", "animal_trap", "wooden_trap", "iron_trap", "slime_trap",
+        "snow_globe", "ice_tree", "new_year_tree",
+        "boost_chest", "goblin_chest", "chest_lev1_coop", "scroll_chest",
+        "evil_chest", "wine_barrel_dlc", "exploding_barrel",
+        "biome1_crystal", "dig_machine_crystal", "large_crystal_of_the_main_hall",
+        "melting_plant_01", "melting_plant_02",
+        "shop", "lighthouse", "goblin_camp", "totem", "god_altar",
+        "frostling_camp", "cave_goblins_camp", "home_add", "home", "portal",
+        "alien_capsule_broken", "elf_mine_table", "service_sand_temple",
+        "mana_generator",
+        "static_portal", "prison_door", "ancient_door", "sand_room_door",
+        "sand_rune_door", "alien_door", "pandora_chest", "portal_shard",
+        "pirate_ship", "pirate_cannon", "shop_elf", "ww_elf_merchant",
+        "dark_elfs_altar", "dark_elfs_portal", "dwarf_kind_portal",
+        "tf_elf_portal", "tf_dwarf_portal", "tf_level_portal", "pyramid_spawner",
+    )
+    # ``home`` and ``portal`` are placed through the same game-thread native
+    # ItemEntity constructor as the already tested function objects.  Their
+    # global gameplay association is deliberately completed by a save reload;
+    # this tool does not patch singleton pointers or world vectors directly.
+    SPECIAL_ENTITY_REMOVABLE_IDS = frozenset(SPECIAL_ENTITY_ALLOWED)
+    SPECIAL_ENTITY_DEFINITIONS = {
+        "dragon_egg": {
+            "name": "龙蛋", "category": "龙类 / 孵化", "supported": True,
+            "note": "通过游戏原生 AddItemInstance 放置；孵化行为由游戏自身管理。",
+        },
+        "beetle_nest": {
+            "name": "甲虫巢", "category": "生物巢穴", "supported": True,
+            "note": "原生实体候选；游戏可能自行处理动画与生物行为。",
+        },
+        "beetle_egg": {
+            "name": "甲虫卵", "category": "生物巢穴", "supported": True,
+            "note": "原生实体候选；生成后可能进入游戏的孵化或事件流程。",
+        },
+        "octopus_nest": {
+            "name": "章鱼巢穴", "category": "生物巢穴", "supported": True,
+            "note": "原生实体候选；可能产生敌对生物，请在空旷位置测试。",
+        },
+        "rat_nest": {
+            "name": "鼠巢", "category": "生物巢穴", "supported": True,
+            "note": "原生巢穴实体候选；生物生成逻辑由游戏自行管理。",
+        },
+        "animal_trap": {
+            "name": "动物陷阱", "category": "交互装置", "supported": True,
+            "note": "通过游戏原生 ItemEntity 放置；捕获逻辑由游戏管理。",
+        },
+        "wooden_trap": {
+            "name": "木制陷阱", "category": "交互装置", "supported": True,
+            "note": "原生陷阱实体候选；触发逻辑由游戏管理。",
+        },
+        "iron_trap": {
+            "name": "铁制陷阱", "category": "交互装置", "supported": True,
+            "note": "原生陷阱实体候选；触发逻辑由游戏管理。",
+        },
+        "slime_trap": {
+            "name": "史莱姆陷阱", "category": "交互装置", "supported": True,
+            "note": "原生陷阱实体候选；请在空旷位置测试。",
+        },
+        "snow_globe": {
+            "name": "雪景球", "category": "装饰 / 交互", "supported": True,
+            "note": "原生装饰实体候选。",
+        },
+        "ice_tree": {
+            "name": "冰树", "category": "装饰 / 植物", "supported": True,
+            "note": "原生装饰实体候选。",
+        },
+        "new_year_tree": {
+            "name": "新年树", "category": "装饰 / 植物", "supported": True,
+            "note": "原生节日装饰实体候选。",
+        },
+        "boost_chest": {
+            "name": "增益宝箱", "category": "交互容器", "supported": True,
+            "note": "原生宝箱实体候选；奖励内容由游戏自行初始化。",
+        },
+        "goblin_chest": {
+            "name": "哥布林宝箱", "category": "交互容器", "supported": True,
+            "note": "原生宝箱实体候选；奖励内容由游戏自行初始化。",
+        },
+        "chest_lev1_coop": {
+            "name": "一级合作宝箱", "category": "交互容器", "supported": True,
+            "note": "原生宝箱实体候选；内容由游戏自身初始化。",
+        },
+        "scroll_chest": {
+            "name": "卷轴宝箱", "category": "交互容器", "supported": True,
+            "note": "原生宝箱实体候选；内容由游戏自身初始化。",
+        },
+        "evil_chest": {
+            "name": "邪恶宝箱", "category": "交互容器", "supported": True,
+            "note": "原生宝箱实体候选；可能带有事件或敌对逻辑。",
+        },
+        "wine_barrel_dlc": {
+            "name": "酒桶（DLC）", "category": "装饰 / 容器", "supported": True,
+            "note": "原生 DLC 装饰实体候选；未安装对应内容时游戏可能不加载该资源。",
+        },
+        "exploding_barrel": {
+            "name": "爆炸桶", "category": "交互装置", "supported": True,
+            "note": "原生交互实体候选；可能爆炸，请在空旷位置测试。",
+        },
+        "biome1_crystal": {
+            "name": "生物群系水晶", "category": "特殊装饰", "supported": True,
+            "note": "原生水晶实体候选。",
+        },
+        "dig_machine_crystal": {
+            "name": "挖掘机水晶", "category": "特殊装饰", "supported": True,
+            "note": "原生水晶实体候选；效果由游戏自身处理。",
+        },
+        "large_crystal_of_the_main_hall": {
+            "name": "大厅大型水晶", "category": "特殊装饰", "supported": True,
+            "note": "原生大型水晶实体候选。",
+        },
+        "melting_plant_01": {
+            "name": "熔融植物一型", "category": "装饰 / 植物", "supported": True,
+            "note": "原生环境植物实体候选。",
+        },
+        "melting_plant_02": {
+            "name": "熔融植物二型", "category": "装饰 / 植物", "supported": True,
+            "note": "原生环境植物实体候选。",
+        },
+    }
+    # Function-bearing objects verified in the 2026-09-03 in-game tests.
+    # They deliberately share the same game-thread AddItemInstance path as
+    # ordinary special entities; the reload requirement is presentation only,
+    # never a second unsafe memory-write path.
+    SPECIAL_ENTITY_DEFINITIONS.update({
+        "home": {"name": "主仓库", "category": "功能建筑", "supported": True,
+                 "batch_allowed": False,
+                 "note": "使用游戏原生实体生成；生成后请保存并重进当前存档，仓库关联由游戏加载流程完成。"},
+        "portal": {"name": "主传送门", "category": "功能传送门", "supported": True,
+                   "batch_allowed": False,
+                   "note": "使用游戏原生实体生成；生成后请保存并重进当前存档，传送门关联由游戏加载流程完成。"},
+        "alien_capsule_broken": {"name": "异星破损舱", "category": "功能实体", "supported": True,
+                                  "note": "原生实体；删除时会走游戏对象管理器的完整移除流程。"},
+        "elf_mine_table": {"name": "精灵矿井石桌", "category": "功能实体", "supported": True,
+                            "note": "原生实体；请在空旷位置测试。"},
+        "service_sand_temple": {"name": "沙漠神庙服务对象", "category": "功能实体", "supported": True,
+                                 "note": "原生服务实体；请在空旷位置测试。"},
+        "shop": {"name": "哥布林商店", "category": "功能建筑", "supported": True,
+                 "note": "已通过原生生成验证；生成后请重进当前存档，商店交互会由游戏完成初始化。"},
+        "lighthouse": {"name": "灯塔", "category": "功能建筑", "supported": True,
+                       "note": "已通过原生生成验证；生成后重进存档以完成游戏功能初始化。"},
+        "goblin_camp": {"name": "哥布林营地", "category": "功能据点", "supported": True,
+                        "note": "已验证；生成后重进存档，营地逻辑由游戏接管。"},
+        "totem": {"name": "图腾", "category": "功能据点", "supported": True,
+                  "note": "已验证；生成后重进存档以完成初始化。"},
+        "god_altar": {"name": "神坛", "category": "功能据点", "supported": True,
+                       "note": "已验证；生成后重进存档以完成初始化。"},
+        "frostling_camp": {"name": "冰霜营地", "category": "功能据点", "supported": True,
+                            "note": "已验证；生成后重进存档，营地逻辑由游戏接管。"},
+        "cave_goblins_camp": {"name": "洞穴哥布林营地", "category": "功能据点", "supported": True,
+                               "note": "已验证；生成后重进存档，营地逻辑由游戏接管。"},
+        "home_add": {"name": "附加仓库", "category": "功能建筑", "supported": True,
+                     "note": "已验证；作为附加仓库生成，重进存档后由游戏完成初始化。"},
+        "mana_generator": {"name": "法力发生器", "category": "功能建筑", "supported": True,
+                           "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "static_portal": {"name": "静态传送门", "category": "功能传送门", "supported": True,
+                          "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "prison_door": {"name": "监狱门", "category": "功能门", "supported": True,
+                        "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "ancient_door": {"name": "远古门", "category": "功能门", "supported": True,
+                         "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "sand_room_door": {"name": "沙漠房间门", "category": "功能门", "supported": True,
+                            "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "sand_rune_door": {"name": "沙漠符文门", "category": "功能门", "supported": True,
+                            "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "alien_door": {"name": "异星门", "category": "功能门", "supported": True,
+                       "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "pandora_chest": {"name": "潘多拉盒子", "category": "事件实体", "supported": True,
+                           "note": "已验证；事件派发由游戏处理，生成后重进存档再使用。"},
+        "portal_shard": {"name": "传送门碎片", "category": "任务 / 传送门", "supported": True,
+                          "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "pirate_ship": {"name": "海盗船", "category": "功能建筑", "supported": True,
+                        "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "pirate_cannon": {"name": "海盗炮", "category": "功能建筑", "supported": True,
+                          "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "shop_elf": {"name": "精灵商店", "category": "功能建筑", "supported": True,
+                     "note": "已验证；生成后重进存档，商店交互会由游戏完成初始化。"},
+        "ww_elf_merchant": {"name": "精灵商人", "category": "功能建筑", "supported": True,
+                            "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "dark_elfs_altar": {"name": "暗精灵祭坛", "category": "功能据点", "supported": True,
+                            "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "dark_elfs_portal": {"name": "暗精灵传送门", "category": "功能传送门", "supported": True,
+                              "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "dwarf_kind_portal": {"name": "矮人王国传送门", "category": "功能传送门", "supported": True,
+                              "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "tf_elf_portal": {"name": "双堡垒精灵传送门", "category": "功能传送门", "supported": True,
+                           "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "tf_dwarf_portal": {"name": "双堡垒矮人传送门", "category": "功能传送门", "supported": True,
+                             "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "tf_level_portal": {"name": "双堡垒关卡传送门", "category": "功能传送门", "supported": True,
+                             "note": "已验证；生成后重进存档以完成游戏功能初始化。"},
+        "pyramid_spawner": {"name": "金字塔生成器", "category": "敌对据点", "supported": True,
+                            "batch_allowed": False,
+                            "note": "慎用：已验证，但会持续产生大量怪物并可能显著影响性能和存档。"},
+    })
     V1_SHOP_DIALOG_ON_EVENT_RVA = 0x6821C0
     V1_SHOP_BUTTON_VTABLE_RVA = 0xBE1DB0
     V1_SHOP_ITEM_BUTTON_VTABLE_RVA = 0xBE1DB0
@@ -7971,6 +11413,192 @@ class Api:
     V1_NATIVE_DWARF_REQUEST_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
     V1_NATIVE_DWARF_SPAWN_RVA = 0x55A490
     V1_NATIVE_DWARF_SPAWN_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # Runtime structure placement request. The game-owned luaWorld::putRoom
+    # wrapper is invoked only from the existing game-thread dispatcher; short
+    # names use SSO while long names are copied into a game-allocator buffer
+    # on that same thread before the call. It never writes tile/entity arrays
+    # directly.
+    STRUCTURE_QUEUE_REQUEST_OFF = 0x3C0
+    STRUCTURE_QUEUE_RESULT_OFF = 0x3C4
+    STRUCTURE_QUEUE_STATUS_OFF = 0x3C8
+    STRUCTURE_QUEUE_NAME_OFF = 0x3CC       # 24-byte MSVC std::string SSO
+    STRUCTURE_QUEUE_LENGTH_OFF = 0x3E4
+    STRUCTURE_QUEUE_X_OFF = 0x3E8
+    STRUCTURE_QUEUE_Y_OFF = 0x3EC
+    STRUCTURE_QUEUE_MIRROR_X_OFF = 0x3F0
+    STRUCTURE_QUEUE_MIRROR_Y_OFF = 0x3F4
+    STRUCTURE_QUEUE_FORCE_OFF = 0x3F8
+    STRUCTURE_QUEUE_LONG_PTR_OFF = 0x404
+    STRUCTURE_QUEUE_STRING_BUFFER_OFF = 0x500
+    # Native single-cell destruction request.  The request is consumed by the
+    # existing game-thread dispatcher and calls World::CrashBlock with the
+    # same ABI used by normal worker mining.  It intentionally does not touch
+    # the map buffer or any entity vector from Python.
+    STRUCTURE_DELETE_QUEUE_REQUEST_OFF = 0x420
+    STRUCTURE_DELETE_QUEUE_RESULT_OFF = 0x424
+    STRUCTURE_DELETE_QUEUE_STATUS_OFF = 0x428
+    STRUCTURE_DELETE_QUEUE_X_OFF = 0x42C
+    STRUCTURE_DELETE_QUEUE_Y_OFF = 0x430
+    STRUCTURE_DELETE_QUEUE_BLOCK_OFF = 0x434
+    STRUCTURE_DELETE_QUEUE_ARG14_OFF = 0x438
+    STRUCTURE_DELETE_QUEUE_ARG18_OFF = 0x43C
+    STRUCTURE_DELETE_QUEUE_ARG1C_OFF = 0x440
+    STRUCTURE_DELETE_QUEUE_ARG20_OFF = 0x444
+    STRUCTURE_DELETE_QUEUE_ARG24_OFF = 0x448
+    STRUCTURE_DELETE_QUEUE_ARG28_OFF = 0x44C
+    # Native room-container removal probe.  RemoveHiddenRoom only marks the
+    # matching UnderRoom record through the game's own World method; the API
+    # verifies the record flag and deliberately does not claim full object
+    # destruction until the associated runtime owner is identified.
+    STRUCTURE_ROOM_DELETE_QUEUE_REQUEST_OFF = 0x460
+    STRUCTURE_ROOM_DELETE_QUEUE_POINT_OFF = 0x464  # int column, int row
+    STRUCTURE_ROOM_DELETE_QUEUE_RESULT_OFF = 0x46C
+    STRUCTURE_ROOM_DELETE_QUEUE_STATUS_OFF = 0x470
+    # Complete entity deletion is separate from the legacy Room marker
+    # probe.  It first resolves the entity under the clicked cell through the
+    # native World lookup and permits destruction only for the verified
+    # service_sand_temple ItemEntity.
+    STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF = 0x480
+    STRUCTURE_TEMPLE_DELETE_QUEUE_POINT_OFF = 0x484  # int column, int row
+    STRUCTURE_TEMPLE_DELETE_QUEUE_RESULT_OFF = 0x48C  # TempleEntity* on success
+    STRUCTURE_TEMPLE_DELETE_QUEUE_STATUS_OFF = 0x490
+    STRUCTURE_TEMPLE_DELETE_QUEUE_TARGET_OFF = 0x494  # verified ItemEntity*
+    # Read-only object-footprint request.  The game's
+    # World::FindEntityByCellWithBounds() is the authoritative test here: it
+    # answers which map cells visually hit a live ItemEntity.  Do not turn a
+    # sprite's pixel size into a guessed map rectangle.
+    WORLD_OBJECT_OCCUPANCY_REQUEST_OFF = 0x600
+    WORLD_OBJECT_OCCUPANCY_TARGET_OFF = 0x604
+    WORLD_OBJECT_OCCUPANCY_C0_OFF = 0x608
+    WORLD_OBJECT_OCCUPANCY_C1_OFF = 0x60C
+    WORLD_OBJECT_OCCUPANCY_R0_OFF = 0x610
+    WORLD_OBJECT_OCCUPANCY_R1_OFF = 0x614
+    WORLD_OBJECT_OCCUPANCY_COUNT_OFF = 0x618
+    WORLD_OBJECT_OCCUPANCY_STATUS_OFF = 0x61C
+    WORLD_OBJECT_OCCUPANCY_POINT_OFF = 0x620
+    WORLD_OBJECT_OCCUPANCY_MASK_OFF = 0x630
+    WORLD_OBJECT_OCCUPANCY_MAX_CELLS = 256
+    # LevelPortal activation probe.  A portal.map room creates the visible
+    # LevelPortal object and its five ``block1``…``block5`` records, but the
+    # records are still inactive until the native NewPart chain registers
+    # their child components on the game update thread.  Keep this queue
+    # outside the occupancy mask (0x630..0x72f).
+    PORTAL_ACTIVATE_QUEUE_REQUEST_OFF = 0x740
+    PORTAL_ACTIVATE_QUEUE_TARGET_OFF = 0x744
+    PORTAL_ACTIVATE_QUEUE_PART_OFF = 0x748
+    PORTAL_ACTIVATE_QUEUE_OPERATION_OFF = 0x74C
+    PORTAL_ACTIVATE_QUEUE_POINT_X_OFF = 0x750
+    PORTAL_ACTIVATE_QUEUE_POINT_Y_OFF = 0x754
+    PORTAL_ACTIVATE_QUEUE_RESULT_OFF = 0x758
+    PORTAL_ACTIVATE_QUEUE_STATUS_OFF = 0x75C
+    PORTAL_ACTIVATE_QUEUE_VTABLE_OFF = 0x760
+    PORTAL_ACTIVATE_OPERATION_NEW_PART = 1
+    PORTAL_ACTIVATE_OPERATION_ALLOW_ALL = 2
+    PORTAL_ACTIVATE_OPERATION_REFRESH = 3
+    PORTAL_ACTIVATE_OPERATION_UPDATE_PARTS = 4
+    # Read-only probe for the game's own singleton-style LevelPortal lookup.
+    # This must run on the game thread because it walks live World containers.
+    # It deliberately has no portal target or write operation.
+    PORTAL_LOOKUP_QUEUE_REQUEST_OFF = 0x780
+    PORTAL_LOOKUP_QUEUE_RESULT_OFF = 0x784
+    PORTAL_LOOKUP_QUEUE_STATUS_OFF = 0x788
+    PORTAL_LOOKUP_QUEUE_VTABLE_OFF = 0x78C
+    V1_LEVEL_PORTAL_VTABLE_RVA = 0xBB8504
+    V1_LEVEL_PORTAL_NEW_PART_RVA = 0x4FDF60
+    V1_LEVEL_PORTAL_ALLOW_ALL_PARTS_RVA = 0x4FDBA0
+    V1_LEVEL_PORTAL_REFRESH_RVA = 0x4FEA40
+    V1_LEVEL_PORTAL_UPDATE_PARTS_RVA = 0x4FF740
+    V1_LEVEL_PORTAL_GET_CURRENT_RVA = 0x4FDCB0
+    V1_LEVEL_PORTAL_PARTS_BEGIN_OFF = 0x1C4
+    V1_LEVEL_PORTAL_PARTS_END_OFF = 0x1C8
+    V1_LEVEL_PORTAL_ACTIVE_FLAG_OFF = 0x1C0
+    V1_LEVEL_PORTAL_WORLD_X_OFF = 0x38
+    V1_LEVEL_PORTAL_WORLD_Y_OFF = 0x3C
+    V1_WORLD_CRASH_BLOCK_RVA = 0x82ABE0
+    V1_WORLD_CRASH_BLOCK_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    V1_WORLD_REMOVE_HIDDEN_ROOM_RVA = 0x84EF30
+    V1_WORLD_REMOVE_HIDDEN_ROOM_PREFIX = b"\x55\x8B\xEC\x83\xEC\x14\x8B\xC1"
+    V1_WORLD_FIND_ENTITY_BY_CELL_RVA = 0x83A6F0
+    V1_WORLD_FIND_ENTITY_BY_CELL_PREFIX = b"\x55\x8B\xEC\x51\x8B\x81\x98\x01"
+    V1_WORLD_FIND_ENTITY_BY_CELL_BOUNDS_RVA = 0x83A760
+    V1_WORLD_FIND_ENTITY_BY_CELL_BOUNDS_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    V1_GAME_OBJECT_DESTROY_RVA = 0x448A30
+    V1_GAME_OBJECT_DESTROY_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # ``GameObject::Destroy`` only sets the object's destroyed state.  It is
+    # intentionally *not* a full removal API for persistent presentation
+    # objects such as LevelPortal.  The manager owns the actual unregister
+    # path, including layout/component teardown.
+    V1_GAME_OBJECT_MANAGER_SINGLETON_PTR_RVA = 0xDC3610
+    V1_GAME_OBJECT_MANAGER_OBJECTS_BEGIN_OFF = 0x18
+    V1_GAME_OBJECT_MANAGER_OBJECTS_END_OFF = 0x1C
+    V1_GAME_OBJECT_MANAGER_UNREGISTER_RVA = 0x44FBE0
+    # iqArray<Ref<ItemEntity>>::RemoveElementBySendToLast. World owns this
+    # Ref<ItemEntity> container at +0x194/+0x198, and its native helper
+    # balances references when an entity is detached.
+    V1_WORLD_OBJECT_REMOVE_RVA = 0x84ED60
+    V1_GAME_OBJECT_MANAGER_UNREGISTER_PREFIX = b"\x55\x8B\xEC\x6A\xFF\x68"
+    # service_sand_temple is a plain ItemEntity in this build.  Its primary
+    # vtable is at the object start; +0xC8 is a child component vtable and is
+    # not a type discriminator.
+    V1_SERVICE_SAND_TEMPLE_ITEM_VTABLE_RVA = 0xBB5B08
+    # ``World+194/+198`` is the live vector of independent world objects.
+    # These are not map ``front`` blocks: examples include DragonEgg and
+    # service objects used by room/structure visuals.  The offsets below are
+    # observational read offsets only; map presentation must never write them.
+    WORLD_OBJECTS_BEGIN_OFF = 0x194
+    WORLD_OBJECTS_END_OFF = 0x198
+    WORLD_OBJECT_NAME_OFF = 0x10
+    WORLD_OBJECT_X_OFF = 0x38
+    WORLD_OBJECT_Y_OFF = 0x3C
+    WORLD_OBJECT_WIDTH_OFF = 0x40
+    WORLD_OBJECT_HEIGHT_OFF = 0x44
+    WORLD_OBJECT_DESTROYED_OFF = 0xA6
+    WORLD_OBJECT_MAX_COUNT = 20000
+    WORLD_OBJECT_DISPLAY_NAMES = {
+        "dragon_egg": "龙蛋",
+        "goblin_camp": "哥布林营地",
+        "shop": "哥布林商店",
+        "home": "主仓库",
+        "lighthouse": "灯塔",
+        "totem": "图腾",
+        "god_altar": "神坛",
+        "frostling_camp": "冰霜营地",
+        "cave_goblins_camp": "洞穴哥布林营地",
+        "home_add": "附加仓库",
+        "mana_generator": "法力发生器",
+        "static_portal": "静态传送门",
+        "prison_door": "监狱门",
+        "ancient_door": "远古门",
+        "sand_room_door": "沙漠房间门",
+        "sand_rune_door": "沙漠符文门",
+        "alien_door": "异星门",
+        "pandora_chest": "潘多拉盒子",
+        "portal_shard": "传送门碎片",
+        "pirate_ship": "海盗船",
+        "pirate_cannon": "海盗炮",
+        "shop_elf": "精灵商店",
+        "ww_elf_merchant": "精灵商人",
+        "dark_elfs_altar": "暗精灵祭坛",
+        "dark_elfs_portal": "暗精灵传送门",
+        "dwarf_kind_portal": "矮人王国传送门",
+        "tf_elf_portal": "双堡垒精灵传送门",
+        "tf_dwarf_portal": "双堡垒矮人传送门",
+        "tf_level_portal": "双堡垒关卡传送门",
+        "pyramid_spawner": "金字塔生成器",
+        "elf_mine_table": "精灵矿井石桌",
+        "portal": "主传送门",
+        "service_sand_temple": "沙漠神庙服务对象",
+    }
+    # Structure files are discovered from the installed game's Levels folder.
+    # The native request carries a filename in an MSVC std::string. Short names
+    # use SSO; longer names are copied into a game-allocator buffer by the
+    # injected game-thread handler.
+    STRUCTURE_QUEUE_ALLOWED_FILES = ()
+    V1_LUA_WORLD_PUT_ROOM_RVA = 0x535290
+    # CraftWorld's CRT allocator/free pair. Long std::string storage must be
+    # allocated by the game because putRoom destroys the by-value string.
+    V1_GAME_ALLOC_RVA = 0x992DA3
+    V1_LUA_WORLD_STORAGE_RVA = 0xDE3BB0
     PET_DIRECT_QUEUE_TYPES = (
         "basilisk_pet", "catowl_pet", "crip_catowl_pet", "imp_pet",
     )
@@ -8111,10 +11739,29 @@ class Api:
     # reaches its original ClosePortal call site and remains the sole owner of
     # door/vector destruction.  This matters because a natural active wave
     # does not necessarily call Update again on its own before it finishes.
-    # V24 fixes the native Worker factory post-call restore path.  The factory
-    # is free to overwrite volatile ECX, so the warehouse pointer must be
-    # reloaded before the temporary class-string backup is restored.
-    WAVE_PORTAL_CONTROLLER_TAG = b"CWVPCTL24\x00"
+    # V29 adds exact-object service ItemEntity destruction. A previous
+    # controller cannot be adopted because it does not contain this handler.
+    # V30 adds batched, native read-only ItemEntity footprint queries. Its
+    # controller is larger, so the data page moves after a 0x1800-byte code
+    # region; earlier controller tags keep their historic 0x1000 data offset.
+    WAVE_PORTAL_CONTROLLER_CODE_LIMIT = 0x1800
+    WAVE_PORTAL_CONTROLLER_DATA_OFF = 0x1800
+    WAVE_PORTAL_CONTROLLER_LEGACY_DATA_OFF = 0x1000
+    # V34 additionally detaches the same object from World's owned entity
+    # vector after manager teardown. This is the final ownership release
+    # that V33 omitted.
+    WAVE_PORTAL_CONTROLLER_TAG = b"CWVPCTL37\x00"
+    WAVE_PORTAL_CONTROLLER_V36_TAG = b"CWVPCTL36\x00"
+    WAVE_PORTAL_CONTROLLER_V35_TAG = b"CWVPCTL35\x00"
+    WAVE_PORTAL_CONTROLLER_V34_TAG = b"CWVPCTL34\x00"
+    WAVE_PORTAL_CONTROLLER_V33_TAG = b"CWVPCTL33\x00"
+    WAVE_PORTAL_CONTROLLER_V32_TAG = b"CWVPCTL32\x00"
+    WAVE_PORTAL_CONTROLLER_V31_TAG = b"CWVPCTL31\x00"
+    WAVE_PORTAL_CONTROLLER_V29_TAG = b"CWVPCTL29\x00"
+    WAVE_PORTAL_CONTROLLER_V28_TAG = b"CWVPCTL28\x00"
+    WAVE_PORTAL_CONTROLLER_V27_TAG = b"CWVPCTL27\x00"
+    WAVE_PORTAL_CONTROLLER_V26_TAG = b"CWVPCTL26\x00"
+    WAVE_PORTAL_CONTROLLER_V24_TAG = b"CWVPCTL24\x00"
     WAVE_PORTAL_CONTROLLER_V23_TAG = b"CWVPCTL23\x00"
     WAVE_PORTAL_CONTROLLER_V22_TAG = b"CWVPCTL22\x00"
     WAVE_PORTAL_CONTROLLER_V21_TAG = b"CWVPCTL21\x00"
@@ -8210,7 +11857,7 @@ class Api:
 
         module_base = int(module_base)
         cave_base = int(cave_base)
-        data = cave_base + 0x1000
+        data = cave_base + self.WAVE_PORTAL_CONTROLLER_DATA_OFF
         request = data + 0x00
         active = data + 0x04
         duration = data + 0x08
@@ -8276,12 +11923,87 @@ class Api:
         shop_source_state = data + self.SHOP_NATIVE_QUEUE_SOURCE_STATE_OFF
         shop_event = data + self.SHOP_NATIVE_EVENT_OFF
         shop_event_aux = data + self.SHOP_NATIVE_EVENT_AUX_OFF
+        special_entity_request = data + self.SPECIAL_ENTITY_QUEUE_REQUEST_OFF
+        special_entity_item = data + self.SPECIAL_ENTITY_QUEUE_ITEM_OFF
+        special_entity_x = data + self.SPECIAL_ENTITY_QUEUE_X_OFF
+        special_entity_y = data + self.SPECIAL_ENTITY_QUEUE_Y_OFF
+        special_entity_result = data + self.SPECIAL_ENTITY_QUEUE_RESULT_OFF
+        special_entity_status = data + self.SPECIAL_ENTITY_QUEUE_STATUS_OFF
+        special_entity_delete_request = data + self.SPECIAL_ENTITY_DELETE_QUEUE_REQUEST_OFF
+        special_entity_delete_target = data + self.SPECIAL_ENTITY_DELETE_QUEUE_TARGET_OFF
+        special_entity_delete_item = data + self.SPECIAL_ENTITY_DELETE_QUEUE_ITEM_OFF
+        special_entity_delete_vtable = data + self.SPECIAL_ENTITY_DELETE_QUEUE_VTABLE_OFF
+        special_entity_delete_result = data + self.SPECIAL_ENTITY_DELETE_QUEUE_RESULT_OFF
+        special_entity_delete_status = data + self.SPECIAL_ENTITY_DELETE_QUEUE_STATUS_OFF
+        special_entity_stale_cleanup_request = data + self.SPECIAL_ENTITY_STALE_CLEANUP_REQUEST_OFF
+        special_entity_stale_cleanup_target = data + self.SPECIAL_ENTITY_STALE_CLEANUP_TARGET_OFF
+        special_entity_stale_cleanup_item = data + self.SPECIAL_ENTITY_STALE_CLEANUP_ITEM_OFF
+        special_entity_stale_cleanup_vtable = data + self.SPECIAL_ENTITY_STALE_CLEANUP_VTABLE_OFF
+        special_entity_stale_cleanup_result = data + self.SPECIAL_ENTITY_STALE_CLEANUP_RESULT_OFF
+        special_entity_stale_cleanup_status = data + self.SPECIAL_ENTITY_STALE_CLEANUP_STATUS_OFF
         dwarf_spawn_request = data + self.NATIVE_DWARF_SPAWN_QUEUE_REQUEST_OFF
         dwarf_spawn_warehouse = data + self.NATIVE_DWARF_SPAWN_QUEUE_WAREHOUSE_OFF
         dwarf_spawn_gender = data + self.NATIVE_DWARF_SPAWN_QUEUE_GENDER_OFF
         dwarf_spawn_result = data + self.NATIVE_DWARF_SPAWN_QUEUE_RESULT_OFF
         dwarf_spawn_return = data + self.NATIVE_DWARF_SPAWN_QUEUE_RETURN_OFF
         dwarf_spawn_class_string = data + self.NATIVE_DWARF_SPAWN_QUEUE_CLASS_STRING_OFF
+        structure_request = data + self.STRUCTURE_QUEUE_REQUEST_OFF
+        structure_result = data + self.STRUCTURE_QUEUE_RESULT_OFF
+        structure_status = data + self.STRUCTURE_QUEUE_STATUS_OFF
+        structure_name = data + self.STRUCTURE_QUEUE_NAME_OFF
+        structure_length = data + self.STRUCTURE_QUEUE_LENGTH_OFF
+        structure_x = data + self.STRUCTURE_QUEUE_X_OFF
+        structure_y = data + self.STRUCTURE_QUEUE_Y_OFF
+        structure_mirror_x = data + self.STRUCTURE_QUEUE_MIRROR_X_OFF
+        structure_mirror_y = data + self.STRUCTURE_QUEUE_MIRROR_Y_OFF
+        structure_force = data + self.STRUCTURE_QUEUE_FORCE_OFF
+        structure_long_ptr = data + self.STRUCTURE_QUEUE_LONG_PTR_OFF
+        structure_string_buffer = data + self.STRUCTURE_QUEUE_STRING_BUFFER_OFF
+        structure_delete_request = data + self.STRUCTURE_DELETE_QUEUE_REQUEST_OFF
+        structure_delete_result = data + self.STRUCTURE_DELETE_QUEUE_RESULT_OFF
+        structure_delete_status = data + self.STRUCTURE_DELETE_QUEUE_STATUS_OFF
+        structure_delete_x = data + self.STRUCTURE_DELETE_QUEUE_X_OFF
+        structure_delete_y = data + self.STRUCTURE_DELETE_QUEUE_Y_OFF
+        structure_delete_block = data + self.STRUCTURE_DELETE_QUEUE_BLOCK_OFF
+        structure_delete_arg14 = data + self.STRUCTURE_DELETE_QUEUE_ARG14_OFF
+        structure_delete_arg18 = data + self.STRUCTURE_DELETE_QUEUE_ARG18_OFF
+        structure_delete_arg1c = data + self.STRUCTURE_DELETE_QUEUE_ARG1C_OFF
+        structure_delete_arg20 = data + self.STRUCTURE_DELETE_QUEUE_ARG20_OFF
+        structure_delete_arg24 = data + self.STRUCTURE_DELETE_QUEUE_ARG24_OFF
+        structure_delete_arg28 = data + self.STRUCTURE_DELETE_QUEUE_ARG28_OFF
+        structure_room_delete_request = data + self.STRUCTURE_ROOM_DELETE_QUEUE_REQUEST_OFF
+        structure_room_delete_point = data + self.STRUCTURE_ROOM_DELETE_QUEUE_POINT_OFF
+        structure_room_delete_result = data + self.STRUCTURE_ROOM_DELETE_QUEUE_RESULT_OFF
+        structure_room_delete_status = data + self.STRUCTURE_ROOM_DELETE_QUEUE_STATUS_OFF
+        structure_temple_delete_request = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF
+        structure_temple_delete_point = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_POINT_OFF
+        structure_temple_delete_result = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_RESULT_OFF
+        structure_temple_delete_status = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_STATUS_OFF
+        structure_temple_delete_target = data + self.STRUCTURE_TEMPLE_DELETE_QUEUE_TARGET_OFF
+        object_occupancy_request = data + self.WORLD_OBJECT_OCCUPANCY_REQUEST_OFF
+        object_occupancy_target = data + self.WORLD_OBJECT_OCCUPANCY_TARGET_OFF
+        object_occupancy_c0 = data + self.WORLD_OBJECT_OCCUPANCY_C0_OFF
+        object_occupancy_c1 = data + self.WORLD_OBJECT_OCCUPANCY_C1_OFF
+        object_occupancy_r0 = data + self.WORLD_OBJECT_OCCUPANCY_R0_OFF
+        object_occupancy_r1 = data + self.WORLD_OBJECT_OCCUPANCY_R1_OFF
+        object_occupancy_count = data + self.WORLD_OBJECT_OCCUPANCY_COUNT_OFF
+        object_occupancy_status = data + self.WORLD_OBJECT_OCCUPANCY_STATUS_OFF
+        object_occupancy_point = data + self.WORLD_OBJECT_OCCUPANCY_POINT_OFF
+        object_occupancy_mask = data + self.WORLD_OBJECT_OCCUPANCY_MASK_OFF
+        portal_activate_request = data + self.PORTAL_ACTIVATE_QUEUE_REQUEST_OFF
+        portal_activate_target = data + self.PORTAL_ACTIVATE_QUEUE_TARGET_OFF
+        portal_activate_part = data + self.PORTAL_ACTIVATE_QUEUE_PART_OFF
+        portal_activate_operation = data + self.PORTAL_ACTIVATE_QUEUE_OPERATION_OFF
+        portal_activate_point_x = data + self.PORTAL_ACTIVATE_QUEUE_POINT_X_OFF
+        portal_activate_point_y = data + self.PORTAL_ACTIVATE_QUEUE_POINT_Y_OFF
+        portal_activate_result = data + self.PORTAL_ACTIVATE_QUEUE_RESULT_OFF
+        portal_activate_status = data + self.PORTAL_ACTIVATE_QUEUE_STATUS_OFF
+        portal_activate_vtable = data + self.PORTAL_ACTIVATE_QUEUE_VTABLE_OFF
+        portal_lookup_request = data + self.PORTAL_LOOKUP_QUEUE_REQUEST_OFF
+        portal_lookup_result = data + self.PORTAL_LOOKUP_QUEUE_RESULT_OFF
+        portal_lookup_status = data + self.PORTAL_LOOKUP_QUEUE_STATUS_OFF
+        portal_lookup_vtable = data + self.PORTAL_LOOKUP_QUEUE_VTABLE_OFF
+        lua_world_storage = module_base + self.V1_LUA_WORLD_STORAGE_RVA
         pet_direct_manager = module_base + self.PET_DIRECT_MANAGER_PTR_RVA
         pet_direct_anchor = module_base + self.PET_DIRECT_SPAWN_ANCHOR_PTR_RVA
         manager_ptr = module_base + self.WAVE_PORTAL_MANAGER_RVA
@@ -8310,6 +12032,14 @@ class Api:
         # The helper is also called from the always-running getter hook below,
         # because a quiet map may not execute MonstersWaves::Update regularly.
         w.branch(b"\xE8", "update_pet_limit_request")
+        # Special ItemEntity creation (currently dragon_egg) shares the same
+        # always-running game-thread dispatcher. It is kept ahead of the
+        # event queues so a quiet map still consumes a pending request.
+        w.branch(b"\xE8", "update_special_entity_request")
+        # A structure-generated LevelPortal needs its native child-part
+        # registration before it behaves like a usable portal.  Dispatch the
+        # small activation queue on this same game-thread path.
+        w.branch(b"\xE8", "update_portal_activate_request")
         # Priority end dispatcher.  Do not invoke ClosePortal here: calling it
         # from an injected frame can free portal-owned state still referenced by
         # the game.  We only submit the native expiry condition, then replay the
@@ -8438,6 +12168,225 @@ class Api:
         w.b(0x61, 0x9D)
         w.branch(b"\xE9", "shop_from_pet")
 
+        # Create one special ItemEntity through World's public placement path.
+        # Python supplies only a resource-table Item* and a map-cell position;
+        # AddItemInstance owns construction, component setup and registration
+        # in World's independent-object vector. A null return is reported as a
+        # rejected request, never as a successful write.
+        w.mark("update_special_entity_request")
+        w.b(0x83, 0x3D); w.u32(special_entity_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "special_entity_return")
+        w.b(0xC7, 0x05); w.u32(special_entity_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(special_entity_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(special_entity_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        # ecx = current World*; reject a stale map before entering C++.
+        w.b(0x8B, 0x0D); w.u32(module_base + ITEM_BASE_OFFSET)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "special_entity_restore")
+        w.b(0xA1); w.u32(special_entity_item)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "special_entity_restore")
+        # AddItemInstance(item, const vec2<int>& position, existing, value).
+        w.b(0x6A, 0xFF)                         # value = -1
+        w.b(0x6A, 0x00)                         # existing entity = nullptr
+        w.b(0x68); w.u32(special_entity_x)      # &vec2{x,y}
+        w.b(0xFF, 0x35); w.u32(special_entity_item)
+        w.relative(b"\xE8", module_base + self.V1_WORLD_ADD_ITEM_INSTANCE_RVA)
+        w.b(0xA3); w.u32(special_entity_result)
+        w.b(0x85, 0xC0)
+        w.branch(b"\x0F\x84", "special_entity_restore")
+        w.b(0xC7, 0x05); w.u32(special_entity_status); w.u32(1)
+        w.mark("special_entity_restore")
+        w.b(0x61, 0x9D)
+        w.mark("special_entity_return")
+        w.b(0xC3)
+
+        # Activate a LevelPortal materialised by putRoom("portal.map").
+        # putRoom creates the visible object and five block records, while
+        # NewPart registers each interactive child. AllowAllParts then marks
+        # all records active and refreshes the portal state. All calls run on
+        # the game's update thread; Python only publishes validated values.
+        w.mark("update_portal_activate_request")
+        w.b(0x83, 0x3D); w.u32(portal_activate_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "portal_activate_return")
+        w.b(0xC7, 0x05); w.u32(portal_activate_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(portal_activate_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0xA1); w.u32(portal_activate_target)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "portal_activate_missing")
+        w.b(0x8B, 0x08)
+        w.b(0x3B, 0x0D); w.u32(portal_activate_vtable)
+        w.branch(b"\x0F\x85", "portal_activate_mismatch")
+        w.b(0xA1); w.u32(portal_activate_operation)
+        w.b(0x83, 0xF8, self.PORTAL_ACTIVATE_OPERATION_NEW_PART)
+        w.branch(b"\x0F\x84", "portal_activate_new_part")
+        w.b(0x83, 0xF8, self.PORTAL_ACTIVATE_OPERATION_ALLOW_ALL)
+        w.branch(b"\x0F\x84", "portal_activate_allow_all")
+        w.b(0x83, 0xF8, self.PORTAL_ACTIVATE_OPERATION_REFRESH)
+        w.branch(b"\x0F\x84", "portal_activate_refresh")
+        w.b(0x83, 0xF8, self.PORTAL_ACTIVATE_OPERATION_UPDATE_PARTS)
+        w.branch(b"\x0F\x84", "portal_activate_update_parts")
+        w.branch(b"\xE9", "portal_activate_mismatch")
+
+        w.mark("portal_activate_new_part")
+        w.b(0x68); w.u32(portal_activate_point_x)
+        w.b(0xFF, 0x35); w.u32(portal_activate_part)
+        w.b(0x8B, 0x0D); w.u32(portal_activate_target)
+        w.relative(b"\xE8", module_base + self.V1_LEVEL_PORTAL_NEW_PART_RVA)
+        w.b(0xC7, 0x05); w.u32(portal_activate_result); w.u32(1)
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(1)
+        w.branch(b"\xE9", "portal_activate_restore")
+        w.mark("portal_activate_allow_all")
+        w.b(0x8B, 0x0D); w.u32(portal_activate_target)
+        w.relative(b"\xE8", module_base + self.V1_LEVEL_PORTAL_ALLOW_ALL_PARTS_RVA)
+        w.b(0xC7, 0x05); w.u32(portal_activate_result); w.u32(1)
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(1)
+        w.branch(b"\xE9", "portal_activate_restore")
+        w.mark("portal_activate_refresh")
+        w.b(0x8B, 0x0D); w.u32(portal_activate_target)
+        w.relative(b"\xE8", module_base + self.V1_LEVEL_PORTAL_REFRESH_RVA)
+        w.b(0xC7, 0x05); w.u32(portal_activate_result); w.u32(1)
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(1)
+        w.branch(b"\xE9", "portal_activate_restore")
+        w.mark("portal_activate_update_parts")
+        w.b(0x8B, 0x0D); w.u32(portal_activate_target)
+        w.relative(b"\xE8", module_base + self.V1_LEVEL_PORTAL_UPDATE_PARTS_RVA)
+        w.b(0xC7, 0x05); w.u32(portal_activate_result); w.u32(1)
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(1)
+        w.branch(b"\xE9", "portal_activate_restore")
+        w.mark("portal_activate_missing")
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(2)
+        w.branch(b"\xE9", "portal_activate_restore")
+        w.mark("portal_activate_mismatch")
+        w.b(0xC7, 0x05); w.u32(portal_activate_status); w.u32(3)
+        w.mark("portal_activate_restore")
+        w.b(0x61, 0x9D)
+        w.mark("portal_activate_return")
+        w.b(0xC3)
+
+        # Read the game's own current-LevelPortal lookup on the game thread.
+        # The result is only reported to Python; no World or portal field is
+        # written.  This distinguishes registration failure from a singleton
+        # lookup that simply prefers a different existing portal.
+        w.mark("update_portal_lookup_request")
+        w.b(0x83, 0x3D); w.u32(portal_lookup_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "portal_lookup_return")
+        w.b(0xC7, 0x05); w.u32(portal_lookup_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(portal_lookup_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(portal_lookup_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.relative(b"\xE8", module_base + self.V1_LEVEL_PORTAL_GET_CURRENT_RVA)
+        w.b(0xA3); w.u32(portal_lookup_result)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "portal_lookup_missing")
+        w.b(0x8B, 0x08)
+        w.b(0x3B, 0x0D); w.u32(portal_lookup_vtable)
+        w.branch(b"\x0F\x85", "portal_lookup_mismatch")
+        w.b(0xC7, 0x05); w.u32(portal_lookup_status); w.u32(1)
+        w.branch(b"\xE9", "portal_lookup_restore")
+        w.mark("portal_lookup_missing")
+        w.b(0xC7, 0x05); w.u32(portal_lookup_status); w.u32(2)
+        w.branch(b"\xE9", "portal_lookup_restore")
+        w.mark("portal_lookup_mismatch")
+        w.b(0xC7, 0x05); w.u32(portal_lookup_status); w.u32(3)
+        w.mark("portal_lookup_restore")
+        w.b(0x61, 0x9D)
+        w.mark("portal_lookup_return")
+        w.b(0xC3)
+
+        # Remove one curated ItemEntity through GameObjectManager's complete
+        # lifecycle.  Calling GameObject::Destroy here is insufficient: it
+        # marks the object but leaves LevelPortal's layout on screen.  The
+        # manager route unregisters the object before running its cleanup.
+        w.mark("update_special_entity_delete_request")
+        w.b(0x83, 0x3D); w.u32(special_entity_delete_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "special_entity_delete_return")
+        w.b(0xC7, 0x05); w.u32(special_entity_delete_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(special_entity_delete_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(special_entity_delete_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0xA1); w.u32(special_entity_delete_target)  # eax = GameObject*
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "special_entity_delete_missing")
+        w.b(0x8B, 0x08)                                 # ecx = object vtable
+        w.b(0x3B, 0x0D); w.u32(special_entity_delete_vtable)
+        w.branch(b"\x0F\x85", "special_entity_delete_mismatch")
+        w.b(0x8B, 0x88); w.u32(0x164)                   # ecx = object Item*
+        w.b(0x3B, 0x0D); w.u32(special_entity_delete_item)
+        w.branch(b"\x0F\x85", "special_entity_delete_mismatch")
+        # Keep World* in ESI across the manager call. The calling convention
+        # preserves ESI, and using the native vector routine afterwards avoids
+        # leaving the unregistered object in World+0x194/+0x198.
+        w.b(0x8B, 0x35); w.u32(module_base + ITEM_BASE_OFFSET)
+        w.b(0x85, 0xF6); w.branch(b"\x0F\x84", "special_entity_delete_missing")
+        w.b(0x50)                                       # GameObject* argument
+        w.b(0x8B, 0x0D); w.u32(
+            module_base + self.V1_GAME_OBJECT_MANAGER_SINGLETON_PTR_RVA)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "special_entity_delete_missing")
+        w.relative(b"\xE8", module_base + self.V1_GAME_OBJECT_MANAGER_UNREGISTER_RVA)
+        # __thiscall UnRegister has ``ret 4`` and therefore consumes its
+        # GameObject* argument itself; adding ESP here would corrupt the
+        # injected update frame.
+        # World stores Ref<ItemEntity> values. Passing the address of our
+        # validated target value exactly matches the native helper's ABI; it
+        # removes the matching entry and releases the replaced reference.
+        w.b(0x8D, 0x8E); w.u32(self.WORLD_OBJECTS_BEGIN_OFF)  # ecx=&World.objects
+        w.b(0x68); w.u32(special_entity_delete_target)        # &Ref<ItemEntity>
+        w.relative(b"\xE8", module_base + self.V1_WORLD_OBJECT_REMOVE_RVA)
+        w.b(0x84, 0xC0); w.branch(b"\x0F\x84", "special_entity_delete_missing")
+        w.b(0xA1); w.u32(special_entity_delete_target)
+        w.b(0xA3); w.u32(special_entity_delete_result)
+        w.b(0xC7, 0x05); w.u32(special_entity_delete_status); w.u32(1)
+        w.branch(b"\xE9", "special_entity_delete_restore")
+        w.mark("special_entity_delete_missing")
+        w.b(0xC7, 0x05); w.u32(special_entity_delete_status); w.u32(2)
+        w.branch(b"\xE9", "special_entity_delete_restore")
+        w.mark("special_entity_delete_mismatch")
+        w.b(0xC7, 0x05); w.u32(special_entity_delete_status); w.u32(3)
+        w.mark("special_entity_delete_restore")
+        w.b(0x61, 0x9D)
+        w.mark("special_entity_delete_return")
+        w.b(0xC3)
+
+        # Recovery for a V33-style half removal. The request is accepted only
+        # for an object already marked destroyed, so this path can never turn
+        # into a second live-object deletion route. It releases the final
+        # World-vector ownership through the same helper used by V35.
+        w.mark("update_special_entity_stale_cleanup_request")
+        w.b(0x83, 0x3D); w.u32(special_entity_stale_cleanup_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "special_entity_stale_cleanup_return")
+        w.b(0xC7, 0x05); w.u32(special_entity_stale_cleanup_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(special_entity_stale_cleanup_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(special_entity_stale_cleanup_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0xA1); w.u32(special_entity_stale_cleanup_target)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "special_entity_stale_cleanup_missing")
+        w.b(0x8B, 0x08)
+        w.b(0x3B, 0x0D); w.u32(special_entity_stale_cleanup_vtable)
+        w.branch(b"\x0F\x85", "special_entity_stale_cleanup_mismatch")
+        w.b(0x8B, 0x88); w.u32(0x164)
+        w.b(0x3B, 0x0D); w.u32(special_entity_stale_cleanup_item)
+        w.branch(b"\x0F\x85", "special_entity_stale_cleanup_mismatch")
+        w.b(0x80, 0xB8); w.u32(self.WORLD_OBJECT_DESTROYED_OFF); w.b(0x01)
+        w.branch(b"\x0F\x85", "special_entity_stale_cleanup_mismatch")
+        w.b(0x8B, 0x35); w.u32(module_base + ITEM_BASE_OFFSET)
+        w.b(0x85, 0xF6); w.branch(b"\x0F\x84", "special_entity_stale_cleanup_missing")
+        w.b(0x8D, 0x8E); w.u32(self.WORLD_OBJECTS_BEGIN_OFF)
+        w.b(0x68); w.u32(special_entity_stale_cleanup_target)
+        w.relative(b"\xE8", module_base + self.V1_WORLD_OBJECT_REMOVE_RVA)
+        w.b(0x84, 0xC0); w.branch(b"\x0F\x84", "special_entity_stale_cleanup_missing")
+        w.b(0xA1); w.u32(special_entity_stale_cleanup_target)
+        w.b(0xA3); w.u32(special_entity_stale_cleanup_result)
+        w.b(0xC7, 0x05); w.u32(special_entity_stale_cleanup_status); w.u32(1)
+        w.branch(b"\xE9", "special_entity_stale_cleanup_restore")
+        w.mark("special_entity_stale_cleanup_missing")
+        w.b(0xC7, 0x05); w.u32(special_entity_stale_cleanup_status); w.u32(2)
+        w.branch(b"\xE9", "special_entity_stale_cleanup_restore")
+        w.mark("special_entity_stale_cleanup_mismatch")
+        w.b(0xC7, 0x05); w.u32(special_entity_stale_cleanup_status); w.u32(3)
+        w.mark("special_entity_stale_cleanup_restore")
+        w.b(0x61, 0x9D)
+        w.mark("special_entity_stale_cleanup_return")
+        w.b(0xC3)
+
         # Native dwarf creation is intentionally a small, one-shot request.
         # Do *not* call MainWarehouseEntity::CreateWorker() directly here.
         # It is an internal completion routine and relies on state prepared by
@@ -8496,6 +12445,202 @@ class Api:
         w.mark("native_dwarf_spawn_restore")
         w.b(0x61, 0x9D)
         w.mark("native_dwarf_spawn_return")
+        w.b(0xC3)
+
+        # Mark one native UnderRoom record through World::RemoveHiddenRoom.
+        # The native method performs the same bounds/record walk used by the
+        # game's room cleanup code.  The Python side must still verify the
+        # record's flag afterwards; a completed call alone is not success.
+        w.mark("update_structure_room_delete_request")
+        w.b(0x83, 0x3D); w.u32(structure_room_delete_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "structure_room_delete_return_plain")
+        w.b(0xC7, 0x05); w.u32(structure_room_delete_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_room_delete_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_room_delete_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x0D); w.u32(module_base + ITEM_BASE_OFFSET)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "structure_room_delete_restore")
+        w.b(0xA1); w.u32(structure_room_delete_point)
+        w.b(0x3B, 0x81); w.u32(0x450)
+        w.branch(b"\x0F\x83", "structure_room_delete_restore")
+        w.b(0xA1); w.u32(structure_room_delete_point + 4)
+        w.b(0x3B, 0x81); w.u32(0x454)
+        w.branch(b"\x0F\x83", "structure_room_delete_restore")
+        w.b(0x68); w.u32(structure_room_delete_point)
+        w.relative(b"\xE8", module_base + self.V1_WORLD_REMOVE_HIDDEN_ROOM_RVA)
+        w.b(0xC7, 0x05); w.u32(structure_room_delete_result); w.u32(1)
+        w.b(0xC7, 0x05); w.u32(structure_room_delete_status); w.u32(1)
+        w.mark("structure_room_delete_restore")
+        w.b(0x61, 0x9D)
+        w.mark("structure_room_delete_return_plain")
+        w.b(0xC3)
+
+        # Remove a sand-temple service entity through the same GameObject
+        # destruction queue that owns its Spine renderer and child objects.
+        # A position alone is never trusted: both lookup paths must resolve a
+        # live TempleEntity vtable before the native destroy call is allowed.
+        w.mark("update_structure_temple_delete_request")
+        w.b(0x83, 0x3D); w.u32(structure_temple_delete_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "structure_temple_delete_return_plain")
+        w.b(0xC7, 0x05); w.u32(structure_temple_delete_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_temple_delete_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_temple_delete_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        w.b(0x8B, 0x0D); w.u32(module_base + ITEM_BASE_OFFSET)  # World*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "structure_temple_delete_restore")
+        w.b(0xA1); w.u32(structure_temple_delete_point)
+        w.b(0x3B, 0x81); w.u32(0x450)
+        w.branch(b"\x0F\x83", "structure_temple_delete_restore")
+        w.b(0xA1); w.u32(structure_temple_delete_point + 4)
+        w.b(0x3B, 0x81); w.u32(0x454)
+        w.branch(b"\x0F\x83", "structure_temple_delete_restore")
+        # Python resolves the authoritative World entity vector and submits
+        # the exact object pointer. The game thread only revalidates that
+        # pointer's primary vtable before calling GameObject::Destroy; this
+        # avoids the spatial lookup path, which can miss large temples.
+        w.b(0xA1); w.u32(structure_temple_delete_target)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x84", "structure_temple_delete_missing")
+        w.b(0x8B, 0x08)  # ecx = [object]
+        w.b(0x81, 0xF9); w.u32(module_base + self.V1_SERVICE_SAND_TEMPLE_ITEM_VTABLE_RVA)
+        w.branch(b"\x0F\x85", "structure_temple_delete_wrong_type")
+        w.mark("structure_temple_delete_destroy")
+        w.b(0xA3); w.u32(structure_temple_delete_result)
+        w.b(0x50)
+        w.relative(b"\xE8", module_base + self.V1_GAME_OBJECT_DESTROY_RVA)
+        w.b(0x83, 0xC4, 0x04)
+        w.b(0xC7, 0x05); w.u32(structure_temple_delete_status); w.u32(1)
+        w.branch(b"\xE9", "structure_temple_delete_restore")
+        w.mark("structure_temple_delete_missing")
+        w.b(0xC7, 0x05); w.u32(structure_temple_delete_status); w.u32(2)
+        w.branch(b"\xE9", "structure_temple_delete_restore")
+        w.mark("structure_temple_delete_wrong_type")
+        w.b(0xC7, 0x05); w.u32(structure_temple_delete_status); w.u32(3)
+        w.mark("structure_temple_delete_restore")
+        w.b(0x61, 0x9D)
+        w.mark("structure_temple_delete_return_plain")
+        w.b(0xC3)
+
+        # Delete one map cell through the game's own mining/destruction path.
+        # This is deliberately a cell primitive: a future structure delete
+        # operation must first resolve a verified structure footprint, then
+        # submit one request per cell.  Calling CrashBlock on a remote thread
+        # was the source of the d3d11/use-after-free crashes, so this handler
+        # is reachable only from the always-running game-thread tick.
+        w.mark("update_structure_delete_request")
+        w.b(0x83, 0x3D); w.u32(structure_delete_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "structure_delete_return_plain")
+        w.b(0xC7, 0x05); w.u32(structure_delete_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_delete_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_delete_status); w.u32(0)
+        w.b(0x9C, 0x60)
+        # ecx = current World*; reject stale coordinates before entering C++.
+        w.b(0x8B, 0x0D); w.u32(module_base + ITEM_BASE_OFFSET)
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "structure_delete_restore")
+        w.b(0xA1); w.u32(structure_delete_x)
+        w.b(0x3B, 0x81); w.u32(0x450)
+        w.branch(b"\x0F\x83", "structure_delete_restore")
+        w.b(0xA1); w.u32(structure_delete_y)
+        w.b(0x3B, 0x81); w.u32(0x454)
+        w.branch(b"\x0F\x83", "structure_delete_restore")
+        # CrashBlock(this, x, y, block, a14, a18, a1c, a20, a24, a28).
+        for addr in (structure_delete_arg28, structure_delete_arg24,
+                     structure_delete_arg20, structure_delete_arg1c,
+                     structure_delete_arg18, structure_delete_arg14,
+                     structure_delete_block, structure_delete_y,
+                     structure_delete_x):
+            w.b(0xFF, 0x35); w.u32(addr)
+        w.relative(b"\xE8", module_base + self.V1_WORLD_CRASH_BLOCK_RVA)
+        w.b(0xC7, 0x05); w.u32(structure_delete_result); w.u32(1)
+        w.b(0xC7, 0x05); w.u32(structure_delete_status); w.u32(1)
+        w.mark("structure_delete_restore")
+        w.b(0x61, 0x9D)
+        w.mark("structure_delete_return_plain")
+        w.b(0xC3)
+
+        # Place one whitelisted .map through the complete game-owned
+        # luaWorld::putRoom wrapper. The wrapper constructs/destructs its
+        # temporary World and merges tiles, collision and entities itself.
+        # Python has already validated every payload field; this handler adds
+        # a second cheap guard so a torn/stale request cannot enter C++.
+        w.mark("update_structure_request")
+        w.b(0x83, 0x3D); w.u32(structure_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "structure_return_plain")
+        w.b(0xC7, 0x05); w.u32(structure_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_status); w.u32(0)
+        w.b(0x9C, 0x60)                                                     # preserve caller flags/registers
+        w.b(0x83, 0x3D); w.u32(structure_length); w.b(0x01)
+        w.branch(b"\x0F\x82", "structure_reject_pre")
+        # Names up to 15 bytes stay in the inline SSO representation. Longer
+        # ASCII names are copied from the controller buffer into storage
+        # allocated by the game's own CRT allocator on this game thread. The
+        # native putRoom call then owns/destroys that temporary string exactly
+        # like a normal C++ caller would.
+        w.b(0x83, 0x3D); w.u32(structure_length); w.b(0x0F)
+        w.branch(b"\x0F\x87", "structure_long_prepare")
+        w.b(0x8B, 0x0D); w.u32(lua_world_storage)
+        w.b(0x85, 0xC9)
+        w.branch(b"\x0F\x84", "structure_reject_pre")
+        w.branch(b"\xE9", "structure_call")
+        w.mark("structure_long_prepare")
+        # Keep the controller page bounded even if a torn request contains a
+        # bogus length. The source buffer is 0x500 bytes into the page.
+        w.b(0x81, 0x3D); w.u32(structure_length); w.u32(0x200)
+        w.branch(b"\x0F\x87", "structure_reject_pre")
+        w.b(0x8B, 0x0D); w.u32(lua_world_storage)
+        w.b(0x85, 0xC9)
+        w.branch(b"\x0F\x84", "structure_reject_pre")
+        # eax = game_alloc(length + 1), caller cleans the cdecl-style arg.
+        w.b(0xA1); w.u32(structure_length)
+        w.b(0x40, 0x50)
+        w.relative(b"\xE8", module_base + self.V1_GAME_ALLOC_RVA)
+        w.b(0x83, 0xC4, 0x04)
+        w.b(0x85, 0xC0)
+        w.branch(b"\x0F\x84", "structure_reject_pre")
+        w.b(0xA3); w.u32(structure_long_ptr)
+        # memcpy(game_buffer, controller_buffer, length) + NUL terminator.
+        w.b(0x8B, 0xF8)                         # edi = allocated destination
+        w.b(0xBE); w.u32(structure_string_buffer)  # esi = source bytes
+        w.b(0x8B, 0x0D); w.u32(structure_length)
+        w.b(0xF3, 0xA4)
+        w.b(0xC6, 0x07, 0x00)
+        # Build a valid long MSVC std::string in the queue slot.
+        w.b(0xA1); w.u32(structure_long_ptr)
+        w.b(0xA3); w.u32(structure_name)
+        for offset in (0x04, 0x08, 0x0C):
+            w.b(0xC7, 0x05); w.u32(structure_name + offset); w.u32(0)
+        w.b(0xA1); w.u32(structure_length)
+        w.b(0xA3); w.u32(structure_name + 0x10)
+        w.b(0xA3); w.u32(structure_name + 0x14)
+        w.branch(b"\xE9", "structure_call")
+        w.mark("structure_reject_pre")
+        w.b(0xC7, 0x05); w.u32(structure_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_status); w.u32(-1)
+        # This path runs after pushfd/pushad.  Returning through the plain
+        # label would leave the game's registers and flags on our stack.
+        w.branch(b"\xE9", "structure_return")
+        # std::string by-value (24 bytes), followed by the five scalar args.
+        w.mark("structure_call")
+        w.b(0xFF, 0x35); w.u32(structure_force)
+        w.b(0xFF, 0x35); w.u32(structure_mirror_y)
+        w.b(0xFF, 0x35); w.u32(structure_mirror_x)
+        w.b(0xFF, 0x35); w.u32(structure_y)
+        w.b(0xFF, 0x35); w.u32(structure_x)
+        for offset in (0x14, 0x10, 0x0C, 0x08, 0x04, 0x00):
+            w.b(0xFF, 0x35); w.u32(structure_name + offset)
+        # ECX must be the wrapper object whose first field is World*.
+        w.b(0xB9); w.u32(lua_world_storage)
+        w.relative(b"\xE8", module_base + self.V1_LUA_WORLD_PUT_ROOM_RVA)
+        w.b(0x0F, 0xB6, 0xC0)                                               # native bool AL -> stable dword
+        w.b(0xA3); w.u32(structure_result)
+        w.b(0xC7, 0x05); w.u32(structure_status); w.u32(1)
+        w.branch(b"\xE9", "structure_return")
+        w.mark("structure_reject")
+        w.b(0xC7, 0x05); w.u32(structure_result); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(structure_status); w.u32(-1)
+        w.mark("structure_return")
+        w.b(0x61, 0x9D)
+        w.mark("structure_return_plain")
         w.b(0xC3)
 
         # One native ShopDialog "buy" request.  The UI Event is recreated only
@@ -9001,12 +13146,91 @@ class Api:
         w.b(0x8B, 0x08, 0x8B, 0x40, 0x04)                                   # displaced DoAction reads
         w.relative(b"\xE9", module_base + self.WAVE_PORTAL_POSITION_RVA + 5)
 
+        # Query the game-owned visual occupancy one map cell at a time.  The
+        # request is read-only with respect to the game: the only writes land
+        # in this controller's temporary result buffer.
+        w.mark("update_world_object_occupancy_request")
+        w.b(0x83, 0x3D); w.u32(object_occupancy_request); w.b(0x01)
+        w.branch(b"\x0F\x85", "world_object_occupancy_return_plain")
+        w.b(0xC7, 0x05); w.u32(object_occupancy_request); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(object_occupancy_status); w.u32(0)
+        w.b(0xC7, 0x05); w.u32(object_occupancy_count); w.u32(0)
+        w.b(0x9C, 0x60)
+        # Validate a compact, inclusive cell rectangle before entering C++.
+        w.b(0x8B, 0x0D); w.u32(module_base + ITEM_BASE_OFFSET)               # ECX = World*
+        w.b(0x85, 0xC9); w.branch(b"\x0F\x84", "world_object_occupancy_restore")
+        w.b(0xA1); w.u32(object_occupancy_c0)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x8C", "world_object_occupancy_restore")
+        w.b(0x3B, 0x81); w.u32(0x450)
+        w.branch(b"\x0F\x83", "world_object_occupancy_restore")
+        w.b(0xA1); w.u32(object_occupancy_c1)
+        w.b(0x3B, 0x81); w.u32(0x450)
+        w.branch(b"\x0F\x83", "world_object_occupancy_restore")
+        w.b(0xA1); w.u32(object_occupancy_r0)
+        w.b(0x85, 0xC0); w.branch(b"\x0F\x8C", "world_object_occupancy_restore")
+        w.b(0x3B, 0x81); w.u32(0x454)
+        w.branch(b"\x0F\x83", "world_object_occupancy_restore")
+        w.b(0xA1); w.u32(object_occupancy_r1)
+        w.b(0x3B, 0x81); w.u32(0x454)
+        w.branch(b"\x0F\x83", "world_object_occupancy_restore")
+        w.b(0xA1); w.u32(object_occupancy_c0)
+        w.b(0x3B, 0x05); w.u32(object_occupancy_c1)
+        w.branch(b"\x0F\x8F", "world_object_occupancy_restore")
+        w.b(0xA1); w.u32(object_occupancy_r0)
+        w.b(0x3B, 0x05); w.u32(object_occupancy_r1)
+        w.branch(b"\x0F\x8F", "world_object_occupancy_restore")
+        # The Python caller partitions searches into <=256 cells. EBX is the
+        # deterministic offset in the 0/1 result mask.
+        w.b(0x33, 0xDB)                                                       # xor ebx, ebx
+        w.b(0x8B, 0x35); w.u32(object_occupancy_c0)                           # esi = col
+        w.mark("world_object_occupancy_col")
+        w.b(0x8B, 0x3D); w.u32(object_occupancy_r0)                           # edi = row
+        w.mark("world_object_occupancy_row")
+        # The Python side deliberately partitions requests to this fixed
+        # result-buffer size.  Keep the cave independently safe as well: a
+        # malformed request must be rejected before it can write beyond mask.
+        w.b(0x81, 0xFB); w.u32(self.WORLD_OBJECT_OCCUPANCY_MAX_CELLS)
+        w.branch(b"\x0F\x83", "world_object_occupancy_restore")
+        w.b(0x89, 0x35); w.u32(object_occupancy_point)
+        w.b(0x89, 0x3D); w.u32(object_occupancy_point + 4)
+        w.b(0x8D, 0x05); w.u32(object_occupancy_point)
+        w.b(0x50)
+        w.b(0x8B, 0x0D); w.u32(module_base + ITEM_BASE_OFFSET)
+        w.relative(b"\xE8", module_base + self.V1_WORLD_FIND_ENTITY_BY_CELL_BOUNDS_RVA)
+        w.b(0x3B, 0x05); w.u32(object_occupancy_target)
+        w.b(0x0F, 0x94, 0xC0)                                                 # AL = (hit == target)
+        w.b(0x88, 0x83); w.u32(object_occupancy_mask)                         # mask[ebx] = AL
+        w.b(0x84, 0xC0); w.branch(b"\x0F\x84", "world_object_occupancy_no_hit")
+        w.b(0xFF, 0x05); w.u32(object_occupancy_count)
+        w.mark("world_object_occupancy_no_hit")
+        w.b(0x43, 0x47)                                                       # ++mask index, ++row
+        w.b(0x3B, 0x3D); w.u32(object_occupancy_r1)
+        w.branch(b"\x0F\x8E", "world_object_occupancy_row")
+        w.b(0x46)                                                             # ++col
+        w.b(0x3B, 0x35); w.u32(object_occupancy_c1)
+        w.branch(b"\x0F\x8E", "world_object_occupancy_col")
+        w.b(0xC7, 0x05); w.u32(object_occupancy_status); w.u32(1)
+        w.mark("world_object_occupancy_restore")
+        w.b(0x61, 0x9D)
+        w.mark("world_object_occupancy_return_plain")
+        w.b(0xC3)
+
         # This tiny virtual getter is called continuously, including when no
         # monster wave exists.  It has no stack-frame dependency.  Besides the
         # personal-skill queue it is the safe main-thread wake-up point for an
         # already queued portal-end request: the request is submitted here,
         # then MonstersWaves::Update(0.0) performs its own normal cleanup.
         w.mark("personal_tick")
+        w.branch(b"\xE8", "update_world_object_occupancy_request")
+        w.branch(b"\xE8", "update_structure_room_delete_request")
+        w.branch(b"\xE8", "update_structure_temple_delete_request")
+        w.branch(b"\xE8", "update_structure_delete_request")
+        w.branch(b"\xE8", "update_structure_request")
+        w.branch(b"\xE8", "update_special_entity_request")
+        w.branch(b"\xE8", "update_portal_activate_request")
+        w.branch(b"\xE8", "update_portal_lookup_request")
+        w.branch(b"\xE8", "update_special_entity_stale_cleanup_request")
+        w.branch(b"\xE8", "update_special_entity_delete_request")
         w.branch(b"\xE8", "update_native_dwarf_spawn_request")
         w.branch(b"\xE8", "update_personal_skill_request")
         w.branch(b"\xE8", "update_native_xp_request")
@@ -9077,9 +13301,9 @@ class Api:
         w.b(0xC3)
 
         code = w.finish()
-        if len(code) >= 0x1000:
+        if len(code) >= self.WAVE_PORTAL_CONTROLLER_CODE_LIMIT:
             raise ValueError("wave portal controller is too large")
-        return code, {name: w.labels[name] for name in ("update", "personal_tick", "day_close", "close_post", "portal_slow", "portal_count", "portal_delay", "portal_ready", "position")}, data
+        return code, {name: w.labels[name] for name in ("update", "personal_tick", "day_close", "close_post", "portal_slow", "portal_count", "portal_delay", "portal_ready", "position", "update_world_object_occupancy_request")}, data
 
     def _restore_wave_hooks_while_suspended(self, module_base, expected_patches):
         """Restore a complete verified hook set, or leave the old set intact.
@@ -9193,6 +13417,11 @@ class Api:
                     self.PET_REMOVE_QUEUE_REQUEST_OFF,
                     self.PET_LIMIT_QUERY_REQUEST_OFF,
                     self.PET_AVAILABLE_QUERY_REQUEST_OFF,
+                    self.SPECIAL_ENTITY_QUEUE_REQUEST_OFF,
+                    self.SPECIAL_ENTITY_DELETE_QUEUE_REQUEST_OFF,
+                    self.STRUCTURE_ROOM_DELETE_QUEUE_REQUEST_OFF,
+                    self.STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF,
+                    self.STRUCTURE_DELETE_QUEUE_REQUEST_OFF,
                 )):
                     _diagnostic("wave portal controller retained: active game-thread request/event")
                     return
@@ -9268,15 +13497,20 @@ class Api:
             cave = update_addr + 5 + struct.unpack("<i", raw[1:5])[0]
             if not (0x10000 <= cave < 0x80000000):
                 return None
-            data = cave + 0x1000
-            controller_tag_raw = pm.read_bytes(
-                data + self.WAVE_PORTAL_CONTROLLER_TAG_OFF,
-                12,
-            )
-            controller_tag = (controller_tag_raw or b"").split(b"\x00", 1)[0]
-            tagged = controller_tag in tuple(
+            known_tags = tuple(
                 tag.rstrip(b"\x00") for tag in (
                     self.WAVE_PORTAL_CONTROLLER_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V36_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V34_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V35_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V33_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V32_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V31_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V29_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V28_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V27_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V26_TAG,
+                    self.WAVE_PORTAL_CONTROLLER_V24_TAG,
                     self.WAVE_PORTAL_CONTROLLER_V23_TAG,
                     self.WAVE_PORTAL_CONTROLLER_V22_TAG,
                     self.WAVE_PORTAL_CONTROLLER_V21_TAG,
@@ -9299,6 +13533,23 @@ class Api:
                     self.WAVE_PORTAL_CONTROLLER_LEGACY_TAG,
                 )
             )
+            # V30 has a larger code region. Probe its data page first, then
+            # retain compatibility with an idle controller produced by V29 or
+            # earlier builds, whose data lived at cave+0x1000.
+            data = cave + self.WAVE_PORTAL_CONTROLLER_DATA_OFF
+            controller_tag_raw = pm.read_bytes(
+                data + self.WAVE_PORTAL_CONTROLLER_TAG_OFF, 12,
+            )
+            controller_tag = (controller_tag_raw or b"").split(b"\x00", 1)[0]
+            if controller_tag not in known_tags:
+                legacy_data = cave + self.WAVE_PORTAL_CONTROLLER_LEGACY_DATA_OFF
+                legacy_raw = pm.read_bytes(
+                    legacy_data + self.WAVE_PORTAL_CONTROLLER_TAG_OFF, 12,
+                )
+                legacy_tag = (legacy_raw or b"").split(b"\x00", 1)[0]
+                if legacy_tag in known_tags:
+                    data, controller_tag = legacy_data, legacy_tag
+            tagged = controller_tag in known_tags
             # CWVPCTL2 predates the personal-skill tick hook.  Both later
             # tagged layouts carry it, including a stranded controller from
             # the immediately preceding modifier session.
@@ -9383,7 +13634,7 @@ class Api:
                 if patch[5:] != b"\x90" * (len(patch) - 5):
                     return None
                 target = address + 5 + struct.unpack("<i", patch[1:5])[0]
-                if not (cave <= target < cave + 0x1000):
+                if not (cave <= target < cave + self.WAVE_PORTAL_CONTROLLER_CODE_LIMIT):
                     return None
                 patches[name] = patch
             active = int(pm.read_int(data + 0x04) or 0) == 1
@@ -9394,21 +13645,34 @@ class Api:
                 self.PERSONAL_SKILL_QUEUE_REQUEST_OFF,
                 self.XP_NATIVE_QUEUE_REQUEST_OFF,
                 self.NATIVE_DWARF_SPAWN_QUEUE_REQUEST_OFF,
+                self.STRUCTURE_QUEUE_REQUEST_OFF,
                 self.PET_DIRECT_QUEUE_REQUEST_OFF,
-                    self.PET_REMOVE_QUEUE_REQUEST_OFF,
-                    self.PET_LIMIT_QUERY_REQUEST_OFF,
-                    self.PET_AVAILABLE_QUERY_REQUEST_OFF,
-                    self.SHOP_NATIVE_QUEUE_REQUEST_OFF,
+                self.PET_REMOVE_QUEUE_REQUEST_OFF,
+                self.PET_LIMIT_QUERY_REQUEST_OFF,
+                self.PET_AVAILABLE_QUERY_REQUEST_OFF,
+                self.SPECIAL_ENTITY_QUEUE_REQUEST_OFF,
+                self.SPECIAL_ENTITY_DELETE_QUEUE_REQUEST_OFF,
+                self.STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF,
+                self.STRUCTURE_DELETE_QUEUE_REQUEST_OFF,
+                self.WORLD_OBJECT_OCCUPANCY_REQUEST_OFF,
+                self.PORTAL_ACTIVATE_QUEUE_REQUEST_OFF,
+                self.PORTAL_LOOKUP_QUEUE_REQUEST_OFF,
+                self.SHOP_NATIVE_QUEUE_REQUEST_OFF,
             ))
-            # A current tagged controller may outlive the modifier process.
-            # Its game-thread hooks are still required for the lifecycle
-            # request, so expose it for verified adoption instead of treating
-            # it as a stale hook that should be restored. CWVPCTL2 predates
-            # the lifecycle protocol and is intentionally never adopted.
-            if active and controller_tag == self.WAVE_PORTAL_CONTROLLER_TAG.rstrip(b"\x00"):
+            # A tagged controller can outlive a WebView/source reload while
+            # CraftWorld itself keeps running.  The previous implementation
+            # adopted only the exact current tag; after a trainer-side layout
+            # bump, an otherwise compatible active controller was mistaken
+            # for foreign code and every native call reported a false
+            # “代码与当前版本不一致”.  All recognised tagged layouts with the
+            # personal-tick hook share the queue data page verified above.
+            # CWVPCTL4 intentionally remains excluded because it predates the
+            # lifecycle protocol and lacks that hook.
+            if active and tagged and has_personal_tick:
                 return {
                     "cave": cave, "data": data, "patches": patches,
                     "tagged": tagged, "active": True,
+                    "tag": controller_tag.decode("ascii", errors="ignore"),
                 }
             # Restoring while a queued library/magic request waits would lose
             # that request partway through the game update cycle.
@@ -9503,10 +13767,10 @@ class Api:
                 for rva, original, name in self.WAVE_PORTAL_HOOKS:
                     if pm.read_bytes(module_base + rva, len(original)) != original:
                         return None, "游戏代码与当前版本不一致（%s），请重启游戏后再试" % name
-                cave = pymem.memory.allocate_memory(pm.process_handle, 0x2000)
+                cave = pymem.memory.allocate_memory(pm.process_handle, 0x3000)
                 code, entries, data = self._build_wave_portal_code(module_base, cave)
                 pm.write_bytes(cave, code, len(code))
-                pm.write_bytes(data, b"\x00" * 0x3C0, 0x3C0)
+                pm.write_bytes(data, b"\x00" * 0x1000, 0x1000)
                 pm.write_bytes(
                     data + self.WAVE_PORTAL_CONTROLLER_TAG_OFF,
                     self.WAVE_PORTAL_CONTROLLER_TAG,
@@ -9915,22 +14179,19 @@ class Api:
         return {"all": "通用", "ground": "地面", "air": "空中"}.get(str(value), str(value or "通用"))
 
     def _pandora_definitions(self):
-        """Read the installed game's Pandora event manifest, preserving order.
+        """Read the bundled Pandora event snapshot, preserving order.
 
         The order matters for the two separate ``miner_luck`` entries.  No
-        game file is changed; this only supplies expected IDs/weights used to
-        validate the runtime copy before it is ever written.
+        game file is read for the catalog. The installed manifest is still
+        opened only by the verified write path when an event is actually
+        applied.
         """
         try:
-            if pm and connected:
-                import psutil
-                exe_path = psutil.Process(pm.process_id).exe()
-                xml_path = os.path.join(os.path.dirname(exe_path), "data", "pandora_events.xml")
-            else:
-                xml_path = os.path.join(GAME_ROOT, "data", "pandora_events.xml")
-            root = ET.parse(xml_path).getroot()
+            if not EMBEDDED_PANDORA_EVENTS_XML:
+                raise RuntimeError("内置潘多拉事件目录为空")
+            root = ET.fromstring(EMBEDDED_PANDORA_EVENTS_XML)
         except Exception as e:
-            raise RuntimeError("无法读取 pandora_events.xml：%s" % e)
+            raise RuntimeError("无法读取内置潘多拉事件目录：%s" % e)
         result, occurrence = [], {}
         for node in list(root):
             event_id = str(node.tag or "").strip()
@@ -10194,9 +14455,19 @@ class Api:
     def _pandora_forced_manifest(original_bytes, definitions, target):
         """Return a manifest that deterministically selects ``target``.
 
-        A ground/air-only target keeps the opposite-place entries intact.  It
-        therefore cannot leave a differently placed chest with an empty event
-        list, while every compatible new chest receives the chosen result.
+        The game chooses from the manifest after applying its own placement
+        and condition filters.  It falls back to the final manifest record
+        (``pandora_sale`` in the Steam table) when every weighted record is
+        filtered out.  Previously we set every non-target weight to zero but
+        retained the selected record's ``place``, ``include`` and ``exclude``
+        restrictions.  On an incompatible map that produced an empty choice
+        table, which made every requested event look like Pandora Sale.
+
+        The temporary manifest therefore keeps exactly one non-zero entry and
+        makes that *one* entry universally eligible for the one-shot draw.
+        This changes only the selection constraints, never the event's own
+        behaviour payload.  Restoring the saved original bytes puts its normal
+        placement and map restrictions back exactly as they were.
         """
         by_key = {entry["key"]: entry for entry in definitions}
         ids = sorted({entry["id"] for entry in definitions}, key=lambda value: (-len(value), value))
@@ -10206,7 +14477,6 @@ class Api:
             rb"(?P<prefix><(?P<event>" + b"|".join(re.escape(value.encode("ascii")) for value in ids)
             + rb")\b[^>]*?\bweight\s*=\s*)(?P<quote>[\"'])(?P<weight>[^\"']*)(?P=quote)", re.DOTALL)
         occurrence, replaced = {}, set()
-        target_place = str(target.get("place", "all"))
 
         def replace(match):
             event_id = match.group("event").decode("ascii")
@@ -10215,19 +14485,96 @@ class Api:
             if not entry:
                 return match.group(0)
             replaced.add(entry["key"])
-            place = str(entry.get("place", "all"))
-            if target_place == "all" or place in ("all", target_place):
-                weight = b"1" if entry["key"] == target["key"] else b"0"
-            else:
-                # This event cannot be selected at the target's placement.
-                # Retain it as a safe fallback for a different-type chest.
-                weight = match.group("weight")
-            return match.group("prefix") + match.group("quote") + weight + match.group("quote")
+            # Do not rely on the game's place/map filters here.  Once every
+            # other weight is zero, an ineligible target leaves the game with
+            # no candidate and it falls back to the final XML record.
+            weight = b"1" if entry["key"] == target["key"] else b"0"
+            rewritten_record = (match.group("prefix") + match.group("quote")
+                                + weight + match.group("quote"))
+            if entry["key"] != target["key"]:
+                return rewritten_record
+
+            # The match contains the whole opening tag up to its weight value,
+            # so only its prefix is available here.  Rebuild the full opening
+            # tag in a second pass below, where attributes can be changed
+            # without touching behaviour attributes or child nodes.
+            return rewritten_record
 
         rewritten = pattern.sub(replace, original_bytes)
         if target["key"] not in replaced or len(replaced) != len(definitions):
             raise RuntimeError("pandora_events.xml 格式与当前版本不匹配，未写入游戏文件")
+
+        # Make the chosen occurrence eligible in every map.  ``miner_luck``
+        # occurs twice, so select by both ID and occurrence rather than by ID
+        # alone.  The XML tags are ASCII and all relevant selection attributes
+        # live on the opening tag, which keeps this targeted and preserves the
+        # rest of the manifest byte layout.
+        target_id = str(target["id"])
+        target_occurrence = int(target["occurrence"])
+        opening = re.compile(
+            rb"(?P<tag><(?P<event>" + re.escape(target_id.encode("ascii")) + rb")\b(?P<attrs>[^>]*)>)",
+            re.DOTALL,
+        )
+        seen_target = 0
+        target_relaxed = False
+
+        def relax_target(match):
+            nonlocal seen_target, target_relaxed
+            seen_target += 1
+            if seen_target != target_occurrence:
+                return match.group("tag")
+            target_relaxed = True
+            attrs = match.group("attrs")
+            # Remove map-only eligibility restrictions.  Keep their payload
+            # children untouched: only the one-shot selection table is relaxed.
+            attrs = re.sub(rb"\s+include\s*=\s*([\"']).*?\1", b"", attrs, flags=re.DOTALL)
+            attrs = re.sub(rb"\s+exclude\s*=\s*([\"']).*?\1", b"", attrs, flags=re.DOTALL)
+            if re.search(rb"\s+place\s*=", attrs, flags=re.IGNORECASE):
+                attrs = re.sub(rb"(\s+place\s*=\s*[\"']).*?([\"'])", rb"\1all\2", attrs,
+                               count=1, flags=re.DOTALL | re.IGNORECASE)
+            else:
+                attrs += b' place="all"'
+            return b"<" + match.group("event") + attrs + b">"
+
+        rewritten = opening.sub(relax_target, rewritten)
+        if not target_relaxed:
+            raise RuntimeError("未能定位目标潘多拉事件，未写入游戏文件")
+        Api._pandora_verify_forced_manifest(rewritten, definitions, target)
         return rewritten
+
+    @staticmethod
+    def _pandora_verify_forced_manifest(data, definitions, target):
+        """Reject a malformed or ineligible one-shot Pandora manifest."""
+        try:
+            root = ET.fromstring(data)
+        except Exception as exc:
+            raise RuntimeError("潘多拉临时配置校验失败：XML 无法读取（%s）" % exc)
+        expected = {entry["key"] for entry in definitions}
+        occurrence, found, nonzero, target_node = {}, set(), [], None
+        for node in list(root):
+            event_id = str(node.tag or "")
+            occurrence[event_id] = occurrence.get(event_id, 0) + 1
+            key = "%s#%d" % (event_id, occurrence[event_id])
+            if key not in expected:
+                continue
+            found.add(key)
+            try:
+                weight = float(node.attrib.get("weight", "nan"))
+            except (TypeError, ValueError):
+                raise RuntimeError("潘多拉临时配置校验失败：%s 的权重无效" % key)
+            if not math.isfinite(weight):
+                raise RuntimeError("潘多拉临时配置校验失败：%s 的权重无效" % key)
+            if weight != 0.0:
+                nonzero.append((key, weight))
+            if key == target["key"]:
+                target_node = node
+        if found != expected:
+            raise RuntimeError("潘多拉临时配置校验失败：事件目录不完整")
+        if nonzero != [(target["key"], 1.0)]:
+            raise RuntimeError("潘多拉临时配置校验失败：未形成唯一目标事件")
+        if (target_node is None or target_node.attrib.get("place") != "all"
+                or target_node.attrib.get("include") or target_node.attrib.get("exclude")):
+            raise RuntimeError("潘多拉临时配置校验失败：目标事件仍受地图条件限制")
 
     def _pandora_file_events(self):
         # Definitions are read straight from disk and deliberately do not scan
@@ -10326,7 +14673,14 @@ class Api:
                     "error": "潘多拉事件定义读取失败：%s" % e}
 
     def force_pandora_event(self, event_key):
-        """Temporarily preset the event used when the next chest is created."""
+        """Write a deterministic event preset for the next game session.
+
+        ``pandora_events.xml`` is loaded and cached when CraftWorld starts.
+        The running process does not expose a validated event-table allocation
+        before a chest exists, so changing the file alone cannot affect the
+        current session.  The result explicitly tells the UI that a restart is
+        required instead of claiming that the next chest is already armed.
+        """
         try:
             runtime, runtime_error = self._pandora_runtime_state(True)
             if not runtime:
@@ -10351,11 +14705,26 @@ class Api:
             next_state = {
                 "xml_path": manifest_path, "original_hex": original.hex(),
                 "target_key": target["key"], "target_title": target["title"],
+                "original_sha256": hashlib.sha256(original).hexdigest(),
+                "forced_sha256": hashlib.sha256(rewritten).hexdigest(),
+                "selection_constraints_relaxed": True,
             }
             self._set_pandora_override_state(next_state)
             try:
                 self._pandora_atomic_write(manifest_path, rewritten)
+                # Do not report an armed event merely because the write call
+                # returned.  Re-open the installed file and validate the exact
+                # one-target table that the next game launch will consume.
+                with open(manifest_path, "rb") as handle:
+                    written = handle.read()
+                if written != rewritten:
+                    raise RuntimeError("写入后的文件内容与预设不一致")
+                self._pandora_verify_forced_manifest(written, entries, target)
             except Exception as e:
+                try:
+                    self._pandora_atomic_write(manifest_path, original)
+                except Exception:
+                    pass
                 self._set_pandora_override_state(state or None)
                 return {"ok": False, "error": "写入潘多拉临时预设失败：%s" % e}
             self._pandora_forced_key = target["key"]
@@ -10363,12 +14732,18 @@ class Api:
             self._pandora_empty_confirmations = 0
             return {"ok": True, "title": target["title"], "place": self._pandora_place_label(target["place"]),
                     "conditions": target["conditions"],
-                    "message": "已预设下一次新生成的潘多拉盒子。现有盒子的结果不会改变。"}
+                    "restart_required": True,
+                    "message": "已写入并校验潘多拉事件配置；目标事件已解除临时地图筛选，避免回退到潘多拉特卖。请完全重启游戏后再生成下一只盒子。"}
         except Exception as e:
             return {"ok": False, "error": "设置潘多拉事件失败：%s" % e}
 
     def restore_pandora_events(self):
-        """Restore the exact manifest saved before the temporary preset."""
+        """Restore the exact manifest saved before the temporary preset.
+
+        As with applying a preset, the running game keeps its startup copy;
+        restart CraftWorld after restoring to make the random table take
+        effect in a new session.
+        """
         try:
             state = self._pandora_override_state()
             if not state:
@@ -10381,7 +14756,8 @@ class Api:
             self._pandora_atomic_write(path, original)
             self._set_pandora_override_state(None)
             self._pandora_forced_key = ""
-            return {"ok": True, "count": 1, "message": "已恢复 pandora_events.xml 的原始随机权重"}
+            return {"ok": True, "count": 1, "restart_required": True,
+                    "message": "已恢复 pandora_events.xml 的原始随机权重。请重启游戏后生效。"}
         except Exception as e:
             return {"ok": False, "error": "恢复潘多拉随机权重失败：%s" % e}
 
@@ -10407,7 +14783,10 @@ class Api:
     def _pandora_valid_spawner(self, pm_obj, obj, vtable):
         """Validate the persistent PandoraChestSpawner before reading/writing it."""
         try:
-            if not self._pandora_pointer_ok(obj) or pm_obj.read_int(int(obj)) != int(vtable):
+            # Heap object pointers are at least 4-byte aligned.  A raw byte
+            # signature can otherwise match the vtable value inside unrelated
+            # data (the current process had one such odd address with timer 0).
+            if (int(obj) & 0x3) or not self._pandora_pointer_ok(obj) or pm_obj.read_int(int(obj)) != int(vtable):
                 return False
             timer = float(pm_obj.read_float(int(obj) + self.PANDORA_SPAWNER_TIMER_OFF))
             # The game's normal reset is about 1800 seconds.  The broad upper
@@ -10424,7 +14803,7 @@ class Api:
         both map-specific and present only while the chest behaviour is live.
         """
         try:
-            if not self._pandora_pointer_ok(obj) or pm_obj.read_int(int(obj)) != int(vtable):
+            if (int(obj) & 0x3) or not self._pandora_pointer_ok(obj) or pm_obj.read_int(int(obj)) != int(vtable):
                 return False
             length = int(pm_obj.read_int(int(obj) + self.PANDORA_CHEST_TALK_LEN_OFF))
             capacity = int(pm_obj.read_int(int(obj) + self.PANDORA_CHEST_TALK_CAP_OFF))
@@ -10550,8 +14929,13 @@ class Api:
             return None, error
         try:
             spawner = int(runtime.get("spawner") or 0)
-            timer = float(pm.read_float(spawner + self.PANDORA_SPAWNER_TIMER_OFF)) if spawner else None
-            if timer is not None and (not math.isfinite(timer) or timer < -1.0 or timer > 604800.0):
+            # A scan with zero/ambiguous spawners is not a valid runtime
+            # result.  Returning timer=None as ok=True makes JavaScript's
+            # Number(null) turn the readout into a misleading zero.
+            if not spawner or int(runtime.get("spawner_count") or 0) != 1:
+                return None, error or "未能唯一定位潘多拉生成器"
+            timer = float(pm.read_float(spawner + self.PANDORA_SPAWNER_TIMER_OFF))
+            if not math.isfinite(timer) or timer < -1.0 or timer > 604800.0:
                 return None, "潘多拉生成倒计时校验失败"
             return {
                 "exists": bool(runtime.get("chests")), "chest_count": len(runtime.get("chests", [])),
@@ -10592,6 +14976,7 @@ class Api:
                 "exists": status["exists"], "chest_count": status["chest_count"],
                 "timer": status["timer"], "timer_address": status["timer_address"],
                 "scan_ms": status["scan_ms"], "armed": armed,
+                "restart_required": bool(armed),
                 "can_preset": not status["exists"], "auto_restored": auto_restored,
                 "error": error or "",
             }
@@ -14920,7 +19305,9 @@ class Api:
             pending = (self.WAVE_PORTAL_END_REQUEST_OFF, self.LIBRARY_QUEUE_REQUEST_OFF,
                        self.MAGIC_QUEUE_REQUEST_OFF, self.RECIPE_QUEUE_REQUEST_OFF,
                        self.PERSONAL_SKILL_QUEUE_REQUEST_OFF, self.PET_DIRECT_QUEUE_REQUEST_OFF,
-                       self.PET_REMOVE_QUEUE_REQUEST_OFF)
+                       self.PET_REMOVE_QUEUE_REQUEST_OFF,
+                       self.STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF,
+                       self.STRUCTURE_DELETE_QUEUE_REQUEST_OFF)
             if int(pm.read_int(request) or 0) or any(int(pm.read_int(data + off) or 0) for off in pending):
                 return {"ok": False, "state": self.STATUS_FAILED, "error": "游戏主线程仍有其它请求，稍后再试"}
             pm.write_int(target_addr, int(house_address)); pm.write_int(result_addr, 0); pm.write_int(status_addr, 0); pm.write_int(request, 1)
@@ -15215,6 +19602,8 @@ class Api:
                 self.LIBRARY_QUEUE_REQUEST_OFF, self.MAGIC_QUEUE_REQUEST_OFF,
                 self.RECIPE_QUEUE_REQUEST_OFF, self.PERSONAL_SKILL_QUEUE_REQUEST_OFF,
                 self.PET_DIRECT_QUEUE_REQUEST_OFF, self.PET_LIMIT_QUERY_REQUEST_OFF,
+                self.STRUCTURE_TEMPLE_DELETE_QUEUE_REQUEST_OFF,
+                self.STRUCTURE_DELETE_QUEUE_REQUEST_OFF,
             )
             if int(pm.read_int(request) or 0) or any(int(pm.read_int(data + off) or 0) for off in pending_offsets):
                 return {"ok": False, "state": self.STATUS_FAILED,
@@ -17027,21 +21416,7 @@ class Api:
             )
         return merged, order
     def _tech_title(self, node_id):
-        locale = {}
-        candidates = [os.path.join(GAME_ROOT, "lang", "tech_locale.csv"),
-                      os.path.join(_tech_game_dir(), "lang", "tech_locale.csv")]
-        for path in candidates:
-            if not os.path.isfile(path):
-                continue
-            try:
-                with open(path, "r", encoding="utf-8-sig", newline="") as handle:
-                    for row in csv.DictReader(handle, delimiter=";"):
-                        key = str(row.get("key") or "").strip()
-                        if key:
-                            locale[key] = str(row.get("chinese") or "").strip() or key
-                break
-            except Exception:
-                continue
+        locale = _load_tech_locale()
         title = _clean_display_label(locale.get(node_id, ""))
         return title or node_id
 
@@ -19524,6 +23899,16 @@ WRITE_SAFETY_EXPERIMENTAL = '实验性：未完成完整验收'
 WRITE_SAFETY_DISABLED = '明确禁用'
 
 _WRITE_SAFETY_POLICY = {
+    'delete_structure_native': {
+        'state': WRITE_SAFETY_EXPERIMENTAL,
+        'feature': '结构原生隐藏探针',
+        'reason': '当前只验证了 UnderRoom 隐藏标志写入，尚未证明地图、碰撞、实体和存档对象会同步销毁；暂不允许从界面或旧脚本调用。',
+    },
+    'delete_sand_temple_entity_native': {
+        'state': WRITE_SAFETY_EXPERIMENTAL,
+        'feature': '沙漠神庙实体原生删除',
+        'reason': '已确认 TempleEntity 定位和游戏原生销毁入口，但尚未完成贴图、碰撞、方块与重进存档的完整实机验收。',
+    },
     'modify_item_qty': {
         'state': WRITE_SAFETY_VERIFIED,
         'feature': '单个已有物品数量',
@@ -19591,6 +23976,14 @@ _EXPERIMENTAL_WRITE_FEATURES = {
     'toggle_other_feature': '其它功能开关',
     'set_dwarf_name': '修改器显示名', 'modify_shop_entry': '商店条目运行时编辑',
     'spawn_native_dwarf': '原生矮人生成',
+    'spawn_special_entity': '特殊实体原生生成',
+    'spawn_special_entity_batch': '特殊实体原生批量生成',
+    'spawn_special_entities': '复制特殊实体原生生成',
+    'delete_special_entities_in_cells': '选区特殊实体原生删除',
+    'set_dwarf_population_cap': '矮人上限（本局锁定）',
+    'activate_structure_portal': '结构传送门原生激活',
+    'delete_structure_cell_native': '结构单格原生删除探针',
+    'delete_structure_complete': '结构完整删除（贴图、方块与材质）',
     'native_shop_purchase_one': '哥布林商店单包原生购买',
     'unlock_recipe': '配方直接解锁', 'set_tech_node_state': '科技树节点状态写入',
     'set_magic_value': '魔法参数运行时编辑',
@@ -19664,7 +24057,7 @@ _GAME_WRITE_ENDPOINTS = (
     "save_skills", "native_skill_upgrade", "apply_skill_targets", "heal_all", "full_sat", "save_dwarf", "save_dwarf_fields", "save_dwarf_personal_skills", "save_dwarf_personal_skill_slots", "save_dwarf_equipment", "apply_dwarf_equipment_preset", "apply_dwarf_training_preset", "modify_item_qty", "undo_operation",
     "apply_item_quick_settings",
     "pet_house", "pet_infinite", "pet_spawn", "spawn_direct_pet", "spawn_direct_pets", "remove_pet", "set_pet_limit_override", "clear_pet_limit_override", "toggle_other_feature",
-    "set_dwarf_name", "spawn_native_dwarf", "modify_shop_entry", "native_shop_purchase_one", "unlock_recipe", "set_tech_node_state", "set_magic_value", "cast_magic_collect", "cast_magic_collect_full_map", "save_recipe_grid", "sync_recipe_grid_to_local",
+    "set_dwarf_name", "spawn_native_dwarf", "spawn_special_entity", "spawn_special_entity_batch", "spawn_special_entities", "delete_special_entities_in_cells", "set_dwarf_population_cap", "activate_structure_portal", "delete_structure_cell_native", "delete_structure_native", "delete_sand_temple_entity_native", "delete_structure_complete", "place_structure", "modify_shop_entry", "native_shop_purchase_one", "unlock_recipe", "set_tech_node_state", "set_magic_value", "cast_magic_collect", "cast_magic_collect_full_map", "save_recipe_grid", "sync_recipe_grid_to_local",
     "toggle_lock", "toggle_gold_lock", "toggle_mana_lock", "toggle_xp_lock", "set_mana_max_lock", "xp_to_next",
     "confirm_offline_save_edit", "restore_save_snapshot",
 )
@@ -19678,7 +24071,7 @@ if __name__ == "__main__":
     api = Api()
     # A frameless window needs an explicit drag region.  easy_drag is kept off
     # so existing map, list and button interactions never turn into a drag.
-    window=webview.create_window("打造世界修改器 v1.0.1",html,width=1880,height=1060,min_size=(1280,760),frameless=True,easy_drag=False,js_api=api)
+    window=webview.create_window("打造世界修改器 v1.1",html,width=1880,height=1060,min_size=(1280,760),frameless=True,easy_drag=False,js_api=api)
     api._modifier_window = window
     api._window_is_maximized = False
     api._window_close_requested = False
@@ -19690,3 +24083,4 @@ if __name__ == "__main__":
 
     window.events.closing += _on_window_closing
     webview.start()
+

@@ -4,11 +4,11 @@
 
 它把资源、成长、生物、物品、魔法、地图与世界事件整理到同一个界面中；读取结果会明确区分未连接、当前存档无数据、版本不支持和定位失效，写入操作尽量经过对象校验、即时读回与游戏内确认。
 
-> 当前正式版本：**v1.0.1**。
+> 当前正式版本：**v1.1**。
 >
 > **务必使用 Steam 最新版，或 [1.11.009](https://steamdb.info/patchnotes/21203273/) 及以上的版本。使用更低版本时，部分功能或许仍然有效；务必提前备份存档，若发生游戏崩溃致使存档损坏，本项目概不负责。**
 
-[⬇️ 下载 v1.0.1（Windows EXE）](https://github.com/dszwamn/CraftWorldModifier/releases/download/v1.0.1/CraftWorldModifier.exe) · [校验 SHA-256](https://github.com/dszwamn/CraftWorldModifier/releases/download/v1.0.1/SHA256SUMS.txt) · [查看全部 Release](../../releases)
+[⬇️ 下载 v1.1（Windows EXE）](https://github.com/dszwamn/CraftWorldModifier/releases/download/v1.1/CraftWorldModifier.exe) · [校验 SHA-256](https://github.com/dszwamn/CraftWorldModifier/releases/download/v1.1/SHA256SUMS.txt) · [查看全部 Release](../../releases)
 
 ![打造世界修改器主界面](docs/images/main-panel.png)
 
