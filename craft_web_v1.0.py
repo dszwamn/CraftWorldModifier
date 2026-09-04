@@ -7054,7 +7054,7 @@ class Api:
                             cells.append({"col": chunk_c0 + local_col,
                                           "row": chunk_r0 + local_row})
             return cells
-        
+
     def _read_world_object_id(self, obj):
         """Read the identifier carried by an independent World object.
 
@@ -24083,4 +24083,3 @@ if __name__ == "__main__":
 
     window.events.closing += _on_window_closing
     webview.start()
-
